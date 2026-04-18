@@ -23,6 +23,29 @@
 //! observation. Probing over TLS 1.3 isolates "server supports this group"
 //! from "server supports this TLS version" — handshake failures here
 //! classify cleanly as group rejection.
+//!
+//! ## Future: extending probe coverage for un-shipped groups
+//! Groups aws-lc-rs does not expose (`MLKEM512`, `MLKEM1024`, `X448`,
+//! `secp521r1`, `secp384r1MLKEM1024`, `X25519Kyber768Draft00`) currently
+//! emit `not_probed`. Two paths, not mutually exclusive:
+//!
+//! **(a) Raw-ClientHello probing.** Hand-craft a TLS 1.3 ClientHello with
+//! the target codepoint in `key_share` plus a dummy payload — see
+//! `src/scanner/hello.rs` for the raw-socket pattern. Response classifies:
+//! ServerHello echoing the group → `supported: true`; `handshake_failure`
+//! alert → `supported: false`; `HelloRetryRequest` → `supported: false`.
+//! No crypto implementation needed; we probe intent, not completion.
+//!
+//! **(b) Alternate crypto backend.** Plug a second `CryptoProvider` (e.g.
+//! liboqs-sys / oqs-provider via a Rust binding, or a future
+//! `rustls-post-quantum` crate with broader coverage) and route groups
+//! aws-lc-rs doesn't ship through it. Keeps the probe path uniform with
+//! the current `SupportedKxGroup` abstraction — no byte-level code — at
+//! the cost of a larger build + another crypto implementation to trust.
+//!
+//! (a) is cheaper to ship and self-contained in this crate. (b) scales
+//! better long-term as new post-quantum parameter sets land. The
+//! `not_probed` reason string stays accurate either way.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -75,6 +98,17 @@ pub struct GroupProbeOutput {
 /// The Debug names here must match what `SupportedKxGroup::name()` Debug
 /// prints — the format is stable because rustls derives Debug via
 /// `enum_builder!` from exact identifier names.
+/// Public lookup so renderers can reunite a probe-result name with its
+/// codepoint. Returns `None` for unknown names — the scanner only ever
+/// emits names from this table, so downstream misses are programmer
+/// errors, not data errors.
+pub fn iana_code_for(name: &str) -> Option<u16> {
+    TARGET_GROUPS
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, code)| *code)
+}
+
 const TARGET_GROUPS: &[(&str, u16)] = &[
     // Classical elliptic curves
     ("X25519", 0x001d),

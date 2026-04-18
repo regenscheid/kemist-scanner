@@ -271,40 +271,15 @@ fn emit(args: &Args, results: &[kemist::ScanResult]) -> Result<()> {
 }
 
 fn emit_text(results: &[kemist::ScanResult]) -> Result<()> {
-    // PR 12 rewrites the text output against schema-v1. Until then, render
-    // a compact summary so interactive single-target scans stay usable.
     for (i, r) in results.iter().enumerate() {
         if i > 0 {
             println!();
             println!("{}", "─".repeat(60));
             println!();
         }
-        print_text_summary(r);
+        kemist::output::text::render(r);
     }
     Ok(())
-}
-
-fn print_text_summary(r: &kemist::ScanResult) {
-    use colored::Colorize;
-    println!("{}", "kemist scan".bold().cyan());
-    println!("  target:      {}", r.scan.target);
-    if let Some(ip) = &r.scan.resolved_ip {
-        println!("  resolved_ip: {ip}");
-    }
-    println!("  sni_sent:    {}", r.scan.sni_sent);
-    println!("  duration_ms: {}", r.scan.duration_ms);
-    if let Some(neg) = &r.tls.negotiated {
-        println!(
-            "  negotiated:  version={} suite={}",
-            neg.version,
-            neg.cipher_suite.as_deref().unwrap_or("-")
-        );
-    }
-    println!("  cert chain:  {}", r.certificates.chain_length);
-    println!("  errors:      {}", r.errors.len());
-    for e in &r.errors {
-        println!("    - [{}] {}", e.category.yellow(), e.context);
-    }
 }
 
 fn emit_ndjson(args: &Args, results: &[kemist::ScanResult]) -> Result<()> {

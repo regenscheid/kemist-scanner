@@ -7,6 +7,7 @@
 //! add a dedicated schema-aware text renderer.
 
 pub mod json;
+pub mod text;
 
 use clap::ValueEnum;
 
