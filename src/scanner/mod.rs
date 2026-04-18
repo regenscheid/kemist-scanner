@@ -1,4 +1,5 @@
 pub mod legacy;
+pub mod probe;
 pub mod runner;
 
 use std::net::SocketAddr;
@@ -7,7 +8,7 @@ use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio::time::timeout;
 use tokio_rustls::{rustls, TlsConnector};
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 use crate::model::cert::CertificateInfo;
 use crate::model::cipher::{
@@ -15,6 +16,7 @@ use crate::model::cipher::{
 };
 use crate::model::errors::ScannerError;
 use crate::model::protocol::{ProtocolSupport, TlsVersion};
+use crate::scanner::probe::{characterize_connection, NegotiatedState};
 
 // Scanner-module functions return `Result<T, ScannerError>` explicitly rather
 // than a type alias, so they don't collide with `rustls::Result<T, rustls::Error>`
@@ -69,6 +71,14 @@ pub struct ScanResults {
     pub tls_renegotiation: TlsRenegotiation,
     pub heartbeat_echoes_oversized_payload: Option<bool>,
     pub fallback_scsv_accepted: Option<bool>,
+    /// State from the characterization handshake (one successful connection).
+    /// Populated by PR 5; feeds `tls.negotiated` + several `tls.extensions`
+    /// fields in the schema.
+    #[serde(skip_serializing)]
+    pub negotiated: Option<NegotiatedState>,
+    /// ALPN protocols kemist proposed on the characterization handshake.
+    #[serde(skip_serializing)]
+    pub alpn_offered: Vec<String>,
     /// Probe-level failures accumulated during the scan. Never aborts scan()
     /// even if every entry errors — downstream consumers read this alongside
     /// the partial observations.
@@ -106,6 +116,8 @@ impl SslScanner {
             },
             heartbeat_echoes_oversized_payload: None,
             fallback_scsv_accepted: None,
+            negotiated: None,
+            alpn_offered: vec![],
             scan_errors: vec![],
         };
 
@@ -148,9 +160,27 @@ impl SslScanner {
         }
         pause().await;
 
-        match self.get_certificate_chain().await {
-            Ok(certs) => results.certificate_chain = certs,
-            Err(e) => results.scan_errors.push(e),
+        // Single characterization handshake captures cert chain AND
+        // negotiated state (version/suite/group/ALPN + verifier-side signals
+        // like OCSP + signature scheme).
+        match characterize_connection(
+            self.config.target,
+            &self.config.hostname,
+            self.config.timeout,
+            self.config.timeout,
+        )
+        .await
+        {
+            Ok(out) => {
+                results.certificate_chain = out.certificates;
+                results.negotiated = out.negotiated;
+                results.alpn_offered = out.alpn_offered;
+            }
+            Err(e) => {
+                // If the verifier fired before the handshake aborted, keep
+                // partial state; otherwise propagate the error.
+                results.scan_errors.push(e);
+            }
         }
 
         if let Some(preferred) = results.cipher_suites.iter().find(|c| c.preferred) {
@@ -272,37 +302,6 @@ impl SslScanner {
         }
 
         Ok(results)
-    }
-
-    async fn get_certificate_chain(&self) -> Result<Vec<CertificateInfo>, ScannerError> {
-        let collector = Arc::new(CertificateCollector::new());
-        let config = rustls::ClientConfig::builder()
-            .dangerous()
-            .with_custom_certificate_verifier(collector.clone())
-            .with_no_client_auth();
-
-        let connector = TlsConnector::from(Arc::new(config));
-
-        match self.connect_with_timeout(connector).await {
-            Ok(_) => Ok(collector.get_certificates()),
-            Err(e) => {
-                // Partial success: if the verifier fired before handshake aborted,
-                // return whatever was collected. Otherwise propagate the error up
-                // to scan() where it's recorded in scan_errors.
-                let partial = collector.get_certificates();
-                if partial.is_empty() {
-                    warn!("certificate chain unavailable: {}", e);
-                    Err(e)
-                } else {
-                    warn!(
-                        "certificate chain partial ({} cert(s)): {}",
-                        partial.len(),
-                        e
-                    );
-                    Ok(partial)
-                }
-            }
-        }
     }
 
     async fn connect_with_timeout(&self, connector: TlsConnector) -> Result<(), ScannerError> {
@@ -614,82 +613,6 @@ impl rustls::client::danger::ServerCertVerifier for AcceptAllVerifier {
         _ocsp_response: &[u8],
         _now: rustls_pki_types::UnixTime,
     ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
-        Ok(rustls::client::danger::ServerCertVerified::assertion())
-    }
-
-    fn verify_tls12_signature(
-        &self,
-        _message: &[u8],
-        _cert: &rustls_pki_types::CertificateDer<'_>,
-        _dss: &rustls::DigitallySignedStruct,
-    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
-    }
-
-    fn verify_tls13_signature(
-        &self,
-        _message: &[u8],
-        _cert: &rustls_pki_types::CertificateDer<'_>,
-        _dss: &rustls::DigitallySignedStruct,
-    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
-    }
-
-    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        vec![
-            rustls::SignatureScheme::RSA_PKCS1_SHA256,
-            rustls::SignatureScheme::RSA_PKCS1_SHA384,
-            rustls::SignatureScheme::RSA_PKCS1_SHA512,
-            rustls::SignatureScheme::ECDSA_NISTP256_SHA256,
-            rustls::SignatureScheme::ECDSA_NISTP384_SHA384,
-            rustls::SignatureScheme::RSA_PSS_SHA256,
-            rustls::SignatureScheme::RSA_PSS_SHA384,
-            rustls::SignatureScheme::RSA_PSS_SHA512,
-            rustls::SignatureScheme::ED25519,
-        ]
-    }
-}
-
-/// Certificate verifier that collects certificates
-#[derive(Debug)]
-struct CertificateCollector {
-    certificates: std::sync::Mutex<Vec<Vec<u8>>>,
-}
-
-impl CertificateCollector {
-    fn new() -> Self {
-        Self {
-            certificates: std::sync::Mutex::new(Vec::new()),
-        }
-    }
-
-    fn get_certificates(&self) -> Vec<CertificateInfo> {
-        let certs = self.certificates.lock().unwrap();
-        certs
-            .iter()
-            .filter_map(|cert_der| CertificateInfo::from_der(cert_der).ok())
-            .collect()
-    }
-}
-
-impl rustls::client::danger::ServerCertVerifier for CertificateCollector {
-    fn verify_server_cert(
-        &self,
-        end_entity: &rustls_pki_types::CertificateDer<'_>,
-        intermediates: &[rustls_pki_types::CertificateDer<'_>],
-        _server_name: &rustls_pki_types::ServerName<'_>,
-        _ocsp_response: &[u8],
-        _now: rustls_pki_types::UnixTime,
-    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
-        // Store certificates for later retrieval
-        if let Ok(mut certs) = self.certificates.lock() {
-            // Store end entity certificate
-            certs.push(end_entity.to_vec());
-            // Store intermediate certificates
-            for intermediate in intermediates {
-                certs.push(intermediate.to_vec());
-            }
-        }
         Ok(rustls::client::danger::ServerCertVerified::assertion())
     }
 

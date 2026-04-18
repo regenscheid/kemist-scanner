@@ -79,6 +79,8 @@ fn fixture_results() -> ScanResults {
         },
         heartbeat_echoes_oversized_payload: Some(false),
         fallback_scsv_accepted: Some(true),
+        negotiated: None,
+        alpn_offered: vec![],
         scan_errors: vec![],
     }
 }

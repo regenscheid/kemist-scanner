@@ -95,7 +95,7 @@ fn build_capabilities(ctx: &JsonEmitContext) -> Capabilities {
 fn build_tls(results: &ScanResults) -> Tls {
     Tls {
         versions_offered: build_versions_offered(&results.protocol_support),
-        negotiated: build_negotiated_placeholder(results),
+        negotiated: build_negotiated_from_state(results),
         cipher_suites: build_cipher_suites(results),
         groups: build_groups(&results.key_exchange_groups),
         extensions: build_extensions(results),
@@ -145,9 +145,23 @@ fn build_versions_offered(
     }
 }
 
-fn build_negotiated_placeholder(results: &ScanResults) -> Option<TlsNegotiated> {
-    // Until PR 5 surfaces rustls connection state, the only field we can fill
-    // is `cipher_suite` from the "preferred" pick — a best-effort hint.
+fn build_negotiated_from_state(results: &ScanResults) -> Option<TlsNegotiated> {
+    // Populated by PR 5: the characterization handshake captures what
+    // actually got negotiated. Falls back to the old "preferred" heuristic
+    // only when characterization failed (e.g. connection refused).
+    if let Some(n) = &results.negotiated {
+        let version = n
+            .version
+            .map(|v| v.as_str().to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+        return Some(TlsNegotiated {
+            version,
+            cipher_suite: n.cipher_suite_name.clone(),
+            group: n.kx_group_name.clone(),
+            signature_scheme: n.signature_scheme.clone(),
+            alpn: n.alpn_negotiated.clone(),
+        });
+    }
     results.preferred_cipher.as_ref().map(|c| TlsNegotiated {
         version: c.protocol_version.as_str().to_string(),
         cipher_suite: Some(c.iana_name.clone()),
@@ -191,24 +205,53 @@ fn build_groups(groups: &[crate::scanner::KeyExchangeGroup]) -> BTreeMap<String,
 }
 
 fn build_extensions(results: &ScanResults) -> TlsExtensions {
-    let reneg = &results.tls_renegotiation;
-    TlsExtensions {
-        ems: ObservationBool::not_probed("pending_pr_5_connection_state"),
-        secure_renegotiation: match reneg.secure_renegotiation {
-            Some(v) => ObservationBool::probe(v),
-            None => ObservationBool::not_probed("no_modern_tls_connection_established"),
+    // TLS 1.3 doesn't carry EMS or RFC 5746 renegotiation_info — those are
+    // TLS 1.2 concepts. When the characterization handshake negotiated 1.3,
+    // emit `not_applicable` so downstream rule engines don't misread
+    // `null` as "probed and absent".
+    let tls13_negotiated = matches!(
+        results.negotiated.as_ref().and_then(|n| n.version),
+        Some(TlsVersion::Tls13)
+    );
+
+    let ems = if tls13_negotiated {
+        ObservationBool::not_applicable("tls13_has_no_ems_extension")
+    } else {
+        ObservationBool::not_probed("rustls_does_not_expose_ems_flag")
+    };
+
+    let secure_renegotiation = if tls13_negotiated {
+        ObservationBool::not_applicable("tls13_has_no_renegotiation")
+    } else {
+        // rustls enforces RFC 5746 internally but does not surface whether
+        // the server sent the extension. PR 9's byte parsing will fill this.
+        ObservationBool::not_probed("rustls_does_not_expose_renegotiation_info_flag")
+    };
+
+    let ocsp_stapling = match &results.negotiated {
+        Some(n) => OcspStapling {
+            stapled: Some(n.ocsp_stapled),
+            method: Method::ConnectionState,
+            reason: None,
+            response_length: n.ocsp_response_len as u64,
         },
-        ocsp_stapling: OcspStapling {
+        None => OcspStapling {
             stapled: None,
             method: Method::NotProbed,
-            reason: Some("pending_pr_5_connection_state".to_string()),
+            reason: Some("characterization_handshake_failed".to_string()),
             response_length: 0,
         },
+    };
+
+    TlsExtensions {
+        ems,
+        secure_renegotiation,
+        ocsp_stapling,
         sct: SctObservation {
             delivery_paths: Vec::new(),
             count: 0,
         },
-        alpn_offered: Vec::new(),
+        alpn_offered: results.alpn_offered.clone(),
         encrypt_then_mac: ObservationBool::not_probed("pending_pr_9_byte_parsing"),
         heartbeat_present: ObservationBool::not_probed("pending_pr_9_byte_parsing"),
         heartbeat_echoes_oversized_payload: match results.heartbeat_echoes_oversized_payload {

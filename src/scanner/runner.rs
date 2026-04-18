@@ -300,6 +300,8 @@ fn empty_scan_results(target: &Target, addr: SocketAddr) -> crate::scanner::Scan
         },
         heartbeat_echoes_oversized_payload: None,
         fallback_scsv_accepted: None,
+        negotiated: None,
+        alpn_offered: vec![],
         scan_errors: vec![],
     }
 }
