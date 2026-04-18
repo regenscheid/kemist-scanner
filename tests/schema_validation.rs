@@ -6,6 +6,7 @@
 
 use chrono::{TimeZone, Utc};
 use kemist::model::cipher::{CipherInfo, CipherSuiteResult};
+use kemist::model::errors::ScannerError;
 use kemist::model::protocol::{ProtocolSupport, TlsVersion};
 use kemist::output::json::{build_scan_result, JsonEmitContext};
 use kemist::scanner::{KeyExchangeGroup, ScanResults, TlsRenegotiation};
@@ -78,6 +79,7 @@ fn fixture_results() -> ScanResults {
         },
         heartbeat_echoes_oversized_payload: Some(false),
         fallback_scsv_accepted: Some(true),
+        scan_errors: vec![],
     }
 }
 
@@ -136,4 +138,52 @@ fn duration_ms_computed_from_bookends() {
     let ctx = fixture_ctx();
     let record = build_scan_result(&results, &ctx);
     assert_eq!(record.scan.duration_ms, 8_000);
+}
+
+#[test]
+fn scan_errors_flow_through_to_output_record() {
+    let mut results = fixture_results();
+    results.scan_errors.push(ScannerError::connection_refused(
+        "TCP connect refused by peer",
+    ));
+    results.scan_errors.push(ScannerError::tls_alert(
+        "handshake_failure",
+        "peer rejected ClientHello",
+    ));
+
+    let ctx = fixture_ctx();
+    let record = build_scan_result(&results, &ctx);
+
+    assert_eq!(record.errors.len(), 2);
+    assert_eq!(record.errors[0].category, "connection_refused");
+    assert_eq!(record.errors[1].category, "tls_alert_handshake_failure");
+
+    // Record remains complete-shaped + schema-valid despite errors.
+    let record_value = serde_json::to_value(&record).expect("serialize");
+    let schema_value = load_schema();
+    let validator = jsonschema::validator_for(&schema_value).expect("schema compiles");
+    let errs: Vec<_> = validator.iter_errors(&record_value).collect();
+    assert!(
+        errs.is_empty(),
+        "partial-failure record failed schema validation: {:?}",
+        errs.iter()
+            .map(|e| format!("{}: {}", e.instance_path, e))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn error_category_strings_are_canonical() {
+    assert_eq!(
+        ScannerError::dns_resolution_failed("x").category,
+        "dns_resolution_failed"
+    );
+    assert_eq!(
+        ScannerError::handshake_timeout("x").category,
+        "handshake_timeout"
+    );
+    assert_eq!(
+        ScannerError::tls_alert("bad_certificate", "x").category,
+        "tls_alert_bad_certificate"
+    );
 }

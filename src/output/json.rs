@@ -5,11 +5,11 @@
 //! emits it. This conversion layer is the authoritative mapping from "what the
 //! scanner measured" to "what the JSON contract says."
 
-use anyhow::Result;
 use chrono::{DateTime, Utc};
 use std::collections::BTreeMap;
 
 use crate::model::cert::CertificateInfo;
+use crate::model::errors::ScannerError;
 use crate::model::protocol::TlsVersion;
 use crate::model::scan_result::{
     Capabilities, CertificateFacts, Certificates, CipherSuiteEntry, DowngradeSignaling,
@@ -59,7 +59,7 @@ pub fn build_scan_result(results: &ScanResults, ctx: &JsonEmitContext) -> ScanRe
         validation: build_validation_placeholder(),
         http: None,
         raw_handshakes: None,
-        errors: Vec::new(),
+        errors: results.scan_errors.clone(),
     }
 }
 
@@ -309,19 +309,23 @@ fn parse_dependency_versions() -> (String, String, String) {
     (rustls_version, "bundled".to_string(), native_tls_version)
 }
 
-pub fn print_json(results: &ScanResults, ctx: &JsonEmitContext) -> Result<()> {
+pub fn print_json(results: &ScanResults, ctx: &JsonEmitContext) -> Result<(), ScannerError> {
     let scan_result = build_scan_result(results, ctx);
     println!("{}", serde_json::to_string(&scan_result)?);
     Ok(())
 }
 
-pub fn print_json_pretty(results: &ScanResults, ctx: &JsonEmitContext) -> Result<()> {
+pub fn print_json_pretty(results: &ScanResults, ctx: &JsonEmitContext) -> Result<(), ScannerError> {
     let scan_result = build_scan_result(results, ctx);
     println!("{}", serde_json::to_string_pretty(&scan_result)?);
     Ok(())
 }
 
-pub fn write_json(results: &ScanResults, ctx: &JsonEmitContext, path: &str) -> Result<()> {
+pub fn write_json(
+    results: &ScanResults,
+    ctx: &JsonEmitContext,
+    path: &str,
+) -> Result<(), ScannerError> {
     use std::io::Write;
     let scan_result = build_scan_result(results, ctx);
     let json = serde_json::to_string_pretty(&scan_result)?;

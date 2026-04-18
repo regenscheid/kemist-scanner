@@ -1,6 +1,5 @@
 pub mod legacy;
 
-use anyhow::{Context, Result};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -13,7 +12,12 @@ use crate::model::cert::CertificateInfo;
 use crate::model::cipher::{
     get_rustls_cipher_suites, rustls_to_cipher_info, CipherInfo, CipherSuiteResult,
 };
+use crate::model::errors::ScannerError;
 use crate::model::protocol::{ProtocolSupport, TlsVersion};
+
+// Scanner-module functions return `Result<T, ScannerError>` explicitly rather
+// than a type alias, so they don't collide with `rustls::Result<T, rustls::Error>`
+// used by custom ServerCertVerifier impls below.
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct KeyExchangeGroup {
@@ -46,7 +50,7 @@ pub struct SslScanner {
     config: ScanConfig,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct ScanResults {
     pub target: String,
     pub hostname: String,
@@ -60,6 +64,10 @@ pub struct ScanResults {
     pub tls_renegotiation: TlsRenegotiation,
     pub heartbeat_echoes_oversized_payload: Option<bool>,
     pub fallback_scsv_accepted: Option<bool>,
+    /// Probe-level failures accumulated during the scan. Never aborts scan()
+    /// even if every entry errors — downstream consumers read this alongside
+    /// the partial observations.
+    pub scan_errors: Vec<ScannerError>,
 }
 
 impl SslScanner {
@@ -67,7 +75,10 @@ impl SslScanner {
         Self { config }
     }
 
-    pub async fn scan(&self) -> Result<ScanResults> {
+    /// Infallible scan. Individual probe failures are accumulated into
+    /// `ScanResults.scan_errors`; the scan itself never aborts. Callers
+    /// always receive a complete-shaped result.
+    pub async fn scan(&self) -> ScanResults {
         info!(
             "Starting SSL/TLS scan of {}:{}",
             self.config.hostname,
@@ -90,42 +101,47 @@ impl SslScanner {
             },
             heartbeat_echoes_oversized_payload: None,
             fallback_scsv_accepted: None,
+            scan_errors: vec![],
         };
 
-        // Test protocol support
-        results.protocol_support = self.test_protocol_support().await?;
+        // Every probe feeds into `results` on success and `scan_errors` on
+        // failure. No early returns — the scan completes regardless.
+        match self.test_protocol_support().await {
+            Ok(v) => results.protocol_support = v,
+            Err(e) => results.scan_errors.push(e),
+        }
 
-        // Test TLS Fallback SCSV
         results.fallback_scsv_accepted = self.test_fallback_scsv().await;
 
-        // Test TLS renegotiation
         results.tls_renegotiation = self.test_tls_renegotiation().await;
 
-        // Test Heartbleed vulnerability
-        results.heartbeat_echoes_oversized_payload = self.test_heartbleed().await;
+        results.heartbeat_echoes_oversized_payload = self.test_heartbleed(&mut results).await;
 
-        // Test cipher suites (if not disabled)
         if !self.config.no_ciphersuites {
-            results.cipher_suites = self.test_cipher_suites().await?;
+            match self.test_cipher_suites().await {
+                Ok(v) => results.cipher_suites = v,
+                Err(e) => results.scan_errors.push(e),
+            }
         }
 
-        // Test key exchange groups
-        results.key_exchange_groups = self.test_key_exchange_groups().await?;
-
-        // Get certificate chain
-        if let Ok(certs) = self.get_certificate_chain().await {
-            results.certificate_chain = certs;
+        match self.test_key_exchange_groups().await {
+            Ok(v) => results.key_exchange_groups = v,
+            Err(e) => results.scan_errors.push(e),
         }
 
-        // Determine preferred cipher
+        match self.get_certificate_chain().await {
+            Ok(certs) => results.certificate_chain = certs,
+            Err(e) => results.scan_errors.push(e),
+        }
+
         if let Some(preferred) = results.cipher_suites.iter().find(|c| c.preferred) {
             results.preferred_cipher = Some(preferred.cipher.clone());
         }
 
-        Ok(results)
+        results
     }
 
-    async fn test_protocol_support(&self) -> Result<Vec<ProtocolSupport>> {
+    async fn test_protocol_support(&self) -> Result<Vec<ProtocolSupport>, ScannerError> {
         let versions = if let Some(version) = self.config.tls_version {
             vec![version]
         } else {
@@ -200,7 +216,7 @@ impl SslScanner {
         }
     }
 
-    async fn test_cipher_suites(&self) -> Result<Vec<CipherSuiteResult>> {
+    async fn test_cipher_suites(&self) -> Result<Vec<CipherSuiteResult>, ScannerError> {
         let mut results = Vec::new();
 
         // Get all available cipher suites
@@ -239,7 +255,7 @@ impl SslScanner {
         Ok(results)
     }
 
-    async fn get_certificate_chain(&self) -> Result<Vec<CertificateInfo>> {
+    async fn get_certificate_chain(&self) -> Result<Vec<CertificateInfo>, ScannerError> {
         let collector = Arc::new(CertificateCollector::new());
         let config = rustls::ClientConfig::builder()
             .dangerous()
@@ -249,37 +265,49 @@ impl SslScanner {
         let connector = TlsConnector::from(Arc::new(config));
 
         match self.connect_with_timeout(connector).await {
-            Ok(_) => {
-                // Extract certificates from the collector
-                Ok(collector.get_certificates())
-            }
+            Ok(_) => Ok(collector.get_certificates()),
             Err(e) => {
-                warn!("Failed to get certificate chain: {}", e);
-                // Still try to get any certificates that were collected during the failed handshake
-                Ok(collector.get_certificates())
+                // Partial success: if the verifier fired before handshake aborted,
+                // return whatever was collected. Otherwise propagate the error up
+                // to scan() where it's recorded in scan_errors.
+                let partial = collector.get_certificates();
+                if partial.is_empty() {
+                    warn!("certificate chain unavailable: {}", e);
+                    Err(e)
+                } else {
+                    warn!(
+                        "certificate chain partial ({} cert(s)): {}",
+                        partial.len(),
+                        e
+                    );
+                    Ok(partial)
+                }
             }
         }
     }
 
-    async fn connect_with_timeout(&self, connector: TlsConnector) -> Result<()> {
-        let tcp_stream = timeout(self.config.timeout, TcpStream::connect(&self.config.target))
-            .await
-            .context("Connection timeout")?
-            .context("Failed to establish TCP connection")?;
+    async fn connect_with_timeout(&self, connector: TlsConnector) -> Result<(), ScannerError> {
+        let tcp_stream =
+            match timeout(self.config.timeout, TcpStream::connect(&self.config.target)).await {
+                Err(_) => return Err(ScannerError::connection_timeout("tcp connect")),
+                Ok(Err(e)) => return Err(ScannerError::from_io("tcp connect", e)),
+                Ok(Ok(s)) => s,
+            };
 
         let domain = rustls_pki_types::ServerName::try_from(self.config.hostname.as_str())
-            .map_err(|_| anyhow::anyhow!("Invalid hostname"))?
+            .map_err(|_| {
+                ScannerError::internal(format!("invalid SNI hostname: {}", self.config.hostname))
+            })?
             .to_owned();
 
-        let _tls_stream = timeout(self.config.timeout, connector.connect(domain, tcp_stream))
-            .await
-            .context("TLS handshake timeout")?
-            .context("TLS handshake failed")?;
-
-        Ok(())
+        match timeout(self.config.timeout, connector.connect(domain, tcp_stream)).await {
+            Err(_) => Err(ScannerError::handshake_timeout("rustls handshake")),
+            Ok(Err(e)) => Err(ScannerError::from_io("tls handshake", e)),
+            Ok(Ok(_)) => Ok(()),
+        }
     }
 
-    async fn test_key_exchange_groups(&self) -> Result<Vec<KeyExchangeGroup>> {
+    async fn test_key_exchange_groups(&self) -> Result<Vec<KeyExchangeGroup>, ScannerError> {
         let mut groups = Vec::new();
 
         // Define known key exchange groups with their properties
@@ -418,40 +446,41 @@ impl SslScanner {
         }
     }
 
-    async fn test_heartbleed(&self) -> Option<bool> {
-        // Test for Heartbleed vulnerability (CVE-2014-0160)
-        // This requires sending a malformed heartbeat request and checking for over-read
+    async fn test_heartbleed(&self, results: &mut ScanResults) -> Option<bool> {
+        // Observation: does the server echo an oversized heartbeat payload?
+        // Raw wire signal — downstream rule engines interpret its meaning.
 
-        info!("Testing Heartbleed vulnerability (CVE-2014-0160)");
+        info!("Probing heartbeat oversized-payload echo");
 
-        // Only test on TLS 1.2 and below, as TLS 1.3 doesn't support heartbeat
+        // Only probe on TLS 1.2 and below, as TLS 1.3 doesn't support heartbeat
         let supports_tls12 = self.check_tls_version_support(TlsVersion::Tls12).await;
         let supports_tls11 = self.check_tls_version_support(TlsVersion::Tls11).await;
         let supports_tls10 = self.check_tls_version_support(TlsVersion::Tls10).await;
 
         if !supports_tls12 && !supports_tls11 && !supports_tls10 {
-            // Server only supports TLS 1.3 or newer, not vulnerable to Heartbleed
+            // Not applicable — no pre-1.3 protocol available to heartbeat over
             return Some(false);
         }
 
-        // Attempt to perform Heartbleed test
         match self.perform_heartbleed_test().await {
             Ok(vulnerable) => Some(vulnerable),
             Err(e) => {
-                debug!("Heartbleed test failed: {}", e);
-                None // Unable to determine
+                debug!("heartbeat probe error: {}", e);
+                results.scan_errors.push(e);
+                None
             }
         }
     }
 
-    async fn perform_heartbleed_test(&self) -> Result<bool> {
+    async fn perform_heartbleed_test(&self) -> Result<bool, ScannerError> {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-        // Connect to the target
-        let mut stream = timeout(self.config.timeout, TcpStream::connect(&self.config.target))
-            .await
-            .context("Connection timeout")?
-            .context("Failed to establish TCP connection")?;
+        let mut stream =
+            match timeout(self.config.timeout, TcpStream::connect(&self.config.target)).await {
+                Err(_) => return Err(ScannerError::connection_timeout("heartbleed tcp connect")),
+                Ok(Err(e)) => return Err(ScannerError::from_io("heartbleed tcp connect", e)),
+                Ok(Ok(s)) => s,
+            };
 
         // Perform basic TLS handshake first to establish encryption
         // We need to get to a state where we can send heartbeat messages

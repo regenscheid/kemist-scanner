@@ -10,6 +10,8 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 use std::collections::BTreeMap;
 
+pub use crate::model::errors::ScannerError;
+
 pub const SCHEMA_VERSION: &str = "1.0.0";
 
 /// Top-level scan record. Every emitted JSON document is a `ScanResult`.
@@ -26,7 +28,7 @@ pub struct ScanResult {
     pub http: Option<Http>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub raw_handshakes: Option<serde_json::Value>,
-    pub errors: Vec<ScanError>,
+    pub errors: Vec<ScannerError>,
 }
 
 /// Identity of the tool that produced this record.
@@ -361,13 +363,4 @@ pub struct SecurityTxt {
     pub content_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub body: Option<String>,
-}
-
-/// PR 3 will replace this with a typed `ScannerError` enum, but the serialized
-/// shape `{category, context, timestamp}` is fixed at schema v1.
-#[derive(Serialize, Debug, Clone)]
-pub struct ScanError {
-    pub category: String,
-    pub context: String,
-    pub timestamp: DateTime<Utc>,
 }

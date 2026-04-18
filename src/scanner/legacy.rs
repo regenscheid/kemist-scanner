@@ -1,5 +1,4 @@
 // src/scanner/legacy.rs
-use anyhow::{Context, Result};
 use std::net::SocketAddr;
 use std::time::Duration;
 use tokio::net::TcpStream;
@@ -8,6 +7,7 @@ use tokio_native_tls::{native_tls, TlsConnector};
 use tracing::info;
 
 use crate::model::cipher::CipherInfo;
+use crate::model::errors::ScannerError;
 use crate::model::protocol::{ProtocolSupport, TlsVersion};
 
 pub struct LegacyScanner {
@@ -42,15 +42,16 @@ impl LegacyScanner {
         }
     }
 
-    async fn connect_with_version(&self, version: TlsVersion) -> Result<()> {
+    async fn connect_with_version(&self, version: TlsVersion) -> Result<(), ScannerError> {
         // Create native-tls configuration
         let mut builder = native_tls::TlsConnector::builder();
 
         // Set protocol version
         match version {
             TlsVersion::Ssl2 => {
-                // SSLv2 is usually not supported by modern libraries
-                return Err(anyhow::anyhow!("SSLv2 not supported by native-tls"));
+                return Err(ScannerError::internal(
+                    "SSLv2 not supported by native-tls; use raw test_sslv2()",
+                ));
             }
             TlsVersion::Ssl3 => {
                 builder.min_protocol_version(Some(native_tls::Protocol::Sslv3));
@@ -64,33 +65,40 @@ impl LegacyScanner {
                 builder.min_protocol_version(Some(native_tls::Protocol::Tlsv11));
                 builder.max_protocol_version(Some(native_tls::Protocol::Tlsv11));
             }
-            _ => return Err(anyhow::anyhow!("Use rustls for TLS 1.2+")),
+            _ => {
+                return Err(ScannerError::internal(
+                    "legacy.rs handles SSLv3/TLSv1.0/TLSv1.1 only; modern versions go through rustls",
+                ));
+            }
         }
 
         // Dangerous: accept all certificates (for scanning only)
         builder.danger_accept_invalid_certs(true);
         builder.danger_accept_invalid_hostnames(true);
 
-        let connector = builder.build()?;
+        let connector = builder
+            .build()
+            .map_err(|e| ScannerError::internal(format!("native-tls connector build: {e}")))?;
         let connector = TlsConnector::from(connector);
 
-        // Establish TCP connection
-        let tcp_stream = timeout(self.timeout, TcpStream::connect(&self.target))
-            .await
-            .context("Connection timeout")?
-            .context("Failed to establish TCP connection")?;
+        let tcp_stream = match timeout(self.timeout, TcpStream::connect(&self.target)).await {
+            Err(_) => return Err(ScannerError::connection_timeout("legacy tcp connect")),
+            Ok(Err(e)) => return Err(ScannerError::from_io("legacy tcp connect", e)),
+            Ok(Ok(s)) => s,
+        };
 
-        // TLS handshake
-        let _tls_stream = timeout(self.timeout, connector.connect(&self.hostname, tcp_stream))
-            .await
-            .context("TLS handshake timeout")?
-            .context("TLS handshake failed")?;
-
-        Ok(())
+        match timeout(self.timeout, connector.connect(&self.hostname, tcp_stream)).await {
+            Err(_) => Err(ScannerError::handshake_timeout("legacy tls handshake")),
+            Ok(Err(e)) => Err(ScannerError::internal(format!("native-tls handshake: {e}"))),
+            Ok(Ok(_)) => Ok(()),
+        }
     }
 
     #[allow(dead_code)]
-    pub async fn test_legacy_ciphers(&self, version: TlsVersion) -> Result<Vec<CipherInfo>> {
+    pub async fn test_legacy_ciphers(
+        &self,
+        version: TlsVersion,
+    ) -> Result<Vec<CipherInfo>, ScannerError> {
         // Enumerate cipher suites through OpenSSL
         // This requires lower-level implementation
         let ciphers = match version {
@@ -136,7 +144,11 @@ impl LegacyScanner {
     }
 
     #[allow(dead_code)]
-    async fn test_specific_cipher(&self, _version: TlsVersion, _cipher: &str) -> Result<bool> {
+    async fn test_specific_cipher(
+        &self,
+        _version: TlsVersion,
+        _cipher: &str,
+    ) -> Result<bool, ScannerError> {
         // This requires more fine-grained OpenSSL control
         // Temporarily return true
         Ok(true)

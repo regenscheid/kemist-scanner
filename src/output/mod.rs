@@ -1,9 +1,9 @@
 pub mod json;
 
-use anyhow::Result;
 use clap::ValueEnum;
 use colored::*;
 
+use crate::model::errors::ScannerError;
 use crate::model::protocol::TlsVersion;
 use crate::scanner::ScanResults;
 
@@ -373,7 +373,7 @@ pub fn print_json_results(
     results: &ScanResults,
     ctx: &JsonEmitContext,
     pretty: bool,
-) -> Result<()> {
+) -> Result<(), ScannerError> {
     if pretty {
         json::print_json_pretty(results, ctx)
     } else {
@@ -386,7 +386,7 @@ pub fn save_results(
     ctx: &JsonEmitContext,
     path: &str,
     format: OutputFormat,
-) -> Result<()> {
+) -> Result<(), ScannerError> {
     match format {
         OutputFormat::Text => {
             // Text is TTY-only for now; dump the canonical JSON to disk instead

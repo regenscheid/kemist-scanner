@@ -182,7 +182,7 @@ async fn main() -> Result<()> {
     // Perform scan (with wall-clock bookends for schema v1 scan.duration_ms)
     let scanner = SslScanner::new(config);
     let started_at = chrono::Utc::now();
-    let results = scanner.scan().await?;
+    let results = scanner.scan().await;
     let completed_at = chrono::Utc::now();
 
     let emit_ctx = output::JsonEmitContext {
