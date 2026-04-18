@@ -29,7 +29,7 @@ clap = { version = "4", features = ["derive", "color", "cargo"] }
 colored = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-quick-xml = { version = "0.31", features = ["serialize"] }
+serde_yaml = "0.9"
 
 # Certificate parsing
 x509-parser = "0.16"
@@ -63,6 +63,7 @@ chrono = { version = "0.4", features = ["serde"] }
 [dev-dependencies]
 tokio-test = "0.4"
 pretty_assertions = "1"
+jsonschema = { version = "0.33", default-features = false }
 
 [profile.release]
 lto = true

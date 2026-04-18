@@ -5,10 +5,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 use tracing::info;
 
-mod model;
-mod output;
-mod scanner;
-
+use kemist::{model, output, scanner};
 use output::OutputFormat;
 use scanner::SslScanner;
 
@@ -68,6 +65,12 @@ struct Args {
     /// Enable verbose logging
     #[arg(short, long, action = clap::ArgAction::Count)]
     verbose: u8,
+}
+
+fn enabled_cargo_features() -> Vec<String> {
+    // Hardcoded for PR 2 — PR 13 replaces with build-time feature inspection.
+    // Today kemist has no cargo features defined.
+    Vec::new()
 }
 
 fn parse_tls_version(s: &str) -> Result<model::protocol::TlsVersion, String> {
@@ -163,10 +166,12 @@ async fn main() -> Result<()> {
         println!();
     }
 
+    let sni_sent = args.sni_name.clone().unwrap_or_else(|| hostname.clone());
+
     // Create scanner configuration
     let config = scanner::ScanConfig {
         target: target_addr,
-        hostname: args.sni_name.unwrap_or_else(|| hostname.clone()),
+        hostname: sni_sent.clone(),
         timeout: Duration::from_secs(args.timeout),
         _show_certificate: args.show_certificate,
         _show_failed: args.show_failed,
@@ -174,20 +179,33 @@ async fn main() -> Result<()> {
         tls_version: args.tls_version,
     };
 
-    // Perform scan
+    // Perform scan (with wall-clock bookends for schema v1 scan.duration_ms)
     let scanner = SslScanner::new(config);
+    let started_at = chrono::Utc::now();
     let results = scanner.scan().await?;
+    let completed_at = chrono::Utc::now();
+
+    let emit_ctx = output::JsonEmitContext {
+        host: hostname.clone(),
+        port,
+        sni_sent,
+        resolved_ip: Some(target_addr.ip().to_string()),
+        started_at,
+        completed_at,
+        enabled_features: enabled_cargo_features(),
+        config_paths: vec![],
+    };
 
     // Output results
     match args.format {
         OutputFormat::Text => output::print_text_results(&results),
-        OutputFormat::Json => output::print_json_results(&results)?,
-        OutputFormat::Xml => output::print_xml_results(&results)?,
+        OutputFormat::Json => output::print_json_results(&results, &emit_ctx, false)?,
+        OutputFormat::JsonPretty => output::print_json_results(&results, &emit_ctx, true)?,
     }
 
     // Save to file if requested
     if let Some(output_file) = args.output {
-        output::save_results(&results, &output_file, args.format)?;
+        output::save_results(&results, &emit_ctx, &output_file, args.format)?;
         println!("\nResults saved to: {}", output_file);
     }
 

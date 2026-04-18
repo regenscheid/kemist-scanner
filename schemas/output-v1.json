@@ -1,0 +1,340 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/andrewreg/kemist/schemas/output-v1.json",
+  "title": "kemist scan result (schema v1)",
+  "description": "One record per scanned target. See docs/OUTPUT_SCHEMA.md for field-by-field semantics. Tri-state: {value: false, method: probe} is a real negative, {value: null, method: not_probed|not_applicable|error} is an absence of signal — downstream rule engines MUST distinguish these.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "scanner",
+    "capabilities",
+    "scan",
+    "tls",
+    "certificates",
+    "validation",
+    "errors"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "1.0.0"
+    },
+    "scanner": {
+      "type": "object",
+      "required": ["name", "version"],
+      "properties": {
+        "name": { "type": "string" },
+        "version": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "capabilities": {
+      "type": "object",
+      "required": [
+        "enabled_features",
+        "rustls_version",
+        "aws_lc_rs_version",
+        "native_tls_version",
+        "provider_cipher_suites",
+        "provider_kx_groups",
+        "config_paths",
+        "probe_limitations"
+      ],
+      "properties": {
+        "enabled_features": { "type": "array", "items": { "type": "string" } },
+        "rustls_version": { "type": "string" },
+        "aws_lc_rs_version": { "type": "string" },
+        "native_tls_version": { "type": "string" },
+        "provider_cipher_suites": { "type": "array", "items": { "type": "string" } },
+        "provider_kx_groups": { "type": "array", "items": { "type": "string" } },
+        "config_paths": { "type": "array", "items": { "type": "string" } },
+        "probe_limitations": { "type": "array", "items": { "type": "string" } }
+      },
+      "additionalProperties": false
+    },
+    "scan": {
+      "type": "object",
+      "required": ["target", "host", "port", "sni_sent", "started_at", "completed_at", "duration_ms"],
+      "properties": {
+        "target": { "type": "string" },
+        "host": { "type": "string" },
+        "port": { "type": "integer", "minimum": 0, "maximum": 65535 },
+        "sni_sent": { "type": "string" },
+        "resolved_ip": { "type": "string" },
+        "started_at": { "type": "string", "format": "date-time" },
+        "completed_at": { "type": "string", "format": "date-time" },
+        "duration_ms": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "tls": {
+      "type": "object",
+      "required": [
+        "versions_offered",
+        "cipher_suites",
+        "groups",
+        "extensions",
+        "downgrade_signaling",
+        "sni_behavior"
+      ],
+      "properties": {
+        "versions_offered": {
+          "type": "object",
+          "required": ["ssl2", "ssl3", "tls1_0", "tls1_1", "tls1_2", "tls1_3"],
+          "properties": {
+            "ssl2": { "$ref": "#/$defs/versionOffered" },
+            "ssl3": { "$ref": "#/$defs/versionOffered" },
+            "tls1_0": { "$ref": "#/$defs/versionOffered" },
+            "tls1_1": { "$ref": "#/$defs/versionOffered" },
+            "tls1_2": { "$ref": "#/$defs/versionOffered" },
+            "tls1_3": { "$ref": "#/$defs/versionOffered" }
+          },
+          "additionalProperties": false
+        },
+        "negotiated": {
+          "type": "object",
+          "required": ["version"],
+          "properties": {
+            "version": { "type": "string" },
+            "cipher_suite": { "type": "string" },
+            "group": { "type": "string" },
+            "signature_scheme": { "type": "string" },
+            "alpn": { "type": "string" }
+          },
+          "additionalProperties": false
+        },
+        "cipher_suites": {
+          "type": "object",
+          "required": ["tls1_2", "tls1_3", "server_enforces_order"],
+          "properties": {
+            "tls1_2": { "type": "array", "items": { "$ref": "#/$defs/cipherSuiteEntry" } },
+            "tls1_3": { "type": "array", "items": { "$ref": "#/$defs/cipherSuiteEntry" } },
+            "server_enforces_order": { "$ref": "#/$defs/observationBool" }
+          },
+          "additionalProperties": false
+        },
+        "groups": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/groupObservation" }
+        },
+        "extensions": {
+          "type": "object",
+          "required": [
+            "ems",
+            "secure_renegotiation",
+            "ocsp_stapling",
+            "sct",
+            "alpn_offered",
+            "encrypt_then_mac",
+            "heartbeat_present",
+            "heartbeat_echoes_oversized_payload",
+            "compression_offered"
+          ],
+          "properties": {
+            "ems": { "$ref": "#/$defs/observationBool" },
+            "secure_renegotiation": { "$ref": "#/$defs/observationBool" },
+            "ocsp_stapling": {
+              "type": "object",
+              "required": ["stapled", "method", "response_length"],
+              "properties": {
+                "stapled": { "type": ["boolean", "null"] },
+                "method": { "$ref": "#/$defs/method" },
+                "reason": { "type": "string" },
+                "response_length": { "type": "integer", "minimum": 0 }
+              },
+              "additionalProperties": false
+            },
+            "sct": {
+              "type": "object",
+              "required": ["delivery_paths", "count"],
+              "properties": {
+                "delivery_paths": { "type": "array", "items": { "type": "string" } },
+                "count": { "type": "integer", "minimum": 0 }
+              },
+              "additionalProperties": false
+            },
+            "alpn_offered": { "type": "array", "items": { "type": "string" } },
+            "encrypt_then_mac": { "$ref": "#/$defs/observationBool" },
+            "heartbeat_present": { "$ref": "#/$defs/observationBool" },
+            "heartbeat_echoes_oversized_payload": { "$ref": "#/$defs/observationBool" },
+            "compression_offered": { "type": "array", "items": { "type": "string" } }
+          },
+          "additionalProperties": false
+        },
+        "downgrade_signaling": {
+          "type": "object",
+          "required": ["fallback_scsv_accepted"],
+          "properties": {
+            "fallback_scsv_accepted": { "$ref": "#/$defs/observationBool" }
+          },
+          "additionalProperties": false
+        },
+        "sni_behavior": {
+          "type": "object",
+          "required": ["method"],
+          "properties": {
+            "omitted_probe": {
+              "type": ["string", "null"],
+              "enum": ["same_cert", "different_cert", "rejected", "error", null]
+            },
+            "method": { "$ref": "#/$defs/method" },
+            "reason": { "type": "string" }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "certificates": {
+      "type": "object",
+      "required": ["chain", "chain_length"],
+      "properties": {
+        "leaf": { "$ref": "#/$defs/certificateFacts" },
+        "chain": { "type": "array", "items": { "$ref": "#/$defs/certificateFacts" } },
+        "chain_length": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "validation": {
+      "type": "object",
+      "required": ["chain_valid_to_webpki_roots", "name_matches_sni"],
+      "properties": {
+        "chain_valid_to_webpki_roots": { "$ref": "#/$defs/observationBool" },
+        "name_matches_sni": { "$ref": "#/$defs/observationBool" },
+        "validation_error": { "type": ["string", "null"] }
+      },
+      "additionalProperties": false
+    },
+    "http": {
+      "type": "object",
+      "required": ["enabled"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "hsts": { "type": "object" },
+        "preload_list_status": { "type": "string" },
+        "security_txt": { "type": "object" }
+      },
+      "additionalProperties": false
+    },
+    "raw_handshakes": { "type": ["object", "null"] },
+    "errors": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["category", "context", "timestamp"],
+        "properties": {
+          "category": { "type": "string" },
+          "context": { "type": "string" },
+          "timestamp": { "type": "string", "format": "date-time" }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false,
+
+  "$defs": {
+    "method": {
+      "type": "string",
+      "enum": ["probe", "not_probed", "not_applicable", "error", "connection_state"]
+    },
+    "observationBool": {
+      "type": "object",
+      "required": ["value", "method"],
+      "properties": {
+        "value": { "type": ["boolean", "null"] },
+        "method": { "$ref": "#/$defs/method" },
+        "reason": { "type": "string" }
+      },
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": { "properties": { "method": { "const": "probe" } } },
+          "then": { "properties": { "value": { "type": "boolean" } } }
+        },
+        {
+          "if": { "properties": { "method": { "enum": ["not_probed", "not_applicable", "error"] } } },
+          "then": { "properties": { "value": { "type": "null" } }, "required": ["reason"] }
+        }
+      ]
+    },
+    "versionOffered": {
+      "type": "object",
+      "required": ["offered", "method"],
+      "properties": {
+        "offered": { "type": ["boolean", "null"] },
+        "method": { "$ref": "#/$defs/method" },
+        "reason": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "groupObservation": {
+      "type": "object",
+      "required": ["supported", "method"],
+      "properties": {
+        "supported": { "type": ["boolean", "null"] },
+        "method": { "$ref": "#/$defs/method" },
+        "reason": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "cipherSuiteEntry": {
+      "type": "object",
+      "required": ["name", "iana_code", "method"],
+      "properties": {
+        "name": { "type": "string" },
+        "iana_code": { "type": "string", "pattern": "^0x[0-9A-Fa-f]{4}$" },
+        "method": { "$ref": "#/$defs/method" },
+        "reason": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "certificateFacts": {
+      "type": "object",
+      "required": [
+        "subject_dn",
+        "san",
+        "issuer_dn",
+        "serial",
+        "not_before",
+        "not_after",
+        "validity_days",
+        "signature_algorithm_oid",
+        "signature_algorithm_name",
+        "is_pqc_signature",
+        "public_key",
+        "embedded_scts",
+        "fingerprint_sha256",
+        "fingerprint_sha1"
+      ],
+      "properties": {
+        "subject_cn": { "type": "string" },
+        "subject_dn": { "type": "string" },
+        "san": { "type": "array", "items": { "type": "string" } },
+        "issuer_cn": { "type": "string" },
+        "issuer_dn": { "type": "string" },
+        "serial": { "type": "string" },
+        "not_before": { "type": "string", "format": "date-time" },
+        "not_after": { "type": "string", "format": "date-time" },
+        "validity_days": { "type": "integer" },
+        "signature_algorithm_oid": { "type": "string" },
+        "signature_algorithm_name": { "type": "string" },
+        "is_pqc_signature": { "type": "boolean" },
+        "public_key": {
+          "type": "object",
+          "required": ["algorithm", "size_bits"],
+          "properties": {
+            "algorithm": { "type": "string" },
+            "size_bits": { "type": "integer", "minimum": 0 },
+            "curve": { "type": "string" }
+          },
+          "additionalProperties": false
+        },
+        "embedded_scts": { "type": "integer", "minimum": 0 },
+        "fingerprint_sha256": { "type": "string" },
+        "fingerprint_sha1": { "type": "string" }
+      },
+      "additionalProperties": false
+    }
+  }
+}

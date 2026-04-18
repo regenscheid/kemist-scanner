@@ -1,17 +1,19 @@
+pub mod json;
+
 use anyhow::Result;
 use clap::ValueEnum;
 use colored::*;
-use std::fs::File;
-use std::io::Write;
 
 use crate::model::protocol::TlsVersion;
 use crate::scanner::ScanResults;
+
+pub use json::JsonEmitContext;
 
 #[derive(Debug, Clone, Copy, ValueEnum, PartialEq)]
 pub enum OutputFormat {
     Text,
     Json,
-    Xml,
+    JsonPretty,
 }
 
 pub fn print_text_results(results: &ScanResults) {
@@ -51,7 +53,7 @@ pub fn print_text_results(results: &ScanResults) {
     println!();
 
     // TLS Fallback SCSV
-    if let Some(fallback_scsv) = results.fallback_scsv_supported {
+    if let Some(fallback_scsv) = results.fallback_scsv_accepted {
         println!("{}:", "TLS Fallback SCSV".bold());
         let status = if fallback_scsv {
             "Supported".green()
@@ -126,7 +128,7 @@ pub fn print_text_results(results: &ScanResults) {
     println!();
 
     // Heartbleed vulnerability
-    if let Some(heartbleed) = results.heartbleed_vulnerable {
+    if let Some(heartbleed) = results.heartbeat_echoes_oversized_payload {
         println!("{}:", "Heartbleed (CVE-2014-0160)".bold());
         let status = if heartbleed {
             "VULNERABLE".red().bold()
@@ -367,44 +369,32 @@ pub fn print_text_results(results: &ScanResults) {
     print_summary(results);
 }
 
-pub fn print_json_results(results: &ScanResults) -> Result<()> {
-    let json = serde_json::to_string_pretty(results)?;
-    println!("{}", json);
-    Ok(())
+pub fn print_json_results(
+    results: &ScanResults,
+    ctx: &JsonEmitContext,
+    pretty: bool,
+) -> Result<()> {
+    if pretty {
+        json::print_json_pretty(results, ctx)
+    } else {
+        json::print_json(results, ctx)
+    }
 }
 
-pub fn print_xml_results(results: &ScanResults) -> Result<()> {
-    let xml = quick_xml::se::to_string(results)?;
-    println!("{}", xml);
-    Ok(())
-}
-
-pub fn save_results(results: &ScanResults, path: &str, format: OutputFormat) -> Result<()> {
-    let mut file = File::create(path)?;
-
+pub fn save_results(
+    results: &ScanResults,
+    ctx: &JsonEmitContext,
+    path: &str,
+    format: OutputFormat,
+) -> Result<()> {
     match format {
         OutputFormat::Text => {
-            // Redirect stdout to string
-            let output = format_text_results(results);
-            file.write_all(output.as_bytes())?;
+            // Text is TTY-only for now; dump the canonical JSON to disk instead
+            // of a debug-formatted dump. PR 12 will add a real text formatter.
+            json::write_json(results, ctx, path)
         }
-        OutputFormat::Json => {
-            let json = serde_json::to_string_pretty(results)?;
-            file.write_all(json.as_bytes())?;
-        }
-        OutputFormat::Xml => {
-            let xml = quick_xml::se::to_string(results)?;
-            file.write_all(xml.as_bytes())?;
-        }
+        OutputFormat::Json | OutputFormat::JsonPretty => json::write_json(results, ctx, path),
     }
-
-    Ok(())
-}
-
-fn format_text_results(results: &ScanResults) -> String {
-    // This would be similar to print_text_results but return a string
-    // For brevity, returning a placeholder
-    format!("{:#?}", results)
 }
 
 fn print_summary(results: &ScanResults) {
@@ -431,7 +421,7 @@ fn print_summary(results: &ScanResults) {
     }
 
     // Surface heartbeat oversized-payload echo observation
-    if let Some(true) = results.heartbleed_vulnerable {
+    if let Some(true) = results.heartbeat_echoes_oversized_payload {
         warnings.push("Heartbeat extension echoed oversized payload".to_string());
     }
 

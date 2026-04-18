@@ -58,8 +58,8 @@ pub struct ScanResults {
     pub certificate_chain: Vec<CertificateInfo>,
     pub preferred_cipher: Option<CipherInfo>,
     pub tls_renegotiation: TlsRenegotiation,
-    pub heartbleed_vulnerable: Option<bool>,
-    pub fallback_scsv_supported: Option<bool>,
+    pub heartbeat_echoes_oversized_payload: Option<bool>,
+    pub fallback_scsv_accepted: Option<bool>,
 }
 
 impl SslScanner {
@@ -88,21 +88,21 @@ impl SslScanner {
                 secure_renegotiation: None,
                 compression_supported: None,
             },
-            heartbleed_vulnerable: None,
-            fallback_scsv_supported: None,
+            heartbeat_echoes_oversized_payload: None,
+            fallback_scsv_accepted: None,
         };
 
         // Test protocol support
         results.protocol_support = self.test_protocol_support().await?;
 
         // Test TLS Fallback SCSV
-        results.fallback_scsv_supported = self.test_fallback_scsv().await;
+        results.fallback_scsv_accepted = self.test_fallback_scsv().await;
 
         // Test TLS renegotiation
         results.tls_renegotiation = self.test_tls_renegotiation().await;
 
         // Test Heartbleed vulnerability
-        results.heartbleed_vulnerable = self.test_heartbleed().await;
+        results.heartbeat_echoes_oversized_payload = self.test_heartbleed().await;
 
         // Test cipher suites (if not disabled)
         if !self.config.no_ciphersuites {
