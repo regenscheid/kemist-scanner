@@ -21,7 +21,15 @@ pub struct CertificateInfo {
     pub serial_number: String,
     pub not_before: DateTime<Utc>,
     pub not_after: DateTime<Utc>,
+    /// Human-readable algorithm (e.g. `"sha256WithRSAEncryption"`,
+    /// `"ML-DSA-65"`). Falls back to the raw OID string for unknowns.
     pub signature_algorithm: String,
+    /// Raw signature algorithm OID string (e.g. `"1.2.840.113549.1.1.11"`).
+    /// Downstream rule engines key off this — never a human-friendly name.
+    pub signature_algorithm_oid: String,
+    /// True when `signature_algorithm_oid` is a known PQC OID (ML-DSA,
+    /// SLH-DSA). Raw OID match — not a security judgment.
+    pub is_pqc_signature: bool,
     pub public_key_algorithm: String,
     pub public_key_size: usize,
     pub ecc_curve_name: Option<String>,
@@ -32,6 +40,10 @@ pub struct CertificateInfo {
     pub days_until_expiry: i64,
     pub fingerprint_sha256: String,
     pub fingerprint_sha1: String,
+    /// Count of RFC 6962 Signed Certificate Timestamps embedded in the cert
+    /// via extension OID 1.3.6.1.4.1.11129.2.4.2. Presence only —
+    /// signatures are not validated.
+    pub embedded_scts: u32,
 }
 
 impl CertificateInfo {
@@ -45,7 +57,10 @@ impl CertificateInfo {
         let not_before = offset_to_chrono(cert.validity().not_before);
         let not_after = offset_to_chrono(cert.validity().not_after);
 
-        let sig_alg = oid_to_algorithm_name(&cert.signature_algorithm.algorithm);
+        let sig_oid_str = cert.signature_algorithm.algorithm.to_id_string();
+        let sig_alg =
+            crate::scanner::cert::resolve_signature_algorithm(&cert.signature_algorithm.algorithm);
+        let is_pqc_signature = crate::scanner::cert::is_pqc_oid(&sig_oid_str);
         let is_self_signed = cert.subject() == cert.issuer();
 
         let now = Utc::now();
@@ -73,6 +88,8 @@ impl CertificateInfo {
         hasher_sha1.update(der_data);
         let fingerprint_sha1 = hex::encode(hasher_sha1.finalize());
 
+        let embedded_scts = crate::scanner::cert::count_embedded_scts(der_data);
+
         Ok(CertificateInfo {
             subject,
             issuer,
@@ -80,6 +97,8 @@ impl CertificateInfo {
             not_before,
             not_after,
             signature_algorithm: sig_alg,
+            signature_algorithm_oid: sig_oid_str,
+            is_pqc_signature,
             public_key_algorithm: pub_key_alg,
             public_key_size: pub_key_size,
             ecc_curve_name,
@@ -90,6 +109,7 @@ impl CertificateInfo {
             days_until_expiry,
             fingerprint_sha256,
             fingerprint_sha1,
+            embedded_scts,
         })
     }
 

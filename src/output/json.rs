@@ -56,7 +56,7 @@ pub fn build_scan_result(results: &ScanResults, ctx: &JsonEmitContext) -> ScanRe
         },
         tls: build_tls(results),
         certificates: build_certificates(&results.certificate_chain),
-        validation: build_validation_placeholder(),
+        validation: build_validation(results),
         http: None,
         raw_handshakes: None,
         errors: results.scan_errors.clone(),
@@ -272,15 +272,11 @@ fn build_certificates(chain: &[CertificateInfo]) -> Certificates {
 }
 
 fn cert_to_facts(c: &CertificateInfo) -> CertificateFacts {
-    let (public_key, curve) = (
-        PublicKey {
-            algorithm: c.public_key_algorithm.clone(),
-            size_bits: c.public_key_size,
-            curve: c.ecc_curve_name.clone(),
-        },
-        c.ecc_curve_name.clone(),
-    );
-    let _ = curve;
+    let public_key = PublicKey {
+        algorithm: c.public_key_algorithm.clone(),
+        size_bits: c.public_key_size,
+        curve: c.ecc_curve_name.clone(),
+    };
     CertificateFacts {
         subject_cn: extract_cn(&c.subject),
         subject_dn: c.subject.clone(),
@@ -291,11 +287,11 @@ fn cert_to_facts(c: &CertificateInfo) -> CertificateFacts {
         not_before: c.not_before,
         not_after: c.not_after,
         validity_days: (c.not_after - c.not_before).num_days(),
-        signature_algorithm_oid: String::new(),
+        signature_algorithm_oid: c.signature_algorithm_oid.clone(),
         signature_algorithm_name: c.signature_algorithm.clone(),
-        is_pqc_signature: false, // populated in PR 6
+        is_pqc_signature: c.is_pqc_signature,
         public_key,
-        embedded_scts: 0, // populated in PR 6
+        embedded_scts: c.embedded_scts,
         fingerprint_sha256: c.fingerprint_sha256.clone(),
         fingerprint_sha1: c.fingerprint_sha1.clone(),
     }
@@ -313,11 +309,18 @@ fn extract_cn(dn: &str) -> Option<String> {
     None
 }
 
-fn build_validation_placeholder() -> Validation {
+fn build_validation(results: &ScanResults) -> Validation {
+    let v = &results.validation;
     Validation {
-        chain_valid_to_webpki_roots: ObservationBool::not_probed("pending_pr_6_webpki_validation"),
-        name_matches_sni: ObservationBool::not_probed("pending_pr_6_name_match"),
-        validation_error: None,
+        chain_valid_to_webpki_roots: match v.chain_valid_to_webpki_roots {
+            Some(b) => ObservationBool::probe(b),
+            None => ObservationBool::not_probed("characterization_handshake_failed"),
+        },
+        name_matches_sni: match v.name_matches_sni {
+            Some(b) => ObservationBool::probe(b),
+            None => ObservationBool::not_probed("characterization_handshake_failed"),
+        },
+        validation_error: v.validation_error.clone(),
     }
 }
 

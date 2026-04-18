@@ -1,3 +1,4 @@
+pub mod cert;
 pub mod legacy;
 pub mod probe;
 pub mod runner;
@@ -16,7 +17,7 @@ use crate::model::cipher::{
 };
 use crate::model::errors::ScannerError;
 use crate::model::protocol::{ProtocolSupport, TlsVersion};
-use crate::scanner::probe::{characterize_connection, NegotiatedState};
+use crate::scanner::probe::{characterize_connection, NegotiatedState, ValidationResult};
 
 // Scanner-module functions return `Result<T, ScannerError>` explicitly rather
 // than a type alias, so they don't collide with `rustls::Result<T, rustls::Error>`
@@ -79,6 +80,10 @@ pub struct ScanResults {
     /// ALPN protocols kemist proposed on the characterization handshake.
     #[serde(skip_serializing)]
     pub alpn_offered: Vec<String>,
+    /// Trust observations — chain validity, name match, first-failure
+    /// category string. Populated by PR 6. Feeds `validation.*` in schema.
+    #[serde(skip_serializing)]
+    pub validation: ValidationResult,
     /// Probe-level failures accumulated during the scan. Never aborts scan()
     /// even if every entry errors — downstream consumers read this alongside
     /// the partial observations.
@@ -118,6 +123,7 @@ impl SslScanner {
             fallback_scsv_accepted: None,
             negotiated: None,
             alpn_offered: vec![],
+            validation: ValidationResult::default(),
             scan_errors: vec![],
         };
 
@@ -175,6 +181,7 @@ impl SslScanner {
                 results.certificate_chain = out.certificates;
                 results.negotiated = out.negotiated;
                 results.alpn_offered = out.alpn_offered;
+                results.validation = out.validation;
             }
             Err(e) => {
                 // If the verifier fired before the handshake aborted, keep

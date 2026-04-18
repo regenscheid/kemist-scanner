@@ -81,6 +81,7 @@ fn fixture_results() -> ScanResults {
         fallback_scsv_accepted: Some(true),
         negotiated: None,
         alpn_offered: vec![],
+        validation: kemist::scanner::probe::ValidationResult::default(),
         scan_errors: vec![],
     }
 }

@@ -302,6 +302,7 @@ fn empty_scan_results(target: &Target, addr: SocketAddr) -> crate::scanner::Scan
         fallback_scsv_accepted: None,
         negotiated: None,
         alpn_offered: vec![],
+        validation: crate::scanner::probe::ValidationResult::default(),
         scan_errors: vec![],
     }
 }
