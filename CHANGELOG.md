@@ -1,61 +1,123 @@
 # Changelog
 
-All notable changes to this project will be documented in this file.
+All notable changes to kemist are documented here. Format follows
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/); version
+numbers follow [semver](https://semver.org/).
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+## [0.1.0] — 2026-04-18
 
-## [v0.1.0] - 2025-06-18
+Initial release. Fork of [shyuan/tlsferret](https://github.com/shyuan/tlsferret)
+repositioned as a pure-observation scanner (Pattern A): records what
+servers support, emits structured JSON. Rule evaluation lives in
+separate downstream projects.
 
-### Added
-- **Initial Public Release** 🎉
-- **Comprehensive SSL/TLS Analysis**
-  - Protocol version detection (SSL2, SSL3, TLS 1.0-1.3)
-  - Cipher suite enumeration and strength classification
-  - Certificate chain analysis with detailed validation
-  - Security vulnerability detection (Heartbleed, CRIME, etc.)
+### Added — TLS observation
 
-- **Advanced Security Features**
-  - TLS renegotiation testing (RFC 5746)
-  - Fallback SCSV detection for downgrade protection
-  - Weak cipher and certificate detection
-  - Post-quantum cryptography support (ML-KEM algorithms)
+- Per-TLS-version enumeration (SSL 2.0 through TLS 1.3) via a mix of
+  rustls, native-tls, and a raw SSL 2.0 CLIENT-HELLO probe.
+- Per-cipher-suite probing for aws-lc-rs's full ship set (~9 suites).
+  Single-cipher `CryptoProvider` per probe. Real `supported: true/false`
+  signals from the wire. Server-ordering detection via two handshakes
+  with reversed suite orderings.
+- Per-kx-group probing for 12 target groups: classical (X25519/X448/
+  secp256r1-521) + PQC hybrids (X25519MLKEM768/secp256r1MLKEM768/
+  secp384r1MLKEM1024) + standalone ML-KEM (512/768/1024) + the
+  pre-standard X25519Kyber768Draft00. Groups aws-lc-rs doesn't ship
+  emit `not_probed` with a specific reason — never `supported: false`
+  without a real probe.
+- Characterization handshake captures rustls connection state:
+  negotiated version, cipher suite, kx group, signature scheme (from
+  verifier callback), ALPN, OCSP stapling bytes.
+- Byte-level ServerHello probe (raw TCP, hand-crafted TLS 1.2 ClientHello)
+  for Extended Master Secret (RFC 7627), Encrypt-then-MAC (RFC 7366),
+  heartbeat presence (RFC 6520), renegotiation_info (RFC 5746),
+  server-selected compression method, and SCT via extension 18 (RFC 6962).
+- SNI-omitted probe: second handshake with `ServerName::IpAddress` (rustls
+  omits SNI for IP literals). Compares leaf cert fingerprints →
+  `same_cert | different_cert | rejected | error`.
 
-- **Protocol Support**
-  - **STARTTLS** support for 8 protocols: SMTP, IMAP, POP3, FTP, LDAP, XMPP, PostgreSQL, MySQL
-  - IPv4/IPv6 dual-stack support
-  - SNI (Server Name Indication) support
+### Added — certificate and validation observation
 
-- **Performance & Architecture**
-  - **Hybrid TLS Engine**: rustls 0.23 (modern) + native-tls 0.2 (legacy compatibility)
-  - **AWS-LC-RS** cryptographic provider with post-quantum algorithms
-  - Async implementation using Tokio for high performance
-  - Memory-safe Rust implementation
+- X.509 parsing via x509-parser: subject/issuer DN + CN, SAN list,
+  serial, validity, signature algorithm (raw OID + resolved name),
+  public key algorithm + size + curve, SHA-256 + SHA-1 fingerprints.
+- `is_pqc_signature: bool` — raw OID match against ML-DSA (FIPS 204)
+  and SLH-DSA (FIPS 205) — 15-entry table, NIST CSOR arc.
+- Embedded SCT count via cert extension 1.3.6.1.4.1.11129.2.4.2.
+- Three independent trust observations:
+  `validation.chain_valid_to_webpki_roots` (rustls `WebPkiServerVerifier`
+  against Mozilla roots, with SAN-retry to isolate name failures),
+  `validation.name_matches_sni` (RFC 6125 SAN matching with wildcards),
+  `validation.validation_error` (canonical string when chain invalid).
 
-- **Output & Integration**
-  - Multiple output formats: Text (colored), JSON, XML
-  - File export support for compliance and reporting
-  - Comprehensive logging with configurable verbosity
-  - Cross-platform compatibility (Linux, macOS, Windows)
+### Added — HTTP observations (feature-gated)
 
-- **Build & Release**
-  - Automated multi-platform builds via GitHub Actions
-  - Pre-compiled binaries for 4 platforms:
-    - Linux x86_64
-    - macOS (Intel, Apple Silicon)
-    - Windows x86_64
-  - SHA256 checksums for security verification
-  - Dual licensing (MIT OR Apache-2.0)
+- `http-checks` cargo feature (default on) + runtime `--enable-http-checks`
+  flag gates fetch of HSTS header, `/.well-known/security.txt`, and
+  HSTS preload list membership (~12-entry stub subset).
+- `Strict-Transport-Security` parsed into `raw_value`, `max_age`,
+  `include_subdomains`, `preload` fields.
+- security.txt body emitted verbatim — not parsed.
+- User-Agent configurable via `--user-agent-info-url`; defaults to
+  `https://www.kemist-tls.net`.
 
-### Technical Details
-- **Language**: Rust 1.71+
-- **TLS Libraries**: rustls 0.23 + native-tls 0.2
-- **Crypto Provider**: AWS-LC-RS with post-quantum support
-- **DNS Resolution**: hickory-resolver 0.24 (secure, modern)
-- **Dependencies**: Zero security vulnerabilities (cargo audit clean)
+### Added — output
 
-### Acknowledgments
-- Inspired by [rbsec/sslscan](https://github.com/rbsec/sslscan)
-- Built with the amazing Rust ecosystem and cryptographic libraries
+- Strict JSON schema v1 (`schemas/output-v1.json`), draft-2020, with
+  conditional `if/then` constraints enforcing the four-way tri-state
+  contract (`probe` / `not_probed` / `not_applicable` / `error`).
+- Top-level `capabilities` block for self-describing records: enabled
+  features, crypto provider versions, provider-shipped cipher suite
+  and kx group lists, config paths, probe limitations.
+- Schema-v1-aware terminal renderer (`src/output/text.rs`) — compact
+  ~55-line summary per target. Glyph legend `+`/`-`/`?`. Neutral
+  colors; cyan highlight on PQC groups + PQC-signed certs. TTY-detect.
+- NDJSON stream output for multi-target scans. Per-target file output
+  (`--output-dir`) with `<host>_<port>_<unixtime>.json` naming.
 
-[v0.1.0]: https://github.com/shyuan/tlsferret/releases/tag/v0.1.0
+### Added — CLI and library API
+
+- Public `Scanner`, `ScannerConfig`, `Target`, `ScanResult`,
+  `ScannerError` API in `src/lib.rs`. CLI is a thin consumer.
+- Multi-target input: `--target` (repeatable), `--targets-file`,
+  `--targets-stdin`. Per-target SNI override syntax:
+  `host:port#sni=alt.example.com`.
+- Bounded concurrency via `futures::buffer_unordered` + `Semaphore`.
+  Per-target probes stay serialized.
+- Retry loop (transient-category errors only, exp backoff 1/2/4s).
+  Hard `--total-timeout` ceiling per target.
+- Separate `--connect-timeout`, `--handshake-timeout`, `--total-timeout`,
+  `--retries`, `--per-target-delay`, `--concurrency` knobs.
+- Structured `errors` array on every output record. Scanner never
+  aborts on probe-level failures — scans always produce complete-shaped
+  records with accumulated errors.
+
+### Removed (from the TLSferret parent)
+
+- STARTTLS negotiation for SMTP/IMAP/POP3/FTP/LDAP/XMPP/PostgreSQL/MySQL.
+  Out of scope for HTTPS-on-443 focus; may return later as an opt-in
+  feature.
+- All compliance-verdict fields: `CipherStrength` enum (Null/Weak/
+  Medium/Strong/Recommended), `weak_signature` / `weak_key` bools,
+  `client_initiated_renegotiation`, validation-issues string generator.
+  Pattern A: kemist is a pure sensor, no verdicts anywhere in output.
+- XML output. JSON (schema-validated) is the canonical machine format.
+- Legacy CLI: positional target, `--sni-name`, `--timeout`, `-o`.
+  Replaced with multi-target flags documented above.
+
+### Known limits
+
+- aws-lc-rs cipher suite coverage: 9 suites (no RC4/3DES/CBC-SHA/
+  export). Servers accepting those ciphers emit as absent from the
+  array rather than `supported: false`. Cross-reference against a
+  fuller cipher registry for weak-cipher policies.
+- aws-lc-rs kx group coverage: 6 groups. Standalone ML-KEM-512/1024,
+  X448, secp521r1, secp384r1MLKEM1024, X25519Kyber768Draft00 emit
+  `not_probed`. Three future extension paths documented in
+  [docs/PQC.md](docs/PQC.md).
+- HSTS preload list is a 12-entry stub. Full Chromium
+  `transport_security_state_static.json` snapshot deferred.
+- PQC signature verification not performed — OID match only. Chain
+  validation via webpki-roots uses classical algorithms.
+
+[0.1.0]: https://github.com/andrewre/kemist/releases/tag/v0.1.0
