@@ -244,28 +244,63 @@ fn build_groups(results: &ScanResults) -> BTreeMap<String, GroupObservation> {
 }
 
 fn build_extensions(results: &ScanResults) -> TlsExtensions {
-    // TLS 1.3 doesn't carry EMS or RFC 5746 renegotiation_info — those are
-    // TLS 1.2 concepts. When the characterization handshake negotiated 1.3,
-    // emit `not_applicable` so downstream rule engines don't misread
-    // `null` as "probed and absent".
-    let tls13_negotiated = matches!(
+    // The byte probe runs its own TLS 1.2 handshake independent of the
+    // main characterization. If the probe negotiated TLS 1.3 (possible if
+    // the server is strict-1.3), ems/etm/reneg are genuinely
+    // not_applicable. If it negotiated TLS 1.2, the observations are
+    // meaningful. If the probe failed entirely (alert, timeout), fall
+    // back to the characterization version as a weaker hint — a server
+    // that only speaks TLS 1.3 can't meaningfully report these fields.
+    let hello = results.hello_observed.as_ref();
+    let hello_ok = hello.map(|h| h.server_hello_parsed).unwrap_or(false);
+    let hello_version = hello.and_then(|h| h.server_negotiated_version);
+    let char_tls13 = matches!(
         results.negotiated.as_ref().and_then(|n| n.version),
         Some(TlsVersion::Tls13)
     );
+    let hello_fail_reason = hello
+        .and_then(|h| h.error.clone())
+        .unwrap_or_else(|| "hello_probe_not_run".to_string());
 
-    let ems = if tls13_negotiated {
-        ObservationBool::not_applicable("tls13_has_no_ems_extension")
-    } else {
-        ObservationBool::not_probed("rustls_does_not_expose_ems_flag")
+    // Helper: decide how a TLS-1.2-only extension observation renders.
+    let tls12_ext = |probed: Option<bool>, ext_label: &str| -> ObservationBool {
+        if hello_ok {
+            match hello_version {
+                Some(0x0303) => ObservationBool::probe(probed.unwrap_or(false)),
+                Some(other) => ObservationBool::not_applicable(&format!(
+                    "hello_probe_negotiated_0x{other:04x}_not_tls12"
+                )),
+                None => ObservationBool::not_probed("hello_version_unknown"),
+            }
+        } else if char_tls13 {
+            ObservationBool::not_applicable(&format!("tls13_has_no_{ext_label}"))
+        } else {
+            ObservationBool::not_probed(&format!("hello_probe_failed:{hello_fail_reason}"))
+        }
     };
 
-    let secure_renegotiation = if tls13_negotiated {
-        ObservationBool::not_applicable("tls13_has_no_renegotiation")
+    let ems = tls12_ext(hello.and_then(|h| h.ems), "ems_extension");
+    let secure_renegotiation =
+        tls12_ext(hello.and_then(|h| h.secure_renegotiation), "renegotiation");
+    let encrypt_then_mac = tls12_ext(
+        hello.and_then(|h| h.encrypt_then_mac),
+        "encrypt_then_mac_extension",
+    );
+
+    // Heartbeat extension is defined for both TLS 1.2 and 1.3 (RFC 6520),
+    // though rarely enabled. Emit probe observation regardless of version.
+    let heartbeat_present = if hello_ok {
+        ObservationBool::probe(hello.and_then(|h| h.heartbeat_present).unwrap_or(false))
     } else {
-        // rustls enforces RFC 5746 internally but does not surface whether
-        // the server sent the extension. PR 9's byte parsing will fill this.
-        ObservationBool::not_probed("rustls_does_not_expose_renegotiation_info_flag")
+        ObservationBool::not_probed(&format!("hello_probe_failed:{hello_fail_reason}"))
     };
+
+    // compression_offered: whatever the byte probe observed. Empty when the
+    // probe didn't succeed (consumers read `method` on other fields to know).
+    let compression_offered: Vec<String> = hello
+        .and_then(|h| h.compression_selected.clone())
+        .map(|c| vec![c])
+        .unwrap_or_default();
 
     let ocsp_stapling = match &results.negotiated {
         Some(n) => OcspStapling {
@@ -282,22 +317,38 @@ fn build_extensions(results: &ScanResults) -> TlsExtensions {
         },
     };
 
+    // SCT delivery paths. Embedded (cert extension) is counted in PR 6
+    // via CertificateInfo.embedded_scts. ext_path comes from the hello
+    // probe. OCSP-stapled SCTs aren't parsed in v1.0.
+    let mut delivery_paths: Vec<String> = Vec::new();
+    let embedded_scts_total: u32 = results
+        .certificate_chain
+        .first()
+        .map(|c| c.embedded_scts)
+        .unwrap_or(0);
+    if embedded_scts_total > 0 {
+        delivery_paths.push("x509_extension".to_string());
+    }
+    if hello.map(|h| h.sct_via_tls_extension).unwrap_or(false) {
+        delivery_paths.push("tls_extension".to_string());
+    }
+
     TlsExtensions {
         ems,
         secure_renegotiation,
         ocsp_stapling,
         sct: SctObservation {
-            delivery_paths: Vec::new(),
-            count: 0,
+            delivery_paths,
+            count: embedded_scts_total,
         },
         alpn_offered: results.alpn_offered.clone(),
-        encrypt_then_mac: ObservationBool::not_probed("pending_pr_9_byte_parsing"),
-        heartbeat_present: ObservationBool::not_probed("pending_pr_9_byte_parsing"),
+        encrypt_then_mac,
+        heartbeat_present,
         heartbeat_echoes_oversized_payload: match results.heartbeat_echoes_oversized_payload {
             Some(v) => ObservationBool::probe(v),
             None => ObservationBool::not_probed("heartbeat_probe_inconclusive"),
         },
-        compression_offered: Vec::new(),
+        compression_offered,
     }
 }
 

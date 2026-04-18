@@ -1,6 +1,7 @@
 pub mod cert;
 pub mod ciphers;
 pub mod groups;
+pub mod hello;
 pub mod legacy;
 pub mod probe;
 pub mod runner;
@@ -19,6 +20,7 @@ use crate::model::errors::ScannerError;
 use crate::model::protocol::{ProtocolSupport, TlsVersion};
 use crate::scanner::ciphers::{probe_cipher_suites, CipherProbeOutput};
 use crate::scanner::groups::{probe_kx_groups, GroupProbeOutput};
+use crate::scanner::hello::{probe_hello_extensions, HelloExtensionsObserved};
 use crate::scanner::probe::{characterize_connection, NegotiatedState, ValidationResult};
 use crate::scanner::sni::{probe_sni_omitted, SniBehaviorResult};
 
@@ -87,6 +89,11 @@ pub struct ScanResults {
     /// `tls.sni_behavior.omitted_probe` in schema.
     #[serde(skip_serializing)]
     pub sni_behavior: Option<SniBehaviorResult>,
+    /// Byte-level ServerHello observations (EMS, EtM, heartbeat,
+    /// renegotiation_info, compression method, SCT via extension 18).
+    /// Populated by PR 9 Part B via a dedicated TLS 1.2 probe.
+    #[serde(skip_serializing)]
+    pub hello_observed: Option<HelloExtensionsObserved>,
     /// Probe-level failures accumulated during the scan. Never aborts scan()
     /// even if every entry errors — downstream consumers read this alongside
     /// the partial observations.
@@ -127,6 +134,7 @@ impl SslScanner {
             cipher_probes: None,
             group_probes: None,
             sni_behavior: None,
+            hello_observed: None,
             scan_errors: vec![],
         };
 
@@ -222,6 +230,20 @@ impl SslScanner {
             probe_sni_omitted(
                 self.config.target,
                 reference_fp.as_deref(),
+                self.config.timeout,
+                self.config.timeout,
+            )
+            .await,
+        );
+        pause().await;
+
+        // Byte-level ServerHello probe — hand-crafted TLS 1.2 ClientHello
+        // to extract extensions rustls does not expose (EMS, EtM,
+        // heartbeat, renegotiation_info, compression, ext-path SCTs).
+        results.hello_observed = Some(
+            probe_hello_extensions(
+                self.config.target,
+                &self.config.hostname,
                 self.config.timeout,
                 self.config.timeout,
             )

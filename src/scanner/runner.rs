@@ -303,6 +303,7 @@ fn empty_scan_results(target: &Target, addr: SocketAddr) -> crate::scanner::Scan
         cipher_probes: None,
         group_probes: None,
         sni_behavior: None,
+        hello_observed: None,
         scan_errors: vec![],
     }
 }

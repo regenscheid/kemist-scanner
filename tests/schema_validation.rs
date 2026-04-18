@@ -61,6 +61,7 @@ fn fixture_results() -> ScanResults {
         cipher_probes: None,
         group_probes: None,
         sni_behavior: None,
+        hello_observed: None,
         scan_errors: vec![],
     }
 }
