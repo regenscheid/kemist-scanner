@@ -105,11 +105,7 @@ fn build_tls(results: &ScanResults) -> Tls {
                 None => ObservationBool::not_probed("scsv_heuristic_inconclusive"),
             },
         },
-        sni_behavior: SniBehavior {
-            omitted_probe: None,
-            method: Method::NotProbed,
-            reason: Some("pending_pr_9".to_string()),
-        },
+        sni_behavior: build_sni_behavior(results),
     }
 }
 
@@ -350,6 +346,29 @@ fn extract_cn(dn: &str) -> Option<String> {
         }
     }
     None
+}
+
+fn build_sni_behavior(results: &ScanResults) -> SniBehavior {
+    match &results.sni_behavior {
+        Some(r) => {
+            use crate::scanner::sni::SniBehaviorOutcome;
+            let method = match r.outcome {
+                SniBehaviorOutcome::SameCert | SniBehaviorOutcome::DifferentCert => Method::Probe,
+                SniBehaviorOutcome::Rejected => Method::Probe,
+                SniBehaviorOutcome::Error => Method::Error,
+            };
+            SniBehavior {
+                omitted_probe: Some(r.outcome.as_str().to_string()),
+                method,
+                reason: r.reason.clone(),
+            }
+        }
+        None => SniBehavior {
+            omitted_probe: None,
+            method: Method::NotProbed,
+            reason: Some("sni_probe_did_not_run".to_string()),
+        },
+    }
 }
 
 fn build_validation(results: &ScanResults) -> Validation {

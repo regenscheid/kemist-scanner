@@ -4,6 +4,7 @@ pub mod groups;
 pub mod legacy;
 pub mod probe;
 pub mod runner;
+pub mod sni;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -19,6 +20,7 @@ use crate::model::protocol::{ProtocolSupport, TlsVersion};
 use crate::scanner::ciphers::{probe_cipher_suites, CipherProbeOutput};
 use crate::scanner::groups::{probe_kx_groups, GroupProbeOutput};
 use crate::scanner::probe::{characterize_connection, NegotiatedState, ValidationResult};
+use crate::scanner::sni::{probe_sni_omitted, SniBehaviorResult};
 
 // Scanner-module functions return `Result<T, ScannerError>` explicitly rather
 // than a type alias, so they don't collide with `rustls::Result<T, rustls::Error>`
@@ -81,6 +83,10 @@ pub struct ScanResults {
     /// ML-KEM). Populated by PR 8. Feeds `tls.groups.*` in schema.
     #[serde(skip_serializing)]
     pub group_probes: Option<GroupProbeOutput>,
+    /// SNI-omitted comparison probe. Populated by PR 9. Feeds
+    /// `tls.sni_behavior.omitted_probe` in schema.
+    #[serde(skip_serializing)]
+    pub sni_behavior: Option<SniBehaviorResult>,
     /// Probe-level failures accumulated during the scan. Never aborts scan()
     /// even if every entry errors — downstream consumers read this alongside
     /// the partial observations.
@@ -120,6 +126,7 @@ impl SslScanner {
             validation: ValidationResult::default(),
             cipher_probes: None,
             group_probes: None,
+            sni_behavior: None,
             scan_errors: vec![],
         };
 
@@ -202,6 +209,24 @@ impl SslScanner {
                 results.scan_errors.push(e);
             }
         }
+        pause().await;
+
+        // SNI-omitted comparison probe — one extra handshake with
+        // ServerName::IpAddress (rustls omits SNI for IP literals per
+        // RFC 6066). Compare leaf cert fingerprint against the SNI probe.
+        let reference_fp = results
+            .certificate_chain
+            .first()
+            .map(|c| c.fingerprint_sha256.clone());
+        results.sni_behavior = Some(
+            probe_sni_omitted(
+                self.config.target,
+                reference_fp.as_deref(),
+                self.config.timeout,
+                self.config.timeout,
+            )
+            .await,
+        );
 
         results
     }

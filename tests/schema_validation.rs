@@ -60,6 +60,7 @@ fn fixture_results() -> ScanResults {
         validation: kemist::scanner::probe::ValidationResult::default(),
         cipher_probes: None,
         group_probes: None,
+        sni_behavior: None,
         scan_errors: vec![],
     }
 }
