@@ -290,7 +290,6 @@ fn empty_scan_results(target: &Target, addr: SocketAddr) -> crate::scanner::Scan
         port: target.port,
         scan_time: Utc::now(),
         protocol_support: vec![],
-        key_exchange_groups: vec![],
         certificate_chain: vec![],
         tls_renegotiation: crate::scanner::TlsRenegotiation {
             secure_renegotiation: None,
@@ -302,6 +301,7 @@ fn empty_scan_results(target: &Target, addr: SocketAddr) -> crate::scanner::Scan
         alpn_offered: vec![],
         validation: crate::scanner::probe::ValidationResult::default(),
         cipher_probes: None,
+        group_probes: None,
         scan_errors: vec![],
     }
 }

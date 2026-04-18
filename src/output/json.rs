@@ -97,7 +97,7 @@ fn build_tls(results: &ScanResults) -> Tls {
         versions_offered: build_versions_offered(&results.protocol_support),
         negotiated: build_negotiated_from_state(results),
         cipher_suites: build_cipher_suites(results),
-        groups: build_groups(&results.key_exchange_groups),
+        groups: build_groups(results),
         extensions: build_extensions(results),
         downgrade_signaling: DowngradeSignaling {
             fallback_scsv_accepted: match results.fallback_scsv_accepted {
@@ -217,16 +217,32 @@ fn build_cipher_suites(results: &ScanResults) -> TlsCipherSuites {
     }
 }
 
-fn build_groups(groups: &[crate::scanner::KeyExchangeGroup]) -> BTreeMap<String, GroupObservation> {
+fn build_groups(results: &ScanResults) -> BTreeMap<String, GroupObservation> {
     let mut map = BTreeMap::new();
-    for g in groups {
-        // Until PR 8 wires real per-group probes, surface the hardcoded list
-        // as `not_probed` — NOT `supported: true/false`. Absence-of-probe is
-        // never evidence of absence-of-support.
-        map.insert(
-            g.name.clone(),
-            GroupObservation::not_probed("pending_pr_8_per_group_probes"),
-        );
+    let Some(probes) = &results.group_probes else {
+        return map;
+    };
+    for r in &probes.results {
+        use crate::scanner::groups::GroupProbeOutcome;
+        let obs = match &r.outcome {
+            GroupProbeOutcome::Supported => GroupObservation {
+                supported: Some(true),
+                method: Method::Probe,
+                reason: None,
+            },
+            GroupProbeOutcome::NotSupported => GroupObservation {
+                supported: Some(false),
+                method: Method::Probe,
+                reason: None,
+            },
+            GroupProbeOutcome::Error(ctx) => GroupObservation {
+                supported: None,
+                method: Method::Error,
+                reason: Some(ctx.clone()),
+            },
+            GroupProbeOutcome::NotProbed(reason) => GroupObservation::not_probed(reason.as_str()),
+        };
+        map.insert(r.name.clone(), obs);
     }
     map
 }

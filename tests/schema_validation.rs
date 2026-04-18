@@ -8,7 +8,7 @@ use chrono::{TimeZone, Utc};
 use kemist::model::errors::ScannerError;
 use kemist::model::protocol::{ProtocolSupport, TlsVersion};
 use kemist::output::json::{build_scan_result, JsonEmitContext};
-use kemist::scanner::{KeyExchangeGroup, ScanResults, TlsRenegotiation};
+use kemist::scanner::{ScanResults, TlsRenegotiation};
 
 fn fixture_results() -> ScanResults {
     ScanResults {
@@ -48,13 +48,6 @@ fn fixture_results() -> ScanResults {
                 error: None,
             },
         ],
-        key_exchange_groups: vec![KeyExchangeGroup {
-            name: "X25519MLKEM768".to_string(),
-            iana_name: "x25519_mlkem768".to_string(),
-            supported: true,
-            negotiated: false,
-            post_quantum: true,
-        }],
         certificate_chain: vec![],
         tls_renegotiation: TlsRenegotiation {
             secure_renegotiation: Some(true),
@@ -66,6 +59,7 @@ fn fixture_results() -> ScanResults {
         alpn_offered: vec![],
         validation: kemist::scanner::probe::ValidationResult::default(),
         cipher_probes: None,
+        group_probes: None,
         scan_errors: vec![],
     }
 }

@@ -1,5 +1,6 @@
 pub mod cert;
 pub mod ciphers;
+pub mod groups;
 pub mod legacy;
 pub mod probe;
 pub mod runner;
@@ -16,20 +17,12 @@ use crate::model::cert::CertificateInfo;
 use crate::model::errors::ScannerError;
 use crate::model::protocol::{ProtocolSupport, TlsVersion};
 use crate::scanner::ciphers::{probe_cipher_suites, CipherProbeOutput};
+use crate::scanner::groups::{probe_kx_groups, GroupProbeOutput};
 use crate::scanner::probe::{characterize_connection, NegotiatedState, ValidationResult};
 
 // Scanner-module functions return `Result<T, ScannerError>` explicitly rather
 // than a type alias, so they don't collide with `rustls::Result<T, rustls::Error>`
 // used by custom ServerCertVerifier impls below.
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct KeyExchangeGroup {
-    pub name: String,
-    pub iana_name: String,
-    pub supported: bool,
-    pub negotiated: bool,
-    pub post_quantum: bool,
-}
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TlsRenegotiation {
@@ -64,7 +57,6 @@ pub struct ScanResults {
     pub port: u16,
     pub scan_time: chrono::DateTime<chrono::Utc>,
     pub protocol_support: Vec<ProtocolSupport>,
-    pub key_exchange_groups: Vec<KeyExchangeGroup>,
     pub certificate_chain: Vec<CertificateInfo>,
     pub tls_renegotiation: TlsRenegotiation,
     pub heartbeat_echoes_oversized_payload: Option<bool>,
@@ -85,6 +77,10 @@ pub struct ScanResults {
     /// Populated by PR 7. Feeds `tls.cipher_suites.*` in schema.
     #[serde(skip_serializing)]
     pub cipher_probes: Option<CipherProbeOutput>,
+    /// Real per-group probe results (classical + PQC hybrid + standalone
+    /// ML-KEM). Populated by PR 8. Feeds `tls.groups.*` in schema.
+    #[serde(skip_serializing)]
+    pub group_probes: Option<GroupProbeOutput>,
     /// Probe-level failures accumulated during the scan. Never aborts scan()
     /// even if every entry errors — downstream consumers read this alongside
     /// the partial observations.
@@ -112,7 +108,6 @@ impl SslScanner {
             port: self.config.target.port(),
             scan_time: chrono::Utc::now(),
             protocol_support: vec![],
-            key_exchange_groups: vec![],
             certificate_chain: vec![],
             tls_renegotiation: TlsRenegotiation {
                 secure_renegotiation: None,
@@ -124,6 +119,7 @@ impl SslScanner {
             alpn_offered: vec![],
             validation: ValidationResult::default(),
             cipher_probes: None,
+            group_probes: None,
             scan_errors: vec![],
         };
 
@@ -168,10 +164,19 @@ impl SslScanner {
             pause().await;
         }
 
-        match self.test_key_exchange_groups().await {
-            Ok(v) => results.key_exchange_groups = v,
-            Err(e) => results.scan_errors.push(e),
-        }
+        // Real per-group probing: one TLS 1.3 handshake per target group
+        // from the hardcoded list (classical + PQC hybrids + standalone
+        // ML-KEM + Kyber768Draft00). Groups not exposed by aws-lc-rs at
+        // build time emit `not_probed` with a specific reason.
+        let group_out = probe_kx_groups(
+            self.config.target,
+            &self.config.hostname,
+            self.config.timeout,
+            self.config.timeout,
+            self.config.per_target_delay,
+        )
+        .await;
+        results.group_probes = Some(group_out);
         pause().await;
 
         // Single characterization handshake captures cert chain AND
@@ -295,40 +300,6 @@ impl SslScanner {
             Ok(Err(e)) => Err(ScannerError::from_io("tls handshake", e)),
             Ok(Ok(_)) => Ok(()),
         }
-    }
-
-    async fn test_key_exchange_groups(&self) -> Result<Vec<KeyExchangeGroup>, ScannerError> {
-        let mut groups = Vec::new();
-
-        // Define known key exchange groups with their properties
-        let known_groups = vec![
-            ("X25519", "x25519", false),
-            ("X448", "x448", false),
-            ("secp256r1", "secp256r1", false),
-            ("secp384r1", "secp384r1", false),
-            ("secp521r1", "secp521r1", false),
-            ("X25519MLKEM768", "x25519_mlkem768", true),
-            ("SecP256r1MLKEM768", "secp256r1_mlkem768", true),
-            ("SecP384r1MLKEM1024", "secp384r1_mlkem1024", true),
-            ("MLKEM512", "mlkem512", true),
-            ("MLKEM768", "mlkem768", true),
-            ("MLKEM1024", "mlkem1024", true),
-        ];
-
-        for (name, iana_name, is_pq) in known_groups {
-            // For now, we'll mark all groups as supported since rustls with aws-lc-rs
-            // supports most of these groups. In a more complete implementation,
-            // we would test each group individually.
-            groups.push(KeyExchangeGroup {
-                name: name.to_string(),
-                iana_name: iana_name.to_string(),
-                supported: true,
-                negotiated: false, // We would need to capture this from actual handshake
-                post_quantum: is_pq,
-            });
-        }
-
-        Ok(groups)
     }
 
     async fn test_fallback_scsv(&self) -> Option<bool> {
