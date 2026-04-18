@@ -54,6 +54,14 @@ pub struct ScannerConfig {
     pub enabled_features: Vec<String>,
     /// Config file paths used by the scanner. Echoed into capabilities.
     pub config_paths: Vec<String>,
+    /// Fire HTTP-layer observations (HSTS / security.txt / preload list).
+    /// Runtime opt-in: requires the `http-checks` cargo feature AND this
+    /// flag set to `true` at the CLI.
+    pub enable_http_checks: bool,
+    /// Identifier URL appended to the User-Agent when HTTP checks fire:
+    /// `kemist/<ver> (+<url>)`. Let server operators trace requests
+    /// back to a kemist scan.
+    pub user_agent_info_url: String,
 }
 
 impl Default for ScannerConfig {
@@ -70,6 +78,8 @@ impl Default for ScannerConfig {
             ipv6_only: false,
             enabled_features: Vec::new(),
             config_paths: Vec::new(),
+            enable_http_checks: false,
+            user_agent_info_url: "https://www.kemist-tls.net".to_string(),
         }
     }
 }
@@ -200,6 +210,8 @@ impl Scanner {
                     no_ciphersuites: false,
                     tls_version: self.config.tls_version_filter,
                     per_target_delay: self.config.per_target_delay,
+                    enable_http_checks: self.config.enable_http_checks,
+                    user_agent_info_url: self.config.user_agent_info_url.clone(),
                 };
 
                 info!(
@@ -304,6 +316,7 @@ fn empty_scan_results(target: &Target, addr: SocketAddr) -> crate::scanner::Scan
         group_probes: None,
         sni_behavior: None,
         hello_observed: None,
+        http_observations: None,
         scan_errors: vec![],
     }
 }

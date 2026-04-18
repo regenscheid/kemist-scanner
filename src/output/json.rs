@@ -13,9 +13,10 @@ use crate::model::errors::ScannerError;
 use crate::model::protocol::TlsVersion;
 use crate::model::scan_result::{
     Capabilities, CertificateFacts, Certificates, CipherSuiteEntry, DowngradeSignaling,
-    GroupObservation, Method, ObservationBool, OcspStapling, PublicKey, ScanMetadata, ScanResult,
-    Scanner as ScannerMeta, SctObservation, SniBehavior, Tls, TlsCipherSuites, TlsExtensions,
-    TlsNegotiated, TlsVersionsOffered, Validation, VersionOffered, SCHEMA_VERSION,
+    GroupObservation, Hsts, Http, Method, ObservationBool, OcspStapling, PublicKey, ScanMetadata,
+    ScanResult, Scanner as ScannerMeta, SctObservation, SecurityTxt, SniBehavior, Tls,
+    TlsCipherSuites, TlsExtensions, TlsNegotiated, TlsVersionsOffered, Validation, VersionOffered,
+    SCHEMA_VERSION,
 };
 use crate::scanner::ScanResults;
 
@@ -57,10 +58,37 @@ pub fn build_scan_result(results: &ScanResults, ctx: &JsonEmitContext) -> ScanRe
         tls: build_tls(results),
         certificates: build_certificates(&results.certificate_chain),
         validation: build_validation(results),
-        http: None,
+        http: build_http(results),
         raw_handshakes: None,
         errors: results.scan_errors.clone(),
     }
+}
+
+fn build_http(results: &ScanResults) -> Option<Http> {
+    let obs = results.http_observations.as_ref()?;
+    // Only emit the top-level `http` block when checks were actually run.
+    // Consumers read `http.enabled` as the authoritative gate — a missing
+    // block means the HTTP feature was compiled out or left disabled.
+    if !obs.enabled {
+        return None;
+    }
+    Some(Http {
+        enabled: true,
+        hsts: obs.hsts.as_ref().map(|h| Hsts {
+            header_present: h.header_present,
+            raw_value: h.raw_value.clone(),
+            max_age: h.max_age,
+            include_subdomains: h.include_subdomains,
+            preload: h.preload,
+        }),
+        preload_list_status: obs.preload_list_status.clone(),
+        security_txt: obs.security_txt.as_ref().map(|s| SecurityTxt {
+            present: s.present,
+            url: s.url.clone(),
+            content_type: s.content_type.clone(),
+            body: s.body.clone(),
+        }),
+    })
 }
 
 fn build_capabilities(ctx: &JsonEmitContext) -> Capabilities {

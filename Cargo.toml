@@ -9,6 +9,10 @@ keywords = ["tls", "pqc", "ml-kem", "scanner", "cryptography"]
 categories = ["network-programming", "command-line-utilities"]
 readme = "README.md"
 
+[features]
+default = ["http-checks"]
+http-checks = ["dep:reqwest"]
+
 [dependencies]
 # TLS implementation
 rustls = { version = "0.23", features = ["aws_lc_rs", "tls12", "std", "prefer-post-quantum"] }
@@ -57,6 +61,12 @@ hex = "0.4"
 # Cryptographic operations
 sha2 = "0.10"  # For certificate fingerprints
 sha-1 = "0.10"  # For SHA-1 fingerprints
+
+# HTTP client for HSTS / security.txt observations (feature-gated).
+# Uses webpki-roots (Mozilla CA bundle) via rustls — matches the TLS
+# validation path in src/scanner/probe.rs so the HTTP probe sees the
+# same trust set.
+reqwest = { version = "0.12", optional = true, default-features = false, features = ["rustls-tls-webpki-roots", "charset", "http2"] }
 
 [build-dependencies]
 chrono = { version = "0.4", features = ["serde"] }

@@ -2,6 +2,7 @@ pub mod cert;
 pub mod ciphers;
 pub mod groups;
 pub mod hello;
+pub mod http;
 pub mod legacy;
 pub mod probe;
 pub mod runner;
@@ -21,6 +22,7 @@ use crate::model::protocol::{ProtocolSupport, TlsVersion};
 use crate::scanner::ciphers::{probe_cipher_suites, CipherProbeOutput};
 use crate::scanner::groups::{probe_kx_groups, GroupProbeOutput};
 use crate::scanner::hello::{probe_hello_extensions, HelloExtensionsObserved};
+use crate::scanner::http::{probe_http, HttpObservations};
 use crate::scanner::probe::{characterize_connection, NegotiatedState, ValidationResult};
 use crate::scanner::sni::{probe_sni_omitted, SniBehaviorResult};
 
@@ -47,6 +49,11 @@ pub struct ScanConfig {
     /// to a single target are already serialized; this controls how
     /// aggressively we hit that target.
     pub per_target_delay: Duration,
+    /// Fire HTTP observations (HSTS / security.txt / preload list)
+    /// after TLS probes complete.
+    pub enable_http_checks: bool,
+    /// Appended to User-Agent when HTTP checks fire: `kemist/<ver> (+<url>)`.
+    pub user_agent_info_url: String,
 }
 
 #[derive(Debug)]
@@ -94,6 +101,10 @@ pub struct ScanResults {
     /// Populated by PR 9 Part B via a dedicated TLS 1.2 probe.
     #[serde(skip_serializing)]
     pub hello_observed: Option<HelloExtensionsObserved>,
+    /// HTTP-layer observations (HSTS / security.txt / preload list).
+    /// Populated by PR 10. Feeds the top-level `http` field in schema.
+    #[serde(skip_serializing)]
+    pub http_observations: Option<HttpObservations>,
     /// Probe-level failures accumulated during the scan. Never aborts scan()
     /// even if every entry errors — downstream consumers read this alongside
     /// the partial observations.
@@ -135,6 +146,7 @@ impl SslScanner {
             group_probes: None,
             sni_behavior: None,
             hello_observed: None,
+            http_observations: None,
             scan_errors: vec![],
         };
 
@@ -245,6 +257,21 @@ impl SslScanner {
                 self.config.target,
                 &self.config.hostname,
                 self.config.timeout,
+                self.config.timeout,
+            )
+            .await,
+        );
+        pause().await;
+
+        // HTTP-layer observations (HSTS, security.txt, preload list).
+        // Gated by `enable_http_checks` — even when the cargo feature
+        // is compiled in, HTTP only fires when the CLI opts in.
+        results.http_observations = Some(
+            probe_http(
+                &self.config.hostname,
+                self.config.target.port(),
+                self.config.enable_http_checks,
+                &self.config.user_agent_info_url,
                 self.config.timeout,
             )
             .await,

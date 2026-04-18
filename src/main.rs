@@ -86,6 +86,19 @@ struct Args {
     #[arg(long)]
     ipv6: bool,
 
+    /// Fire HTTP-layer observations (HSTS, security.txt, preload list)
+    /// after TLS probes complete. Requires the `http-checks` cargo
+    /// feature (default on).
+    #[arg(long)]
+    enable_http_checks: bool,
+
+    /// Identifier URL appended to the User-Agent when HTTP checks fire:
+    /// `kemist/<ver> (+<url>)`. Lets server operators trace requests
+    /// back to a kemist scan — set to a contact/repo URL. Ignored
+    /// without --enable-http-checks.
+    #[arg(long, value_name = "URL")]
+    user_agent_info_url: Option<String>,
+
     /// Increase logging verbosity (-v info, -vv debug, -vvv trace).
     #[arg(short, long, action = clap::ArgAction::Count)]
     verbose: u8,
@@ -144,6 +157,17 @@ async fn run() -> Result<()> {
 
     validate_output_routing(&args)?;
 
+    let user_agent_info_url = match (args.enable_http_checks, args.user_agent_info_url.clone()) {
+        (true, Some(u)) => u,
+        (true, None) => {
+            // Default to the project URL. Operators who run kemist against
+            // targets they don't own should set --user-agent-info-url to
+            // their own contact address so site operators can reach them.
+            "https://www.kemist-tls.net".to_string()
+        }
+        (false, _) => "https://www.kemist-tls.net".to_string(),
+    };
+
     let scanner = Scanner::new(ScannerConfig {
         concurrency: args.concurrency.max(1),
         per_target_delay: Duration::from_millis(args.per_target_delay),
@@ -156,6 +180,8 @@ async fn run() -> Result<()> {
         ipv6_only: args.ipv6,
         enabled_features: enabled_cargo_features(),
         config_paths: vec![],
+        enable_http_checks: args.enable_http_checks,
+        user_agent_info_url,
     });
 
     let results = scanner.scan_many(targets).await;
