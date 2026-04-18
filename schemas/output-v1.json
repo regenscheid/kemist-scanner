@@ -280,14 +280,25 @@
     },
     "cipherSuiteEntry": {
       "type": "object",
-      "required": ["name", "iana_code", "method"],
+      "required": ["name", "iana_code", "supported", "method"],
       "properties": {
         "name": { "type": "string" },
         "iana_code": { "type": "string", "pattern": "^0x[0-9A-Fa-f]{4}$" },
+        "supported": { "type": ["boolean", "null"] },
         "method": { "$ref": "#/$defs/method" },
         "reason": { "type": "string" }
       },
-      "additionalProperties": false
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": { "properties": { "method": { "const": "probe" } } },
+          "then": { "properties": { "supported": { "type": "boolean" } } }
+        },
+        {
+          "if": { "properties": { "method": { "enum": ["not_probed", "not_applicable", "error"] } } },
+          "then": { "properties": { "supported": { "type": "null" } }, "required": ["reason"] }
+        }
+      ]
     },
     "certificateFacts": {
       "type": "object",

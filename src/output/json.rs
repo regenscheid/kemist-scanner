@@ -146,47 +146,74 @@ fn build_versions_offered(
 }
 
 fn build_negotiated_from_state(results: &ScanResults) -> Option<TlsNegotiated> {
-    // Populated by PR 5: the characterization handshake captures what
-    // actually got negotiated. Falls back to the old "preferred" heuristic
-    // only when characterization failed (e.g. connection refused).
-    if let Some(n) = &results.negotiated {
-        let version = n
-            .version
-            .map(|v| v.as_str().to_string())
-            .unwrap_or_else(|| "unknown".to_string());
-        return Some(TlsNegotiated {
-            version,
-            cipher_suite: n.cipher_suite_name.clone(),
-            group: n.kx_group_name.clone(),
-            signature_scheme: n.signature_scheme.clone(),
-            alpn: n.alpn_negotiated.clone(),
-        });
-    }
-    results.preferred_cipher.as_ref().map(|c| TlsNegotiated {
-        version: c.protocol_version.as_str().to_string(),
-        cipher_suite: Some(c.iana_name.clone()),
-        group: None,
-        signature_scheme: None,
-        alpn: None,
+    // The characterization handshake captures what actually got negotiated.
+    // When characterization failed (e.g. connection refused), leave the
+    // schema's `tls.negotiated` field absent rather than synthesizing.
+    let n = results.negotiated.as_ref()?;
+    let version = n
+        .version
+        .map(|v| v.as_str().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    Some(TlsNegotiated {
+        version,
+        cipher_suite: n.cipher_suite_name.clone(),
+        group: n.kx_group_name.clone(),
+        signature_scheme: n.signature_scheme.clone(),
+        alpn: n.alpn_negotiated.clone(),
     })
 }
 
 fn build_cipher_suites(results: &ScanResults) -> TlsCipherSuites {
-    let (tls12, tls13): (Vec<_>, Vec<_>) = results
-        .cipher_suites
-        .iter()
-        .filter(|c| c.supported)
-        .partition(|c| c.cipher.protocol_version == TlsVersion::Tls12);
-    let to_entry = |c: &crate::model::cipher::CipherSuiteResult| CipherSuiteEntry {
-        name: c.cipher.iana_name.clone(),
-        iana_code: format!("0x{:04X}", c.cipher.id),
-        method: Method::NotProbed,
-        reason: Some("pending_pr_7_per_cipher_probes".to_string()),
+    let Some(probes) = &results.cipher_probes else {
+        // Probes didn't run (e.g. --no-ciphersuites, or connection refused
+        // before probing started). Emit an empty schema structure with
+        // server_enforces_order marked not_probed.
+        return TlsCipherSuites {
+            tls1_2: Vec::new(),
+            tls1_3: Vec::new(),
+            server_enforces_order: ObservationBool::not_probed("cipher_probes_did_not_run"),
+        };
     };
+
+    let to_entry = |r: &crate::scanner::ciphers::CipherProbeResult| {
+        use crate::scanner::ciphers::ProbeOutcome;
+        let (supported, method, reason) = match &r.outcome {
+            ProbeOutcome::Supported => (Some(true), Method::Probe, None),
+            ProbeOutcome::NotSupported => (Some(false), Method::Probe, None),
+            ProbeOutcome::Error(e) => (None, Method::Error, Some(e.clone())),
+        };
+        CipherSuiteEntry {
+            name: r.name.clone(),
+            iana_code: format!("0x{:04X}", r.iana_code),
+            supported,
+            method,
+            reason,
+        }
+    };
+
+    let mut tls1_2 = Vec::new();
+    let mut tls1_3 = Vec::new();
+    for r in &probes.results {
+        let entry = to_entry(r);
+        match r.version {
+            TlsVersion::Tls12 => tls1_2.push(entry),
+            TlsVersion::Tls13 => tls1_3.push(entry),
+            _ => {}
+        }
+    }
+
+    let server_enforces_order = match probes.server_enforces_order {
+        Some(v) => ObservationBool::probe(v),
+        None => match &probes.order_probe_error {
+            Some(e) => ObservationBool::error(e),
+            None => ObservationBool::not_probed("order_probe_inconclusive"),
+        },
+    };
+
     TlsCipherSuites {
-        tls1_2: tls12.iter().map(|c| to_entry(c)).collect(),
-        tls1_3: tls13.iter().map(|c| to_entry(c)).collect(),
-        server_enforces_order: ObservationBool::not_probed("pending_pr_7"),
+        tls1_2,
+        tls1_3,
+        server_enforces_order,
     }
 }
 

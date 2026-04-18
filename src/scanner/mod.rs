@@ -1,4 +1,5 @@
 pub mod cert;
+pub mod ciphers;
 pub mod legacy;
 pub mod probe;
 pub mod runner;
@@ -12,11 +13,9 @@ use tokio_rustls::{rustls, TlsConnector};
 use tracing::{debug, info};
 
 use crate::model::cert::CertificateInfo;
-use crate::model::cipher::{
-    get_rustls_cipher_suites, rustls_to_cipher_info, CipherInfo, CipherSuiteResult,
-};
 use crate::model::errors::ScannerError;
 use crate::model::protocol::{ProtocolSupport, TlsVersion};
+use crate::scanner::ciphers::{probe_cipher_suites, CipherProbeOutput};
 use crate::scanner::probe::{characterize_connection, NegotiatedState, ValidationResult};
 
 // Scanner-module functions return `Result<T, ScannerError>` explicitly rather
@@ -65,10 +64,8 @@ pub struct ScanResults {
     pub port: u16,
     pub scan_time: chrono::DateTime<chrono::Utc>,
     pub protocol_support: Vec<ProtocolSupport>,
-    pub cipher_suites: Vec<CipherSuiteResult>,
     pub key_exchange_groups: Vec<KeyExchangeGroup>,
     pub certificate_chain: Vec<CertificateInfo>,
-    pub preferred_cipher: Option<CipherInfo>,
     pub tls_renegotiation: TlsRenegotiation,
     pub heartbeat_echoes_oversized_payload: Option<bool>,
     pub fallback_scsv_accepted: Option<bool>,
@@ -84,6 +81,10 @@ pub struct ScanResults {
     /// category string. Populated by PR 6. Feeds `validation.*` in schema.
     #[serde(skip_serializing)]
     pub validation: ValidationResult,
+    /// Real per-cipher probe results + server ordering observation.
+    /// Populated by PR 7. Feeds `tls.cipher_suites.*` in schema.
+    #[serde(skip_serializing)]
+    pub cipher_probes: Option<CipherProbeOutput>,
     /// Probe-level failures accumulated during the scan. Never aborts scan()
     /// even if every entry errors — downstream consumers read this alongside
     /// the partial observations.
@@ -111,10 +112,8 @@ impl SslScanner {
             port: self.config.target.port(),
             scan_time: chrono::Utc::now(),
             protocol_support: vec![],
-            cipher_suites: vec![],
             key_exchange_groups: vec![],
             certificate_chain: vec![],
-            preferred_cipher: None,
             tls_renegotiation: TlsRenegotiation {
                 secure_renegotiation: None,
                 compression_supported: None,
@@ -124,6 +123,7 @@ impl SslScanner {
             negotiated: None,
             alpn_offered: vec![],
             validation: ValidationResult::default(),
+            cipher_probes: None,
             scan_errors: vec![],
         };
 
@@ -153,10 +153,18 @@ impl SslScanner {
         pause().await;
 
         if !self.config.no_ciphersuites {
-            match self.test_cipher_suites().await {
-                Ok(v) => results.cipher_suites = v,
-                Err(e) => results.scan_errors.push(e),
-            }
+            // Real per-cipher probing: one handshake per aws-lc-rs suite,
+            // plus two for order-enforcement detection. Respects the
+            // per_target_delay between handshakes inside this function.
+            let probe_out = probe_cipher_suites(
+                self.config.target,
+                &self.config.hostname,
+                self.config.timeout,
+                self.config.timeout,
+                self.config.per_target_delay,
+            )
+            .await;
+            results.cipher_probes = Some(probe_out);
             pause().await;
         }
 
@@ -188,10 +196,6 @@ impl SslScanner {
                 // partial state; otherwise propagate the error.
                 results.scan_errors.push(e);
             }
-        }
-
-        if let Some(preferred) = results.cipher_suites.iter().find(|c| c.preferred) {
-            results.preferred_cipher = Some(preferred.cipher.clone());
         }
 
         results
@@ -270,45 +274,6 @@ impl SslScanner {
                 error: Some(e.to_string()),
             },
         }
-    }
-
-    async fn test_cipher_suites(&self) -> Result<Vec<CipherSuiteResult>, ScannerError> {
-        let mut results = Vec::new();
-
-        // Get all available cipher suites
-        let cipher_suites = get_rustls_cipher_suites();
-
-        for suite in cipher_suites {
-            debug!("Testing cipher suite: {:?}", suite);
-
-            // Create config with only this cipher suite
-            let _config = rustls::ClientConfig::builder()
-                .dangerous()
-                .with_custom_certificate_verifier(Arc::new(AcceptAllVerifier))
-                .with_no_client_auth();
-
-            // Note: rustls doesn't allow configuring individual cipher suites easily
-            // This is a limitation compared to OpenSSL-based scanners
-            // For now, we'll test with default configurations
-
-            // Let rustls_to_cipher_info determine the correct TLS version
-            let cipher_info = rustls_to_cipher_info(suite);
-
-            // In a real implementation, we'd test each cipher individually
-            // For now, mark all rustls default ciphers as supported
-            results.push(CipherSuiteResult {
-                cipher: cipher_info,
-                supported: true,
-                preferred: false,
-            });
-        }
-
-        // Mark the first successful cipher as preferred
-        if let Some(first) = results.first_mut() {
-            first.preferred = true;
-        }
-
-        Ok(results)
     }
 
     async fn connect_with_timeout(&self, connector: TlsConnector) -> Result<(), ScannerError> {

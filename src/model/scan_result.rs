@@ -202,6 +202,11 @@ pub struct TlsNegotiated {
 pub struct CipherSuiteEntry {
     pub name: String,
     pub iana_code: String,
+    /// `Some(true)` = probed and negotiated; `Some(false)` = probed and
+    /// rejected; `None` = probe didn't produce a definitive answer (see
+    /// `method`/`reason`). Downstream consumers MUST distinguish `Some(false)`
+    /// from `None` — absence of probe is not absence of support.
+    pub supported: Option<bool>,
     pub method: Method,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,

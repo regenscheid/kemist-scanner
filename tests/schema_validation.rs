@@ -5,7 +5,6 @@
 //! contract, which must never regress even when values change.
 
 use chrono::{TimeZone, Utc};
-use kemist::model::cipher::{CipherInfo, CipherSuiteResult};
 use kemist::model::errors::ScannerError;
 use kemist::model::protocol::{ProtocolSupport, TlsVersion};
 use kemist::output::json::{build_scan_result, JsonEmitContext};
@@ -49,21 +48,6 @@ fn fixture_results() -> ScanResults {
                 error: None,
             },
         ],
-        cipher_suites: vec![CipherSuiteResult {
-            cipher: CipherInfo {
-                id: 0x1302,
-                iana_name: "TLS_AES_256_GCM_SHA384".to_string(),
-                openssl_name: None,
-                key_exchange: "TLS1.3".to_string(),
-                authentication: "TLS1.3".to_string(),
-                encryption: "AES_256_GCM".to_string(),
-                bits: 256,
-                mac: "SHA384".to_string(),
-                protocol_version: TlsVersion::Tls13,
-            },
-            supported: true,
-            preferred: true,
-        }],
         key_exchange_groups: vec![KeyExchangeGroup {
             name: "X25519MLKEM768".to_string(),
             iana_name: "x25519_mlkem768".to_string(),
@@ -72,7 +56,6 @@ fn fixture_results() -> ScanResults {
             post_quantum: true,
         }],
         certificate_chain: vec![],
-        preferred_cipher: None,
         tls_renegotiation: TlsRenegotiation {
             secure_renegotiation: Some(true),
             compression_supported: Some(false),
@@ -82,6 +65,7 @@ fn fixture_results() -> ScanResults {
         negotiated: None,
         alpn_offered: vec![],
         validation: kemist::scanner::probe::ValidationResult::default(),
+        cipher_probes: None,
         scan_errors: vec![],
     }
 }

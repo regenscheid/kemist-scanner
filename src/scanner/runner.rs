@@ -217,7 +217,7 @@ impl Scanner {
                     && results.scan_errors.iter().all(|e| e.is_transient());
                 let no_data = results.protocol_support.is_empty()
                     && results.certificate_chain.is_empty()
-                    && results.cipher_suites.is_empty();
+                    && results.cipher_probes.is_none();
 
                 if attempt < max_attempts && only_transient && no_data {
                     let backoff =
@@ -290,10 +290,8 @@ fn empty_scan_results(target: &Target, addr: SocketAddr) -> crate::scanner::Scan
         port: target.port,
         scan_time: Utc::now(),
         protocol_support: vec![],
-        cipher_suites: vec![],
         key_exchange_groups: vec![],
         certificate_chain: vec![],
-        preferred_cipher: None,
         tls_renegotiation: crate::scanner::TlsRenegotiation {
             secure_renegotiation: None,
             compression_supported: None,
@@ -303,6 +301,7 @@ fn empty_scan_results(target: &Target, addr: SocketAddr) -> crate::scanner::Scan
         negotiated: None,
         alpn_offered: vec![],
         validation: crate::scanner::probe::ValidationResult::default(),
+        cipher_probes: None,
         scan_errors: vec![],
     }
 }
