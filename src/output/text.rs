@@ -1,9 +1,7 @@
 //! Human-readable terminal renderer for schema-v1 `ScanResult` records.
 //!
-//! Pattern A: no verdicts. Every line is a factual observation. Colors
-//! are neutral signals (green = supported/true, dim = absent/false,
-//! yellow = not_probed/error, cyan = PQC). Downstream rule engines still
-//! consume JSON; this view is for interactive debugging of single scans.
+//! Downstream rule engines consume the  JSON output; this view is for 
+//! interactive debugging of single scans.
 //!
 //! ## Glyph legend
 //! - `+` supported / true

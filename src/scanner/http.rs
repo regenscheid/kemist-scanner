@@ -35,8 +35,7 @@ pub struct HttpObservations {
     /// `"included"`, `"not_included"`, or `None` when the lookup was skipped.
     pub preload_list_status: Option<String>,
     pub security_txt: Option<SecurityTxtObservation>,
-    /// Populated when a probe step errored — not a Pattern A concern,
-    /// just a breadcrumb for debugging.
+    /// Populated when a probe step errored — a breadcrumb for debugging.
     pub errors: Vec<String>,
 }
 

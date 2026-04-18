@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/andrewreg/kemist/schemas/output-v1.json",
+  "$id": "https://github.com/regenscheid/kemist-scanner/schemas/output-v1.json",
   "title": "kemist scan result (schema v1)",
   "description": "One record per scanned target. See docs/OUTPUT_SCHEMA.md for field-by-field semantics. Tri-state: {value: false, method: probe} is a real negative, {value: null, method: not_probed|not_applicable|error} is an absence of signal — downstream rule engines MUST distinguish these.",
   "type": "object",
