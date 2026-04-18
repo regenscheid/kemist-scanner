@@ -81,6 +81,21 @@ impl ScannerError {
         Self::new("internal_scanner_error", context)
     }
 
+    /// Whether this failure category is worth retrying. TLS alerts and cert
+    /// parse errors are real signal about the server — do NOT retry those.
+    /// Connection-level failures may be transient (load balancer blip, DNS
+    /// propagation) — retry with backoff.
+    pub fn is_transient(&self) -> bool {
+        matches!(
+            self.category.as_str(),
+            "connection_timeout"
+                | "handshake_timeout"
+                | "connection_refused"
+                | "network_unreachable"
+                | "dns_resolution_failed"
+        )
+    }
+
     /// Classify a `std::io::Error` into a ScannerError category. Inspects
     /// `ErrorKind` first, then falls back to string heuristics for TLS
     /// alerts surfaced through tokio_rustls. PR 5 will replace string

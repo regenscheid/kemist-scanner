@@ -1,4 +1,5 @@
 pub mod legacy;
+pub mod runner;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -43,6 +44,10 @@ pub struct ScanConfig {
     pub _show_failed: bool,
     pub no_ciphersuites: bool,
     pub tls_version: Option<TlsVersion>,
+    /// Per-probe delay hint. Honored between probes inside `scan()` — probes
+    /// to a single target are already serialized; this controls how
+    /// aggressively we hit that target.
+    pub per_target_delay: Duration,
 }
 
 #[derive(Debug)]
@@ -106,28 +111,42 @@ impl SslScanner {
 
         // Every probe feeds into `results` on success and `scan_errors` on
         // failure. No early returns — the scan completes regardless.
+        // `per_target_delay` spaces probes so we don't hammer a single host.
+        let delay = self.config.per_target_delay;
+        let pause = || async move {
+            if !delay.is_zero() {
+                tokio::time::sleep(delay).await;
+            }
+        };
+
         match self.test_protocol_support().await {
             Ok(v) => results.protocol_support = v,
             Err(e) => results.scan_errors.push(e),
         }
+        pause().await;
 
         results.fallback_scsv_accepted = self.test_fallback_scsv().await;
+        pause().await;
 
         results.tls_renegotiation = self.test_tls_renegotiation().await;
+        pause().await;
 
         results.heartbeat_echoes_oversized_payload = self.test_heartbleed(&mut results).await;
+        pause().await;
 
         if !self.config.no_ciphersuites {
             match self.test_cipher_suites().await {
                 Ok(v) => results.cipher_suites = v,
                 Err(e) => results.scan_errors.push(e),
             }
+            pause().await;
         }
 
         match self.test_key_exchange_groups().await {
             Ok(v) => results.key_exchange_groups = v,
             Err(e) => results.scan_errors.push(e),
         }
+        pause().await;
 
         match self.get_certificate_chain().await {
             Ok(certs) => results.certificate_chain = certs,

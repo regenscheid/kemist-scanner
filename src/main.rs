@@ -1,13 +1,17 @@
-use anyhow::Result;
-use clap::Parser;
-use colored::*;
-use std::net::{IpAddr, SocketAddr};
-use std::time::Duration;
-use tracing::info;
+//! kemist CLI — thin wrapper over the public [`kemist::Scanner`] API.
+//!
+//! Responsibilities: parse flags + target inputs, construct a `Scanner`,
+//! route emitted `ScanResult` records through the chosen output path.
+//! All scanning logic lives in the library so other binaries can reuse it.
 
-use kemist::{model, output, scanner};
-use output::OutputFormat;
-use scanner::SslScanner;
+use std::io::{self, BufRead, Write};
+use std::path::PathBuf;
+use std::process::ExitCode;
+use std::time::Duration;
+
+use anyhow::{Context, Result};
+use clap::Parser;
+use kemist::{Scanner, ScannerConfig, ScannerError, Target};
 
 /// kemist — TLS + PQC observation scanner
 #[derive(Parser, Debug)]
@@ -15,66 +19,87 @@ use scanner::SslScanner;
 #[command(version)]
 #[command(about = "TLS + PQC observation scanner", long_about = None)]
 struct Args {
-    /// Target to scan (hostname:port, hostname, or IP:port). Default port is 443
-    target: String,
+    /// Target to scan (repeatable). Syntax: `host[:port][#sni=alt.example.com]`.
+    /// Default port is 443.
+    #[arg(long = "target", value_name = "HOST[:PORT][#sni=NAME]")]
+    targets: Vec<String>,
 
-    /// Output format
-    #[arg(short = 'f', long, value_enum, default_value_t = OutputFormat::Text)]
+    /// Read newline-delimited targets from a file.
+    #[arg(long, value_name = "PATH")]
+    targets_file: Option<PathBuf>,
+
+    /// Read newline-delimited targets from stdin.
+    #[arg(long)]
+    targets_stdin: bool,
+
+    /// Maximum concurrent targets.
+    #[arg(long, default_value_t = 10)]
+    concurrency: usize,
+
+    /// Minimum delay between probes to the same target (milliseconds).
+    #[arg(long, default_value_t = 100)]
+    per_target_delay: u64,
+
+    /// TCP connect timeout (seconds).
+    #[arg(long, default_value_t = 10)]
+    connect_timeout: u64,
+
+    /// TLS handshake timeout (seconds).
+    #[arg(long, default_value_t = 15)]
+    handshake_timeout: u64,
+
+    /// Hard ceiling on total wall-clock time per target, including retries (seconds).
+    #[arg(long, default_value_t = 60)]
+    total_timeout: u64,
+
+    /// Retry attempts on transient network errors (0 disables).
+    #[arg(long, default_value_t = 2)]
+    retries: u32,
+
+    /// Output format.
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
     format: OutputFormat,
 
-    /// Show certificate details
-    #[arg(long)]
-    show_certificate: bool,
+    /// Write NDJSON stream (one record per line) to a file instead of stdout.
+    /// Requires `--format json`.
+    #[arg(long, value_name = "PATH")]
+    output_file: Option<PathBuf>,
 
-    /// Show failed cipher tests
-    #[arg(long)]
-    show_failed: bool,
+    /// Write one pretty-printed JSON file per target into this directory.
+    /// Requires `--format json-pretty`. Filename: `<sanitized_host>_<unix>.json`.
+    #[arg(long, value_name = "PATH")]
+    output_dir: Option<PathBuf>,
 
-    /// Disable colored output
+    /// Disable colored output.
     #[arg(long)]
     no_color: bool,
 
-    /// Disable cipher suite testing
-    #[arg(long)]
-    no_ciphersuites: bool,
-
-    /// Test only specific TLS version
+    /// Restrict probes to a single TLS version.
     #[arg(long, value_parser = parse_tls_version)]
-    tls_version: Option<model::protocol::TlsVersion>,
+    tls_version: Option<kemist::model::protocol::TlsVersion>,
 
-    /// Connection timeout in seconds
-    #[arg(long, default_value_t = 5)]
-    timeout: u64,
-
-    /// Use IPv4 only
+    /// Use IPv4 only for DNS resolution.
     #[arg(long)]
     ipv4: bool,
 
-    /// Use IPv6 only
+    /// Use IPv6 only for DNS resolution.
     #[arg(long)]
     ipv6: bool,
 
-    /// Server name for SNI
-    #[arg(long)]
-    sni_name: Option<String>,
-
-    /// Output file for results
-    #[arg(short, long)]
-    output: Option<String>,
-
-    /// Enable verbose logging
+    /// Increase logging verbosity (-v info, -vv debug, -vvv trace).
     #[arg(short, long, action = clap::ArgAction::Count)]
     verbose: u8,
 }
 
-fn enabled_cargo_features() -> Vec<String> {
-    // Hardcoded for PR 2 — PR 13 replaces with build-time feature inspection.
-    // Today kemist has no cargo features defined.
-    Vec::new()
+#[derive(Debug, Clone, Copy, clap::ValueEnum, PartialEq)]
+enum OutputFormat {
+    Text,
+    Json,
+    JsonPretty,
 }
 
-fn parse_tls_version(s: &str) -> Result<model::protocol::TlsVersion, String> {
-    use model::protocol::TlsVersion;
+fn parse_tls_version(s: &str) -> std::result::Result<kemist::model::protocol::TlsVersion, String> {
+    use kemist::model::protocol::TlsVersion;
     match s.to_lowercase().as_str() {
         "ssl2" | "sslv2" => Ok(TlsVersion::Ssl2),
         "ssl3" | "sslv3" => Ok(TlsVersion::Ssl3),
@@ -82,228 +107,239 @@ fn parse_tls_version(s: &str) -> Result<model::protocol::TlsVersion, String> {
         "tls1.1" | "tlsv1.1" | "1.1" => Ok(TlsVersion::Tls11),
         "tls1.2" | "tlsv1.2" | "1.2" => Ok(TlsVersion::Tls12),
         "tls1.3" | "tlsv1.3" | "1.3" => Ok(TlsVersion::Tls13),
-        _ => Err(format!("Unknown TLS version: {}", s)),
+        _ => Err(format!("Unknown TLS version: {s}")),
     }
-}
-
-fn parse_target(target: &str, default_port: u16) -> (String, u16) {
-    if let Some(colon_pos) = target.rfind(':') {
-        // Check if this is a port separator (not part of IPv6 address)
-        if target.starts_with('[') && target.contains(']') {
-            // IPv6 format like [::1]:443
-            if let Some(bracket_end) = target.find(']') {
-                if colon_pos > bracket_end {
-                    // Port specified after IPv6 address
-                    let host = &target[..colon_pos];
-                    if let Ok(port) = target[colon_pos + 1..].parse::<u16>() {
-                        return (host.to_string(), port);
-                    }
-                }
-            }
-        } else if !target.contains("::") || target.matches(':').count() == 1 {
-            // IPv4 or hostname with port, or single-colon IPv6
-            if let Ok(port) = target[colon_pos + 1..].parse::<u16>() {
-                let host = &target[..colon_pos];
-                return (host.to_string(), port);
-            }
-        }
-    }
-
-    // No port specified or failed to parse
-    (target.to_string(), default_port)
 }
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> ExitCode {
+    match run().await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("kemist: {e:#}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+async fn run() -> Result<()> {
     let args = Args::parse();
 
-    // Install crypto provider for rustls
+    if args.no_color {
+        colored::control::set_override(false);
+    }
+
+    install_logging(args.verbose);
+
+    // Install rustls crypto provider (must happen before any TLS op).
     rustls::crypto::aws_lc_rs::default_provider()
         .install_default()
-        .expect("Failed to install crypto provider");
+        .expect("failed to install rustls crypto provider");
 
-    // Initialize logging
-    let log_level = match args.verbose {
+    // Collect targets from all three input sources.
+    let targets = collect_targets(&args)?;
+    if targets.is_empty() {
+        anyhow::bail!("no targets specified — use --target, --targets-file, or --targets-stdin");
+    }
+
+    validate_output_routing(&args)?;
+
+    let scanner = Scanner::new(ScannerConfig {
+        concurrency: args.concurrency.max(1),
+        per_target_delay: Duration::from_millis(args.per_target_delay),
+        connect_timeout: Duration::from_secs(args.connect_timeout),
+        handshake_timeout: Duration::from_secs(args.handshake_timeout),
+        total_timeout: Duration::from_secs(args.total_timeout),
+        retries: args.retries,
+        tls_version_filter: args.tls_version,
+        ipv4_only: args.ipv4,
+        ipv6_only: args.ipv6,
+        enabled_features: enabled_cargo_features(),
+        config_paths: vec![],
+    });
+
+    let results = scanner.scan_many(targets).await;
+
+    emit(&args, &results)?;
+
+    Ok(())
+}
+
+fn install_logging(verbose: u8) {
+    let level = match verbose {
         0 => "warn",
         1 => "info",
         2 => "debug",
         _ => "trace",
     };
-
     tracing_subscriber::fmt()
-        .with_env_filter(format!("kemist={}", log_level))
+        .with_env_filter(format!("kemist={level}"))
         .init();
+}
 
-    // Disable colors if requested
-    if args.no_color {
-        colored::control::set_override(false);
+fn enabled_cargo_features() -> Vec<String> {
+    // No cargo features defined on kemist today. PR 13 will replace this
+    // with a build-time feature inspection macro.
+    Vec::new()
+}
+
+/// Collect targets from `--target`, `--targets-file`, and `--targets-stdin`.
+/// Duplicates are preserved — callers who want dedupe should do it upstream.
+fn collect_targets(args: &Args) -> Result<Vec<Target>> {
+    let mut raw: Vec<String> = Vec::new();
+
+    raw.extend(args.targets.iter().cloned());
+
+    if let Some(path) = &args.targets_file {
+        let file = std::fs::File::open(path)
+            .with_context(|| format!("open targets file: {}", path.display()))?;
+        for line in io::BufReader::new(file).lines() {
+            let line = line.with_context(|| format!("read targets file: {}", path.display()))?;
+            let t = line.trim();
+            if !t.is_empty() && !t.starts_with('#') {
+                raw.push(t.to_string());
+            }
+        }
     }
 
-    // Print banner and version info (only for text output)
-    if args.format == OutputFormat::Text {
-        println!("{}", "kemist — TLS + PQC observation scanner".bold().cyan());
-        println!("{}", "======================================".cyan());
-
-        // Print rustls and native-tls version info
-        let tls_version_info = get_tls_version_info();
-        println!("{} {}", "Powered by:".dimmed(), tls_version_info.green());
-        println!();
+    if args.targets_stdin {
+        let stdin = io::stdin();
+        for line in stdin.lock().lines() {
+            let line = line.context("read targets from stdin")?;
+            let t = line.trim();
+            if !t.is_empty() && !t.starts_with('#') {
+                raw.push(t.to_string());
+            }
+        }
     }
 
-    // Parse target (hostname:port or just hostname)
-    let (hostname, port) = parse_target(&args.target, 443);
-
-    // Resolve target
-    let target_addr = resolve_target(&hostname, port, args.ipv4, args.ipv6).await?;
-
-    info!("Scanning target: {}", target_addr);
-    if args.format == OutputFormat::Text {
-        println!(
-            "Testing SSL/TLS on {}:{}",
-            args.sni_name.as_ref().unwrap_or(&hostname),
-            port
+    let mut parsed = Vec::with_capacity(raw.len());
+    for r in raw {
+        parsed.push(
+            Target::parse(&r)
+                .map_err(|e: ScannerError| anyhow::anyhow!("invalid target '{r}': {e}"))?,
         );
-        println!();
     }
+    Ok(parsed)
+}
 
-    let sni_sent = args.sni_name.clone().unwrap_or_else(|| hostname.clone());
-
-    // Create scanner configuration
-    let config = scanner::ScanConfig {
-        target: target_addr,
-        hostname: sni_sent.clone(),
-        timeout: Duration::from_secs(args.timeout),
-        _show_certificate: args.show_certificate,
-        _show_failed: args.show_failed,
-        no_ciphersuites: args.no_ciphersuites,
-        tls_version: args.tls_version,
-    };
-
-    // Perform scan (with wall-clock bookends for schema v1 scan.duration_ms)
-    let scanner = SslScanner::new(config);
-    let started_at = chrono::Utc::now();
-    let results = scanner.scan().await;
-    let completed_at = chrono::Utc::now();
-
-    let emit_ctx = output::JsonEmitContext {
-        host: hostname.clone(),
-        port,
-        sni_sent,
-        resolved_ip: Some(target_addr.ip().to_string()),
-        started_at,
-        completed_at,
-        enabled_features: enabled_cargo_features(),
-        config_paths: vec![],
-    };
-
-    // Output results
-    match args.format {
-        OutputFormat::Text => output::print_text_results(&results),
-        OutputFormat::Json => output::print_json_results(&results, &emit_ctx, false)?,
-        OutputFormat::JsonPretty => output::print_json_results(&results, &emit_ctx, true)?,
+fn validate_output_routing(args: &Args) -> Result<()> {
+    if args.output_file.is_some() && args.format != OutputFormat::Json {
+        anyhow::bail!("--output-file requires --format json");
     }
-
-    // Save to file if requested
-    if let Some(output_file) = args.output {
-        output::save_results(&results, &emit_ctx, &output_file, args.format)?;
-        println!("\nResults saved to: {}", output_file);
+    if args.output_dir.is_some() && args.format != OutputFormat::JsonPretty {
+        anyhow::bail!("--output-dir requires --format json-pretty");
     }
-
+    if args.output_file.is_some() && args.output_dir.is_some() {
+        anyhow::bail!("--output-file and --output-dir are mutually exclusive");
+    }
     Ok(())
 }
 
-async fn resolve_target(
-    target: &str,
-    port: u16,
-    ipv4_only: bool,
-    ipv6_only: bool,
-) -> Result<SocketAddr> {
-    use hickory_resolver::TokioAsyncResolver;
-
-    // Try to parse as IP address first
-    if let Ok(ip) = target.parse::<IpAddr>() {
-        return Ok(SocketAddr::new(ip, port));
+fn emit(args: &Args, results: &[kemist::ScanResult]) -> Result<()> {
+    match args.format {
+        OutputFormat::Text => emit_text(results),
+        OutputFormat::Json => emit_ndjson(args, results),
+        OutputFormat::JsonPretty => emit_pretty(args, results),
     }
-
-    // Resolve hostname
-    let resolver = TokioAsyncResolver::tokio_from_system_conf()?;
-    let response = resolver.lookup_ip(target).await?;
-
-    let ips: Vec<IpAddr> = response.iter().collect();
-
-    let ip = if ipv4_only {
-        ips.into_iter()
-            .find(|ip| ip.is_ipv4())
-            .ok_or_else(|| anyhow::anyhow!("No IPv4 address found for {}", target))?
-    } else if ipv6_only {
-        ips.into_iter()
-            .find(|ip| ip.is_ipv6())
-            .ok_or_else(|| anyhow::anyhow!("No IPv6 address found for {}", target))?
-    } else {
-        ips.into_iter()
-            .next()
-            .ok_or_else(|| anyhow::anyhow!("No IP address found for {}", target))?
-    };
-
-    Ok(SocketAddr::new(ip, port))
 }
 
-/// Get rustls and native-tls version information
-fn get_tls_version_info() -> String {
-    let kemist_version = env!("CARGO_PKG_VERSION");
-
-    // Parse Cargo.toml to get dependency versions
-    let (rustls_version, crypto_info, native_tls_version) = parse_dependency_versions();
-
-    format!(
-        "rustls {} + {} | native-tls {} | kemist v{}",
-        rustls_version, crypto_info, native_tls_version, kemist_version
-    )
+fn emit_text(results: &[kemist::ScanResult]) -> Result<()> {
+    // PR 12 rewrites the text output against schema-v1. Until then, render
+    // a compact summary so interactive single-target scans stay usable.
+    for (i, r) in results.iter().enumerate() {
+        if i > 0 {
+            println!();
+            println!("{}", "─".repeat(60));
+            println!();
+        }
+        print_text_summary(r);
+    }
+    Ok(())
 }
 
-/// Parse dependency versions from Cargo.toml
-fn parse_dependency_versions() -> (String, String, String) {
-    // Include Cargo.toml content at compile time
-    let cargo_toml = include_str!("../Cargo.toml");
+fn print_text_summary(r: &kemist::ScanResult) {
+    use colored::Colorize;
+    println!("{}", "kemist scan".bold().cyan());
+    println!("  target:      {}", r.scan.target);
+    if let Some(ip) = &r.scan.resolved_ip {
+        println!("  resolved_ip: {ip}");
+    }
+    println!("  sni_sent:    {}", r.scan.sni_sent);
+    println!("  duration_ms: {}", r.scan.duration_ms);
+    if let Some(neg) = &r.tls.negotiated {
+        println!(
+            "  negotiated:  version={} suite={}",
+            neg.version,
+            neg.cipher_suite.as_deref().unwrap_or("-")
+        );
+    }
+    println!("  cert chain:  {}", r.certificates.chain_length);
+    println!("  errors:      {}", r.errors.len());
+    for e in &r.errors {
+        println!("    - [{}] {}", e.category.yellow(), e.context);
+    }
+}
 
-    let mut rustls_version = "unknown".to_string();
-    let mut native_tls_version = "unknown".to_string();
-    let mut has_post_quantum = false;
+fn emit_ndjson(args: &Args, results: &[kemist::ScanResult]) -> Result<()> {
+    let mut writer: Box<dyn Write> = match &args.output_file {
+        Some(path) => Box::new(
+            std::fs::File::create(path)
+                .with_context(|| format!("create output file: {}", path.display()))?,
+        ),
+        None => Box::new(io::stdout().lock()),
+    };
+    for r in results {
+        serde_json::to_writer(&mut writer, r).context("serialize NDJSON record")?;
+        writer.write_all(b"\n").context("write NDJSON delimiter")?;
+    }
+    writer.flush().context("flush output")?;
+    Ok(())
+}
 
-    // Parse dependency versions from Cargo.toml
-    for line in cargo_toml.lines() {
-        let line = line.trim();
-        if line.starts_with("rustls = {") {
-            // Parse `rustls = { version = "0.23", ... }` format
-            if let Some(version_pos) = line.find("version = \"") {
-                let version_start = version_pos + 11; // length of 'version = "'
-                if let Some(version_end) = line[version_start..].find('"') {
-                    rustls_version = line[version_start..version_start + version_end].to_string();
-                }
+fn emit_pretty(args: &Args, results: &[kemist::ScanResult]) -> Result<()> {
+    match &args.output_dir {
+        Some(dir) => {
+            std::fs::create_dir_all(dir)
+                .with_context(|| format!("create output dir: {}", dir.display()))?;
+            for r in results {
+                let filename = per_target_filename(r);
+                let path = dir.join(filename);
+                let json = serde_json::to_string_pretty(r).context("serialize pretty record")?;
+                std::fs::write(&path, json).with_context(|| format!("write {}", path.display()))?;
             }
+            Ok(())
         }
-        if line.starts_with("native-tls = \"") {
-            // Parse `native-tls = "0.2"` format
-            if let Some(version_start) = line.find('"') {
-                let version_start = version_start + 1;
-                if let Some(version_end) = line[version_start..].find('"') {
-                    native_tls_version =
-                        line[version_start..version_start + version_end].to_string();
+        None => {
+            // Single-target convenience: pretty-print to stdout.
+            let stdout = io::stdout();
+            let mut w = stdout.lock();
+            for (i, r) in results.iter().enumerate() {
+                if i > 0 {
+                    writeln!(w).ok();
                 }
+                let json = serde_json::to_string_pretty(r).context("serialize pretty record")?;
+                writeln!(w, "{json}").context("write pretty record")?;
             }
-        }
-        // Check for post-quantum features
-        if line.contains("prefer-post-quantum") {
-            has_post_quantum = true;
+            Ok(())
         }
     }
+}
 
-    // Detect crypto provider and post-quantum support
-    let crypto_info = if has_post_quantum {
-        "aws-lc-rs (post-quantum)".to_string()
-    } else {
-        "aws-lc-rs".to_string()
-    };
-
-    (rustls_version, crypto_info, native_tls_version)
+fn per_target_filename(r: &kemist::ScanResult) -> String {
+    let host = &r.scan.host;
+    let port = r.scan.port;
+    let ts = r.scan.started_at.timestamp();
+    // Sanitize host for filesystem use: keep [a-zA-Z0-9.-_], replace others with '_'.
+    let sanitized: String = host
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || ".-_".contains(c) {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    format!("{sanitized}_{port}_{ts}.json")
 }
