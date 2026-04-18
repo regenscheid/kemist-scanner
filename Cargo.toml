@@ -1,0 +1,72 @@
+[package]
+name = "kemist"
+version = "0.1.0"
+edition = "2021"
+authors = ["Chris Yuan <chris.yuan@0x0.tw>", "kemist contributors"]
+description = "TLS + PQC observation scanner: records what servers support, emits structured JSON"
+license = "MIT OR Apache-2.0"
+keywords = ["tls", "pqc", "ml-kem", "scanner", "cryptography"]
+categories = ["network-programming", "command-line-utilities"]
+readme = "README.md"
+
+[dependencies]
+# TLS implementation
+rustls = { version = "0.23", features = ["aws_lc_rs", "tls12", "std", "prefer-post-quantum"] }
+rustls-native-certs = "0.8"
+webpki-roots = "0.26"
+rustls-pki-types = "1"
+
+# Add native-tls to support old version SSL/TLS protocol
+native-tls = "0.2"
+tokio-native-tls = "0.3"
+
+# Async runtime and networking
+tokio = { version = "1", features = ["full"] }
+tokio-rustls = "0.26"
+
+# CLI and output
+clap = { version = "4", features = ["derive", "color", "cargo"] }
+colored = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+quick-xml = { version = "0.31", features = ["serialize"] }
+
+# Certificate parsing
+x509-parser = "0.16"
+der-parser = "9"
+oid-registry = "0.7"
+
+# Error handling and utilities
+anyhow = "1"
+thiserror = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
+
+# Network utilities - migrated from trust-dns-resolver to hickory-resolver
+hickory-resolver = "0.24"
+ipnet = "2"
+
+# Date/time handling
+chrono = { version = "0.4", features = ["serde"] }
+
+# Low-level TLS message handling
+bytes = "1"
+hex = "0.4"
+
+# Cryptographic operations
+sha2 = "0.10"  # For certificate fingerprints
+sha-1 = "0.10"  # For SHA-1 fingerprints
+
+[build-dependencies]
+chrono = { version = "0.4", features = ["serde"] }
+
+[dev-dependencies]
+tokio-test = "0.4"
+pretty_assertions = "1"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+opt-level = "z"
+

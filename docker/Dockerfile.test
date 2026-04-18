@@ -1,0 +1,143 @@
+# Multi-stage Dockerfile for tlsscan testing
+# Based on sslscan's docker_test approach
+# Creates multiple SSL/TLS server configurations for comprehensive testing
+
+FROM ubuntu:24.04 AS builder
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    wget \
+    curl \
+    git \
+    cmake \
+    pkg-config \
+    libssl-dev \
+    zlib1g-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Build vulnerable OpenSSL 1.0.1f (Heartbleed)
+RUN cd /tmp && \
+    wget https://www.openssl.org/source/old/1.0.1/openssl-1.0.1f.tar.gz && \
+    tar -xzf openssl-1.0.1f.tar.gz && \
+    cd openssl-1.0.1f && \
+    ./config --prefix=/opt/openssl-1.0.1f \
+             --openssldir=/opt/openssl-1.0.1f \
+             shared \
+             enable-heartbeats \
+             enable-ssl2 \
+             enable-ssl3 \
+             enable-weak-ssl-ciphers && \
+    make && make install_sw && \
+    cd / && rm -rf /tmp/openssl-1.0.1f*
+
+# Build OpenSSL 1.0.2 (various vulnerabilities)
+RUN cd /tmp && \
+    wget https://www.openssl.org/source/old/1.0.2/openssl-1.0.2.tar.gz && \
+    tar -xzf openssl-1.0.2.tar.gz && \
+    cd openssl-1.0.2 && \
+    ./config --prefix=/opt/openssl-1.0.2 \
+             --openssldir=/opt/openssl-1.0.2 \
+             shared \
+             enable-ssl2 \
+             enable-ssl3 \
+             enable-weak-ssl-ciphers && \
+    make && make install_sw && \
+    cd / && rm -rf /tmp/openssl-1.0.2*
+
+# Skip GnuTLS for now - focus on OpenSSL testing
+
+# Final stage
+FROM ubuntu:24.04
+
+# Install runtime dependencies
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    socat \
+    netcat-traditional \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy built SSL/TLS libraries
+COPY --from=builder /opt/openssl-1.0.1f /opt/openssl-1.0.1f
+COPY --from=builder /opt/openssl-1.0.2 /opt/openssl-1.0.2
+
+# Create certificates directory
+RUN mkdir -p /certs
+
+# Generate certificates for different scenarios
+RUN /opt/openssl-1.0.1f/bin/openssl req -x509 -newkey rsa:2048 \
+    -keyout /certs/server.key \
+    -out /certs/server.crt \
+    -days 365 -nodes \
+    -subj "/C=US/ST=Test/L=Test/O=TlsscanTest/CN=localhost"
+
+# Generate weak 512-bit certificate
+RUN /opt/openssl-1.0.1f/bin/openssl req -x509 -newkey rsa:512 \
+    -keyout /certs/weak512.key \
+    -out /certs/weak512.crt \
+    -days 365 -nodes \
+    -subj "/C=US/ST=Test/L=Test/O=TlsscanTest/CN=weak512"
+
+# Generate 1024-bit certificate
+RUN /opt/openssl-1.0.1f/bin/openssl req -x509 -newkey rsa:1024 \
+    -keyout /certs/weak1024.key \
+    -out /certs/weak1024.crt \
+    -days 365 -nodes \
+    -subj "/C=US/ST=Test/L=Test/O=TlsscanTest/CN=weak1024"
+
+# Create test server scripts
+RUN mkdir -p /scripts
+
+# Heartbleed test server (OpenSSL 1.0.1f)
+RUN echo '#!/bin/bash' > /scripts/heartbleed-server.sh && \
+    echo 'echo "Starting Heartbleed vulnerable server on port 8443..."' >> /scripts/heartbleed-server.sh && \
+    echo 'LD_LIBRARY_PATH=/opt/openssl-1.0.1f/lib:$LD_LIBRARY_PATH \\' >> /scripts/heartbleed-server.sh && \
+    echo '/opt/openssl-1.0.1f/bin/openssl s_server \\' >> /scripts/heartbleed-server.sh && \
+    echo '  -accept 8443 \\' >> /scripts/heartbleed-server.sh && \
+    echo '  -cert /certs/server.crt \\' >> /scripts/heartbleed-server.sh && \
+    echo '  -key /certs/server.key \\' >> /scripts/heartbleed-server.sh && \
+    echo '  -tls1_2 \\' >> /scripts/heartbleed-server.sh && \
+    echo '  -cipher "ALL:!aNULL:!eNULL" \\' >> /scripts/heartbleed-server.sh && \
+    echo '  -msg' >> /scripts/heartbleed-server.sh && \
+    chmod +x /scripts/heartbleed-server.sh
+
+# SSL2/SSL3 test server (OpenSSL 1.0.2)
+RUN echo '#!/bin/bash' > /scripts/ssl23-server.sh && \
+    echo 'echo "Starting SSL2/SSL3 server on port 8444..."' >> /scripts/ssl23-server.sh && \
+    echo 'LD_LIBRARY_PATH=/opt/openssl-1.0.2/lib:$LD_LIBRARY_PATH \\' >> /scripts/ssl23-server.sh && \
+    echo '/opt/openssl-1.0.2/bin/openssl s_server \\' >> /scripts/ssl23-server.sh && \
+    echo '  -accept 8444 \\' >> /scripts/ssl23-server.sh && \
+    echo '  -cert /certs/server.crt \\' >> /scripts/ssl23-server.sh && \
+    echo '  -key /certs/server.key \\' >> /scripts/ssl23-server.sh && \
+    echo '  -ssl2 -ssl3 \\' >> /scripts/ssl23-server.sh && \
+    echo '  -cipher "ALL:!aNULL:!eNULL" \\' >> /scripts/ssl23-server.sh && \
+    echo '  -msg' >> /scripts/ssl23-server.sh && \
+    chmod +x /scripts/ssl23-server.sh
+
+# Weak cipher test server
+RUN echo '#!/bin/bash' > /scripts/weak-cipher-server.sh && \
+    echo 'echo "Starting weak cipher server on port 8445..."' >> /scripts/weak-cipher-server.sh && \
+    echo 'LD_LIBRARY_PATH=/opt/openssl-1.0.1f/lib:$LD_LIBRARY_PATH \\' >> /scripts/weak-cipher-server.sh && \
+    echo '/opt/openssl-1.0.1f/bin/openssl s_server \\' >> /scripts/weak-cipher-server.sh && \
+    echo '  -accept 8445 \\' >> /scripts/weak-cipher-server.sh && \
+    echo '  -cert /certs/weak512.crt \\' >> /scripts/weak-cipher-server.sh && \
+    echo '  -key /certs/weak512.key \\' >> /scripts/weak-cipher-server.sh && \
+    echo '  -tls1 \\' >> /scripts/weak-cipher-server.sh && \
+    echo '  -cipher "DES-CBC3-SHA:DES-CBC-SHA:RC4-SHA:NULL-SHA" \\' >> /scripts/weak-cipher-server.sh && \
+    echo '  -msg' >> /scripts/weak-cipher-server.sh && \
+    chmod +x /scripts/weak-cipher-server.sh
+
+# Master script to run all test servers
+RUN echo '#!/bin/bash' > /scripts/run-all-servers.sh && \
+    echo 'echo "Starting all test servers..."' >> /scripts/run-all-servers.sh && \
+    echo '/scripts/heartbleed-server.sh &' >> /scripts/run-all-servers.sh && \
+    echo '/scripts/ssl23-server.sh &' >> /scripts/run-all-servers.sh && \
+    echo '/scripts/weak-cipher-server.sh &' >> /scripts/run-all-servers.sh && \
+    echo 'wait' >> /scripts/run-all-servers.sh && \
+    chmod +x /scripts/run-all-servers.sh
+
+# Expose ports for different test scenarios
+EXPOSE 8443 8444 8445
+
+# Default command
+CMD ["/scripts/run-all-servers.sh"]

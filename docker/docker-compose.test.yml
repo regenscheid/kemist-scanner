@@ -1,0 +1,57 @@
+version: '3.8'
+
+services:
+  # Multi-server test environment
+  kemist-test-servers:
+    build:
+      context: .
+      dockerfile: Dockerfile.test
+    container_name: kemist-test-servers
+    ports:
+      - "8443:8443"  # Heartbleed server
+      - "8444:8444"  # SSL2/SSL3 server  
+      - "8445:8445"  # Weak cipher server
+    networks:
+      - kemist-test
+    restart: unless-stopped
+    
+  # Individual test servers for specific scenarios
+  heartbleed-only:
+    build:
+      context: .
+      dockerfile: Dockerfile.test
+    container_name: heartbleed-only
+    ports:
+      - "8443:8443"
+    networks:
+      - tlsscan-test
+    command: ["/scripts/heartbleed-server.sh"]
+    profiles: ["heartbleed"]
+    
+  ssl23-only:
+    build:
+      context: .
+      dockerfile: Dockerfile.test
+    container_name: ssl23-only
+    ports:
+      - "8444:8444"
+    networks:
+      - tlsscan-test
+    command: ["/scripts/ssl23-server.sh"]
+    profiles: ["ssl23"]
+    
+  weak-cipher-only:
+    build:
+      context: .
+      dockerfile: Dockerfile.test
+    container_name: weak-cipher-only
+    ports:
+      - "8445:8445"
+    networks:
+      - tlsscan-test
+    command: ["/scripts/weak-cipher-server.sh"]
+    profiles: ["weak"]
+
+networks:
+  kemist-test:
+    driver: bridge

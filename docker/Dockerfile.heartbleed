@@ -1,0 +1,66 @@
+# Dockerfile for creating a server vulnerable to Heartbleed (CVE-2014-0160)
+# This is for testing purposes only - DO NOT use in production!
+
+FROM ubuntu:14.04
+
+# Install dependencies
+RUN apt-get update && apt-get install -y \
+    wget \
+    gcc \
+    make \
+    zlib1g-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Download and compile vulnerable OpenSSL 1.0.1f
+RUN cd /tmp && \
+    wget https://www.openssl.org/source/old/1.0.1/openssl-1.0.1f.tar.gz && \
+    tar -xzf openssl-1.0.1f.tar.gz && \
+    cd openssl-1.0.1f && \
+    ./config --prefix=/usr/local/openssl-vulnerable \
+             --openssldir=/usr/local/openssl-vulnerable \
+             shared \
+             enable-heartbeats && \
+    make && \
+    make install_sw && \
+    cd / && \
+    rm -rf /tmp/openssl-1.0.1f*
+
+# Create directory for certificates
+RUN mkdir -p /certs
+
+# Generate self-signed certificate
+RUN /usr/local/openssl-vulnerable/bin/openssl req -x509 -newkey rsa:2048 \
+    -keyout /certs/server.key \
+    -out /certs/server.crt \
+    -days 365 -nodes \
+    -subj "/C=US/ST=Test/L=Test/O=HeartbleedTest/CN=localhost"
+
+# Create OpenSSL server configuration
+RUN echo "# OpenSSL configuration for Heartbleed test server" > /etc/openssl-server.conf && \
+    echo "port = 8443" >> /etc/openssl-server.conf && \
+    echo "cert = /certs/server.crt" >> /etc/openssl-server.conf && \
+    echo "key = /certs/server.key" >> /etc/openssl-server.conf
+
+# Create startup script
+RUN echo '#!/bin/bash' > /start-server.sh && \
+    echo 'echo "Starting Heartbleed vulnerable OpenSSL server..."' >> /start-server.sh && \
+    echo 'echo "WARNING: This server is vulnerable to CVE-2014-0160 for testing purposes only!"' >> /start-server.sh && \
+    echo 'echo "Listening on port 8443..."' >> /start-server.sh && \
+    echo '/usr/local/openssl-vulnerable/bin/openssl s_server \' >> /start-server.sh && \
+    echo '  -accept 8443 \' >> /start-server.sh && \
+    echo '  -cert /certs/server.crt \' >> /start-server.sh && \
+    echo '  -key /certs/server.key \' >> /start-server.sh && \
+    echo '  -tls1_2 \' >> /start-server.sh && \
+    echo '  -cipher ALL \' >> /start-server.sh && \
+    echo '  -msg \' >> /start-server.sh && \
+    echo '  -debug' >> /start-server.sh && \
+    chmod +x /start-server.sh
+
+# Expose port
+EXPOSE 8443
+
+# Set library path for vulnerable OpenSSL
+ENV LD_LIBRARY_PATH=/usr/local/openssl-vulnerable/lib:$LD_LIBRARY_PATH
+
+# Start the vulnerable server
+CMD ["/start-server.sh"]

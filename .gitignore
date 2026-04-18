@@ -1,0 +1,25 @@
+# Rust build artifacts
+/target
+**/*.rs.bk
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local scanner runs (narrowly scoped — do NOT glob *.json repo-wide,
+# schemas/ and tests/fixtures/ need to ship committed JSON)
+/scan-results/
+/test-results/
+
+# Debug
+*.pdb
+
+# Claude Code personal settings
+.claude/settings.local.json

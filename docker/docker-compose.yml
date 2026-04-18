@@ -1,0 +1,16 @@
+version: '3.8'
+
+services:
+  heartbleed-server:
+    build:
+      context: .
+      dockerfile: Dockerfile.heartbleed
+    container_name: heartbleed-test-server
+    ports:
+      - "8443:8443"
+    networks:
+      - test-network
+
+networks:
+  test-network:
+    driver: bridge
