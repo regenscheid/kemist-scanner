@@ -132,6 +132,22 @@ impl ScannerError {
                     Self::network_unreachable(ctx)
                 } else if let Some(alert_name) = extract_tls_alert_name(&msg) {
                     Self::tls_alert(&alert_name, ctx)
+                } else if msg.contains("tls handshake eof")
+                    || msg.contains("unexpected eof")
+                {
+                    // rustls "tls handshake eof": peer closed TCP
+                    // mid-handshake without sending an alert. Common
+                    // when a probe is actively refused (load balancer,
+                    // WAF) — carries the same meaning as a TCP RST.
+                    Self::connection_refused(ctx)
+                } else if msg.contains("servertlsversionisdisabledbyourconfig")
+                    || msg.contains("peer is incompatible: servertlsversion")
+                {
+                    // rustls rejected a ServerHello because the server
+                    // wanted a TLS version disabled in our ClientConfig.
+                    // For probes that pin a version, this is a clean
+                    // "server won't do this at that version" rejection.
+                    Self::tls_alert("protocol_version", ctx)
                 } else {
                     Self::internal(ctx)
                 }

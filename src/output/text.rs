@@ -14,7 +14,9 @@
 use colored::Colorize;
 
 use crate::model::scan_result::{
-    CipherSuiteEntry, GroupObservation, Method, ObservationBool, ScanResult, TlsExtensions,
+    CipherSuiteEntry, ClientAuthRequestEntry, DhParametersObservation, FfdheObservation,
+    GroupObservation, LegacyCipherSuiteEntry, Method, ObservationBool, RenegotiationBehavior,
+    ScanResult, SkeSigObservation, TlsExtensions,
 };
 
 /// Render one scan record to stdout. Compact (~50 lines).
@@ -29,6 +31,7 @@ pub fn render(r: &ScanResult) {
     println!();
     render_groups(r);
     println!();
+    render_legacy_probes(r);
     render_certificates(r);
     println!();
     render_validation(r);
@@ -281,6 +284,269 @@ fn render_extensions(r: &ScanResult) {
             ),
         );
     }
+}
+
+/// Render every OpenSSL-backed legacy-probe section. Each subsection
+/// is gated on "did we actually learn something?" so the text output
+/// stays compact when `legacy-probes` is disabled or the target server
+/// cleanly rejects everything.
+fn render_legacy_probes(r: &ScanResult) {
+    let tls = &r.tls;
+
+    // `fallback_scsv_enforced` lives under `tls.downgrade_signaling` and is
+    // always present; render alongside the legacy sections for context.
+    let scsv = &tls.downgrade_signaling.fallback_scsv_enforced;
+    let has_scsv_signal = scsv.value.is_some() || scsv.method != Method::NotProbed;
+
+    // Emit the whole block only if there's anything worth showing — avoids
+    // 20 empty lines in the common "modern server, no legacy" case.
+    let has_legacy_anything = !tls.legacy_cipher_suites.is_empty()
+        || !tls.dh_parameters.is_empty()
+        || !tls.ffdhe_support.is_empty()
+        || !tls.server_key_exchange_signatures.is_empty()
+        || tls.client_auth_request.is_some()
+        || tls.renegotiation_behavior.client_initiated_verdict.is_some()
+        || has_scsv_signal;
+    if !has_legacy_anything {
+        return;
+    }
+
+    render_legacy_cipher_suites(&tls.legacy_cipher_suites);
+    render_dh_parameters(&tls.dh_parameters);
+    render_ffdhe_support(&tls.ffdhe_support);
+    render_ske_signatures(&tls.server_key_exchange_signatures);
+    render_downgrade_signaling(scsv);
+    render_renegotiation_behavior(&tls.renegotiation_behavior);
+    render_client_auth_request(tls.client_auth_request.as_ref());
+}
+
+fn render_legacy_cipher_suites(entries: &[LegacyCipherSuiteEntry]) {
+    if entries.is_empty() {
+        return;
+    }
+    section("Legacy cipher suites (OpenSSL probe)");
+    // Group by protocol version so a reader can see at a glance which
+    // weak suites each version accepts.
+    for version in ["tls1_0", "tls1_1", "tls1_2"] {
+        let rows: Vec<&LegacyCipherSuiteEntry> = entries
+            .iter()
+            .filter(|e| e.protocol_version == version)
+            .collect();
+        if rows.is_empty() {
+            continue;
+        }
+        println!("  {}:", label_for_version(version).bold());
+        for e in rows {
+            print_legacy_cipher_entry(e);
+        }
+    }
+    println!();
+}
+
+fn label_for_version(v: &str) -> &str {
+    match v {
+        "tls1_0" => "TLS 1.0",
+        "tls1_1" => "TLS 1.1",
+        "tls1_2" => "TLS 1.2",
+        other => other,
+    }
+}
+
+fn print_legacy_cipher_entry(e: &LegacyCipherSuiteEntry) {
+    let (glyph, name_style) = match (e.supported, &e.method) {
+        // A weak suite that's `supported` is the interesting finding —
+        // call it out in yellow even though the observation is
+        // technically positive. The text view is optimized for triage,
+        // not rule-engine consumption; the JSON output stays neutral.
+        (Some(true), _) => ("+", e.name.yellow().bold()),
+        (Some(false), _) => ("-", e.name.dimmed()),
+        (None, _) => ("?", e.name.yellow()),
+    };
+    let tail = match (&e.method, &e.reason) {
+        (Method::Error, Some(r)) => format!("  [{}: {}]", "error".yellow(), r.dimmed()),
+        (Method::NotProbed, Some(r)) => format!("  [{}: {}]", "not_probed".yellow(), r.dimmed()),
+        _ => String::new(),
+    };
+    println!(
+        "    {} {:<42} {:<8} ({}){}",
+        glyph,
+        name_style,
+        e.iana_code,
+        e.openssl_name.dimmed(),
+        tail
+    );
+}
+
+fn render_dh_parameters(entries: &[DhParametersObservation]) {
+    if entries.is_empty() {
+        return;
+    }
+    section("DH parameters (observed)");
+    for e in entries {
+        // Color by prime size: <2048 is Logjam territory; anything
+        // larger is fine on size alone. Custom classification
+        // (regardless of size) gets flagged because unknown-provenance
+        // primes are the Logjam precomputation target.
+        let size_style = if e.prime_bits < 2048 {
+            format!("{}-bit", e.prime_bits).red().bold()
+        } else {
+            format!("{}-bit", e.prime_bits).normal()
+        };
+        let class_style = if e.classification == "custom" {
+            e.classification.yellow()
+        } else {
+            e.classification.green()
+        };
+        println!(
+            "    {} via {}: g={} sha256={}…{}",
+            size_style,
+            class_style,
+            e.generator,
+            &e.prime_sha256[..8],
+            format!("  [{}]", e.cipher_suite).dimmed()
+        );
+    }
+    println!();
+}
+
+fn render_ffdhe_support(groups: &std::collections::BTreeMap<String, FfdheObservation>) {
+    if groups.is_empty() {
+        return;
+    }
+    section("FFDHE named groups (TLS 1.2 / TLS 1.3)");
+    for (name, obs) in groups {
+        println!(
+            "    {:<10} {}   tls1_2: {}   tls1_3: {}",
+            name,
+            obs.iana_code.dimmed(),
+            ffdhe_cell(&obs.tls1_2),
+            ffdhe_cell(&obs.tls1_3),
+        );
+    }
+    println!();
+}
+
+fn ffdhe_cell(obs: &GroupObservation) -> String {
+    match (obs.supported, &obs.method, obs.reason.as_deref()) {
+        (Some(true), _, _) => format!("{}", "+".green()),
+        (Some(false), _, Some(r))
+            if r == "server_ignored_group_offer_returned_custom_prime" =>
+        {
+            // The misconfig finding — server accepted a DHE handshake
+            // with a prime that doesn't match the advertised group.
+            format!("{} {}", "!".red().bold(), "server_ignored_offer".yellow())
+        }
+        (Some(false), _, _) => format!("{}", "-".dimmed()),
+        (None, Method::Error, Some(r)) => format!("{} [{}]", "?".yellow(), r.dimmed()),
+        (None, _, _) => format!("{}", "?".yellow()),
+    }
+}
+
+fn render_ske_signatures(sigs: &[SkeSigObservation]) {
+    if sigs.is_empty() {
+        return;
+    }
+    section("Server-key-exchange signatures");
+    for s in sigs {
+        // SHA-1 or MD5 in a production TLS 1.2 SKE is a weak-sig
+        // finding — highlight. Everything else is informational.
+        let style = if s.signature_algorithm.ends_with("_sha1")
+            || s.signature_algorithm.contains("md5")
+        {
+            s.signature_algorithm.yellow().bold()
+        } else {
+            s.signature_algorithm.normal()
+        };
+        println!("    {:<32} ({})", style, s.cipher_suite.dimmed());
+    }
+    println!();
+}
+
+fn render_downgrade_signaling(scsv: &ObservationBool) {
+    section("Downgrade signaling");
+    let line = match (scsv.value, &scsv.method) {
+        (Some(true), _) => format!("{} {}", "enforced".green(), "(TLS_FALLBACK_SCSV)".dimmed()),
+        (Some(false), _) => format!(
+            "{} {}",
+            "NOT enforced".red().bold(),
+            "(server accepted downgrade)".dimmed()
+        ),
+        (None, m) => format!(
+            "{} [{}]{}",
+            "—".yellow(),
+            method_label(m).yellow(),
+            scsv.reason
+                .as_deref()
+                .map(|r| format!(": {}", r.dimmed()))
+                .unwrap_or_default()
+        ),
+    };
+    println!("  fallback_scsv: {}", line);
+    println!();
+}
+
+fn render_renegotiation_behavior(r: &RenegotiationBehavior) {
+    // Deliberately omit when the verdict is `None` and no reason is set —
+    // that's the "nothing to report" state.
+    if r.client_initiated_verdict.is_none() && r.reason.is_none() {
+        return;
+    }
+    section("Client-initiated renegotiation");
+    let verdict_style = match r.client_initiated_verdict.as_deref() {
+        Some("rejected") => "rejected".green(),
+        Some("not_attempted") => "not_attempted".dimmed(),
+        Some("accepted") => "accepted".yellow().bold(),
+        Some("error") => "error".yellow(),
+        Some(other) => other.normal(),
+        None => "—".yellow(),
+    };
+    let tail = r
+        .reason
+        .as_deref()
+        .map(|s| format!("  [{}]", s.dimmed()))
+        .unwrap_or_default();
+    println!("  verdict: {}{}", verdict_style, tail);
+    println!();
+}
+
+fn render_client_auth_request(ca: Option<&ClientAuthRequestEntry>) {
+    let Some(ca) = ca else { return };
+    if !ca.requested {
+        return;
+    }
+    section("Client-auth request (CertificateRequest observed)");
+    if !ca.signature_algorithms.is_empty() {
+        kv(
+            "sig_algs",
+            &ca.signature_algorithms.join(", "),
+        );
+    }
+    if !ca.certificate_types.is_empty() {
+        let bytes: Vec<String> =
+            ca.certificate_types.iter().map(|b| format!("0x{b:02X}")).collect();
+        kv("cert_types", &bytes.join(", "));
+    }
+    for dn in &ca.ca_distinguished_names {
+        let ident = match (&dn.common_name, &dn.organization) {
+            (Some(cn), Some(o)) => format!("CN={cn}, O={o}"),
+            (Some(cn), None) => format!("CN={cn}"),
+            (None, Some(o)) => format!("O={o}"),
+            (None, None) => format!("(DER {} bytes)", dn.raw_der_b64.len() / 2),
+        };
+        println!("    CA: {}", ident);
+    }
+    if !ca.oid_filters.is_empty() {
+        kv("oid_filters", &format!("{} entries", ca.oid_filters.len()));
+    }
+    if let Some(alert) = &ca.alert_on_empty_cert {
+        kv(
+            "on_empty_cert",
+            &format!("{} (required mTLS)", alert),
+        );
+    } else {
+        kv("on_empty_cert", "accepted (optional mTLS)");
+    }
+    println!();
 }
 
 fn render_sni_behavior(r: &ScanResult) {

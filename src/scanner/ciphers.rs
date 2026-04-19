@@ -188,7 +188,15 @@ fn classify_probe_error(e: std::io::Error) -> ProbeOutcome {
     if is_rejection {
         ProbeOutcome::NotSupported
     } else {
-        ProbeOutcome::Error(scanner_err.category)
+        // Keep both parts — the category is a stable wire-safe bucket,
+        // the context carries the underlying io::Error message. Without
+        // this, `internal_scanner_error` is a black hole; with it, a
+        // reader can see e.g. "internal_scanner_error: handshake:
+        // received corrupt message" and diagnose.
+        ProbeOutcome::Error(format!(
+            "{}: {}",
+            scanner_err.category, scanner_err.context
+        ))
     }
 }
 

@@ -234,7 +234,12 @@ fn classify_probe_error(e: std::io::Error) -> GroupProbeOutcome {
     if is_rejection {
         GroupProbeOutcome::NotSupported
     } else {
-        GroupProbeOutcome::Error(scanner_err.category)
+        // Preserve the context for diagnosis; see the matching
+        // comment in `ciphers::classify_probe_error`.
+        GroupProbeOutcome::Error(format!(
+            "{}: {}",
+            scanner_err.category, scanner_err.context
+        ))
     }
 }
 
