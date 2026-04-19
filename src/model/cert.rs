@@ -151,34 +151,23 @@ fn oid_to_algorithm_name(oid: &Oid) -> String {
 }
 
 fn estimate_key_size(pki: &SubjectPublicKeyInfo) -> usize {
-    let oid_str = pki.algorithm.algorithm.to_id_string();
-    match oid_str.as_str() {
-        "1.2.840.113549.1.1.1" => {
-            // RSA key - estimate from key data length
-            // This is a rough approximation
-            let data_len = pki.subject_public_key.data.len();
-            if data_len > 400 {
-                4096
-            } else if data_len > 300 {
-                2048
-            } else if data_len > 200 {
-                1024
-            } else {
-                data_len * 8
-            }
+    // Use x509-parser's structured DER decoder — the SubjectPublicKeyInfo
+    // BIT STRING contents are an ASN.1 RSAPublicKey / ECPoint / etc.
+    // Earlier code bucketed by raw byte length, which was wrong: a
+    // 2048-bit RSA key has a SubjectPublicKey `data.len()` of ~270
+    // bytes (256-byte modulus + 3-byte exponent + ~10 bytes of DER
+    // overhead), which fell into the previous 200-300 band and got
+    // reported as 1024.
+    if let Ok(key) = pki.parsed() {
+        let bits = key.key_size();
+        if bits > 0 {
+            return bits;
         }
-        "1.2.840.10045.2.1" => {
-            // EC keys - estimate based on key data length
-            let data_len = pki.subject_public_key.data.len();
-            match data_len {
-                65 => 256,  // P-256
-                97 => 384,  // P-384
-                133 => 521, // P-521
-                _ => data_len * 4,
-            }
-        }
-        _ => pki.subject_public_key.data.len() * 8,
     }
+    // Last-resort fallback: length of the raw bit-string contents. Only
+    // reached for unrecognized key algorithms — known RSA / EC / DSA all
+    // flow through `parsed()` above.
+    pki.subject_public_key.data.len() * 8
 }
 
 fn extract_san_names(cert: &X509Certificate) -> Vec<String> {
