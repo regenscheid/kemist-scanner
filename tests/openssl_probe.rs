@@ -28,6 +28,7 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
+use kemist::model::protocol::TlsVersion;
 use kemist::scanner::openssl::{
     ciphers::{probe_legacy_suites, LegacyProbeOutcome},
     fallback_scsv,
@@ -35,7 +36,6 @@ use kemist::scanner::openssl::{
     protocol_versions,
     renegotiation::{self, RenegotiationVerdict},
 };
-use kemist::model::protocol::TlsVersion;
 
 const FIXTURE_ADDR_ENV: &str = "KEMIST_LEGACY_FIXTURE_ADDR";
 const FIXTURE_HOSTNAME_ENV: &str = "KEMIST_LEGACY_FIXTURE_HOSTNAME";
@@ -52,8 +52,8 @@ fn fixture() -> (SocketAddr, String) {
     let addr: SocketAddr = addr_s
         .parse()
         .unwrap_or_else(|e| panic!("{FIXTURE_ADDR_ENV}={addr_s} is not a valid socket addr: {e}"));
-    let hostname = std::env::var(FIXTURE_HOSTNAME_ENV)
-        .unwrap_or_else(|_| "legacy-fixture.local".to_string());
+    let hostname =
+        std::env::var(FIXTURE_HOSTNAME_ENV).unwrap_or_else(|_| "legacy-fixture.local".to_string());
     (addr, hostname)
 }
 
@@ -65,8 +65,7 @@ fn timeout() -> Duration {
 #[ignore]
 async fn legacy_cipher_probe_observes_weak_suites_on_fixture() {
     let (addr, hostname) = fixture();
-    let out =
-        probe_legacy_suites(addr, &hostname, timeout(), timeout(), Duration::ZERO).await;
+    let out = probe_legacy_suites(addr, &hostname, timeout(), timeout(), Duration::ZERO).await;
 
     assert!(!out.results.is_empty(), "probe produced no results");
 
@@ -93,10 +92,9 @@ async fn legacy_cipher_probe_observes_weak_suites_on_fixture() {
 
     // DHE-RSA probe should populate a DH snapshot with the fixture's
     // deliberately weak 1024-bit custom prime.
-    let dhe = out
-        .results
-        .iter()
-        .find(|r| r.openssl_name.starts_with("DHE-RSA") && matches!(r.outcome, LegacyProbeOutcome::Supported));
+    let dhe = out.results.iter().find(|r| {
+        r.openssl_name.starts_with("DHE-RSA") && matches!(r.outcome, LegacyProbeOutcome::Supported)
+    });
     if let Some(r) = dhe {
         let snap = r
             .dh_snapshot
@@ -167,7 +165,10 @@ async fn renegotiation_probe_reports_rejected_on_fixture() {
     // failed to complete on a busy runner) is acceptable; Accepted
     // would indicate a fixture regression.
     assert!(
-        !matches!(obs.client_initiated_verdict, RenegotiationVerdict::ClientInitiatedAccepted),
+        !matches!(
+            obs.client_initiated_verdict,
+            RenegotiationVerdict::ClientInitiatedAccepted
+        ),
         "fixture unexpectedly accepted client-initiated renegotiation: {obs:?}"
     );
 }
@@ -179,8 +180,8 @@ async fn protocol_version_probe_observes_legacy_versions_on_fixture() {
 
     // TLS 1.0 and TLS 1.1 are explicitly enabled in nginx.conf.
     for version in [TlsVersion::Tls10, TlsVersion::Tls11] {
-        let p = protocol_versions::probe_protocol(addr, &hostname, version, timeout(), timeout())
-            .await;
+        let p =
+            protocol_versions::probe_protocol(addr, &hostname, version, timeout(), timeout()).await;
         assert!(
             p.supported,
             "fixture should accept {:?} but reported supported={} (error: {:?})",

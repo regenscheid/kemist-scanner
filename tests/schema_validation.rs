@@ -355,12 +355,22 @@ fn fully_populated_openssl_observations_match_schema_v1() {
             );
         }
     }
-    assert_eq!(tls.get("dh_parameters").unwrap().as_array().unwrap().len(), 1);
+    assert_eq!(
+        tls.get("dh_parameters").unwrap().as_array().unwrap().len(),
+        1
+    );
     let groups = tls.get("groups").unwrap();
     // Three FFDHE probe rows produce three tls1_2 + three tls1_3 entries.
     assert_eq!(groups.get("tls1_2").unwrap().as_object().unwrap().len(), 3);
     assert_eq!(groups.get("tls1_3").unwrap().as_object().unwrap().len(), 3);
-    assert_eq!(tls.get("server_key_exchange_signatures").unwrap().as_array().unwrap().len(), 1);
+    assert_eq!(
+        tls.get("server_key_exchange_signatures")
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
     assert!(tls.get("renegotiation_behavior").is_some());
     assert!(tls.get("client_auth_request").is_some());
     // No more legacy_cipher_suites / ffdhe_support at top level.
@@ -441,7 +451,10 @@ fn legacy_probes_disabled_renders_empty_schema_sections() {
 
     let schema_value = load_schema();
     let validator = jsonschema::validator_for(&schema_value).expect("schema compiles");
-    assert!(validator.iter_errors(&record_value).collect::<Vec<_>>().is_empty());
+    assert!(validator
+        .iter_errors(&record_value)
+        .collect::<Vec<_>>()
+        .is_empty());
 
     let tls = record_value.get("tls").unwrap();
     // cipher_suites.tls1_0/1_1 are always present, empty when
@@ -456,7 +469,10 @@ fn legacy_probes_disabled_renders_empty_schema_sections() {
     // No merged-away fields at top level.
     assert!(tls.get("legacy_cipher_suites").is_none());
     assert!(tls.get("ffdhe_support").is_none());
-    assert_eq!(tls.get("dh_parameters").unwrap().as_array().unwrap().len(), 0);
+    assert_eq!(
+        tls.get("dh_parameters").unwrap().as_array().unwrap().len(),
+        0
+    );
     assert_eq!(
         tls.get("renegotiation_behavior")
             .unwrap()

@@ -25,7 +25,9 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use openssl::ssl::{HandshakeError, Ssl, SslContext, SslMethod, SslMode, SslVerifyMode, SslVersion};
+use openssl::ssl::{
+    HandshakeError, Ssl, SslContext, SslMethod, SslMode, SslVerifyMode, SslVersion,
+};
 use tracing::{debug, info};
 
 use crate::model::errors::ScannerError;
@@ -56,7 +58,12 @@ pub async fn probe(
     // Characterize: what's the server's maximum protocol version?
     let hostname_owned = hostname.to_string();
     let server_max = tokio::task::spawn_blocking(move || {
-        characterize_max_version_blocking(target, &hostname_owned, connect_timeout, handshake_timeout)
+        characterize_max_version_blocking(
+            target,
+            &hostname_owned,
+            connect_timeout,
+            handshake_timeout,
+        )
     })
     .await
     .unwrap_or(None);
@@ -137,16 +144,14 @@ fn classify_probe_outcome(
         // - rule engines checking "is the server protected?" get `true`
         // - rule engines checking "is the server RFC 7507 compliant?"
         //   key on the reason substring and can downgrade the finding
-        ProbeOutcome::Alert(cat) if cat == "tls_alert_handshake_failure" => {
-            FallbackScsvResult {
-                enforced: Some(true),
-                reason: format!(
-                    "rejected_via_non_mandated_alert:handshake_failure_at_{}_with_server_max_{}",
-                    version_label(downgrade_target),
-                    version_label(server_max)
-                ),
-            }
-        }
+        ProbeOutcome::Alert(cat) if cat == "tls_alert_handshake_failure" => FallbackScsvResult {
+            enforced: Some(true),
+            reason: format!(
+                "rejected_via_non_mandated_alert:handshake_failure_at_{}_with_server_max_{}",
+                version_label(downgrade_target),
+                version_label(server_max)
+            ),
+        },
         ProbeOutcome::HandshakeAccepted => FallbackScsvResult {
             enforced: Some(false),
             reason: format!(
@@ -181,7 +186,9 @@ fn characterize_max_version_blocking(
     let mut builder = SslContext::builder(SslMethod::tls_client()).ok()?;
     // Let the server pick: we accept everything 1.0 through 1.3.
     builder.set_min_proto_version(Some(SslVersion::TLS1)).ok()?;
-    builder.set_max_proto_version(Some(SslVersion::TLS1_3)).ok()?;
+    builder
+        .set_max_proto_version(Some(SslVersion::TLS1_3))
+        .ok()?;
     builder.set_security_level(0);
     builder.set_verify(SslVerifyMode::NONE);
     let ctx = builder.build();
@@ -239,7 +246,9 @@ fn probe_scsv_blocking(
         Err(HandshakeError::SetupFailure(stack)) => {
             ProbeOutcome::Error(format!("openssl_setup:{stack}"))
         }
-        Err(HandshakeError::WouldBlock(_)) => ProbeOutcome::Error("openssl_would_block".to_string()),
+        Err(HandshakeError::WouldBlock(_)) => {
+            ProbeOutcome::Error("openssl_would_block".to_string())
+        }
     }
 }
 
@@ -292,8 +301,14 @@ mod tests {
 
     #[test]
     fn one_version_below_maps_expected_pairs() {
-        assert_eq!(one_version_below(SslVersion::TLS1_3), Some(SslVersion::TLS1_2));
-        assert_eq!(one_version_below(SslVersion::TLS1_2), Some(SslVersion::TLS1_1));
+        assert_eq!(
+            one_version_below(SslVersion::TLS1_3),
+            Some(SslVersion::TLS1_2)
+        );
+        assert_eq!(
+            one_version_below(SslVersion::TLS1_2),
+            Some(SslVersion::TLS1_1)
+        );
         // TLS 1.1 and lower have no meaningful downgrade target.
         assert_eq!(one_version_below(SslVersion::TLS1_1), None);
         assert_eq!(one_version_below(SslVersion::TLS1), None);

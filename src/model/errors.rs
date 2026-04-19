@@ -132,9 +132,7 @@ impl ScannerError {
                     Self::network_unreachable(ctx)
                 } else if let Some(alert_name) = extract_tls_alert_name(&msg) {
                     Self::tls_alert(&alert_name, ctx)
-                } else if msg.contains("tls handshake eof")
-                    || msg.contains("unexpected eof")
-                {
+                } else if msg.contains("tls handshake eof") || msg.contains("unexpected eof") {
                     // rustls "tls handshake eof": peer closed TCP
                     // mid-handshake without sending an alert. Common
                     // when a probe is actively refused (load balancer,

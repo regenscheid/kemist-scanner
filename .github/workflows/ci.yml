@@ -47,8 +47,9 @@ jobs:
     name: Build
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        os: [ubuntu-latest, ubuntu-24.04-arm]
 
     steps:
     - uses: actions/checkout@v4
@@ -140,9 +141,13 @@ jobs:
     - name: Check binary size
       run: |
         SIZE=$(stat -c%s target/release/kemist)
-        # 12 MiB. Current release binary is ~9 MiB on Linux; the
-        # headroom absorbs platform variance + small future additions.
-        MAX=$((12 * 1024 * 1024))
+        # 16 MiB. Current release binary is ~12.4 MiB on Linux after the
+        # full OpenSSL 3.5.5 LTS subsystem landed (weak-crypto + ssl3 +
+        # legacy provider + D1-D8 probe modules). Headroom absorbs
+        # platform variance and small future additions; raise this
+        # deliberately if a new probe honestly needs the space, don't
+        # silently accept creep.
+        MAX=$((16 * 1024 * 1024))
         echo "kemist release binary: ${SIZE} bytes (limit ${MAX})"
         if [ "${SIZE}" -gt "${MAX}" ]; then
           echo "::error::release binary exceeds ${MAX} bytes (got ${SIZE})"

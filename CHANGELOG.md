@@ -6,6 +6,8 @@ numbers follow [semver](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-04-19
+
 ### Added — Legacy TLS & misconfiguration probe subsystem
 
 Fills observation gaps that rustls + aws-lc-rs cannot reach. All new

@@ -138,9 +138,7 @@ fn probe_blocking(
     }
 }
 
-fn build_context(
-    ossl_version: SslVersion,
-) -> Result<SslContext, openssl::error::ErrorStack> {
+fn build_context(ossl_version: SslVersion) -> Result<SslContext, openssl::error::ErrorStack> {
     let mut builder = SslContext::builder(SslMethod::tls_client())?;
     builder.set_min_proto_version(Some(ossl_version))?;
     builder.set_max_proto_version(Some(ossl_version))?;
@@ -172,9 +170,18 @@ mod tests {
 
     #[test]
     fn tls_version_to_ossl_restricts_to_d8_scope() {
-        assert_eq!(tls_version_to_ossl(TlsVersion::Ssl3), Some(SslVersion::SSL3));
-        assert_eq!(tls_version_to_ossl(TlsVersion::Tls10), Some(SslVersion::TLS1));
-        assert_eq!(tls_version_to_ossl(TlsVersion::Tls11), Some(SslVersion::TLS1_1));
+        assert_eq!(
+            tls_version_to_ossl(TlsVersion::Ssl3),
+            Some(SslVersion::SSL3)
+        );
+        assert_eq!(
+            tls_version_to_ossl(TlsVersion::Tls10),
+            Some(SslVersion::TLS1)
+        );
+        assert_eq!(
+            tls_version_to_ossl(TlsVersion::Tls11),
+            Some(SslVersion::TLS1_1)
+        );
         // Out of scope — the rustls path owns these.
         assert_eq!(tls_version_to_ossl(TlsVersion::Tls12), None);
         assert_eq!(tls_version_to_ossl(TlsVersion::Tls13), None);

@@ -96,7 +96,6 @@ impl LegacyScanner {
             Ok(Ok(_)) => Ok(()),
         }
     }
-
 }
 
 // SSLv2 special handling (if needed)

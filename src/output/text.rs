@@ -320,7 +320,10 @@ fn render_legacy_probes(r: &ScanResult) {
     let anything = !tls.dh_parameters.is_empty()
         || !tls.server_key_exchange_signatures.is_empty()
         || tls.client_auth_request.is_some()
-        || tls.renegotiation_behavior.client_initiated_verdict.is_some()
+        || tls
+            .renegotiation_behavior
+            .client_initiated_verdict
+            .is_some()
         || has_scsv_signal;
     if !anything {
         return;
@@ -373,13 +376,12 @@ fn render_ske_signatures(sigs: &[SkeSigObservation]) {
     for s in sigs {
         // SHA-1 or MD5 in a production TLS 1.2 SKE is a weak-sig
         // finding — highlight. Everything else is informational.
-        let style = if s.signature_algorithm.ends_with("_sha1")
-            || s.signature_algorithm.contains("md5")
-        {
-            s.signature_algorithm.yellow().bold()
-        } else {
-            s.signature_algorithm.normal()
-        };
+        let style =
+            if s.signature_algorithm.ends_with("_sha1") || s.signature_algorithm.contains("md5") {
+                s.signature_algorithm.yellow().bold()
+            } else {
+                s.signature_algorithm.normal()
+            };
         println!("    {:<32} ({})", style, s.cipher_suite.dimmed());
     }
     println!();
@@ -454,14 +456,14 @@ fn render_client_auth_request(ca: Option<&ClientAuthRequestEntry>) {
     }
     section("Client-auth request (CertificateRequest observed)");
     if !ca.signature_algorithms.is_empty() {
-        kv(
-            "sig_algs",
-            &ca.signature_algorithms.join(", "),
-        );
+        kv("sig_algs", &ca.signature_algorithms.join(", "));
     }
     if !ca.certificate_types.is_empty() {
-        let bytes: Vec<String> =
-            ca.certificate_types.iter().map(|b| format!("0x{b:02X}")).collect();
+        let bytes: Vec<String> = ca
+            .certificate_types
+            .iter()
+            .map(|b| format!("0x{b:02X}"))
+            .collect();
         kv("cert_types", &bytes.join(", "));
     }
     for dn in &ca.ca_distinguished_names {
@@ -477,10 +479,7 @@ fn render_client_auth_request(ca: Option<&ClientAuthRequestEntry>) {
         kv("oid_filters", &format!("{} entries", ca.oid_filters.len()));
     }
     if let Some(alert) = &ca.alert_on_empty_cert {
-        kv(
-            "on_empty_cert",
-            &format!("{} (required mTLS)", alert),
-        );
+        kv("on_empty_cert", &format!("{} (required mTLS)", alert));
     } else {
         kv("on_empty_cert", "accepted (optional mTLS)");
     }

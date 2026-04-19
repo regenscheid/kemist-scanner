@@ -195,19 +195,14 @@ fn probe_blocking(
     let _ = ssl.set_hostname(hostname);
 
     let (negotiated_version, handshake_alert) = match ssl.connect(tcp) {
-        Ok(stream) => (
-            stream.ssl().version2().map(version_label),
-            None,
-        ),
+        Ok(stream) => (stream.ssl().version2().map(version_label), None),
         Err(HandshakeError::Failure(mid)) => {
             let version = mid.ssl().version2().map(version_label);
             let se = alerts::classify_openssl_error("client_auth handshake", mid.error());
             (version, Some(se.category))
         }
         Err(HandshakeError::SetupFailure(_)) => (None, None),
-        Err(HandshakeError::WouldBlock(mid)) => {
-            (mid.ssl().version2().map(version_label), None)
-        }
+        Err(HandshakeError::WouldBlock(mid)) => (mid.ssl().version2().map(version_label), None),
     };
 
     // Read the captured bytes; leave the thread-local empty for the next
@@ -252,7 +247,9 @@ fn build_context_with_callback() -> Result<SslContext, openssl::error::ErrorStac
         SSL_CTX_callback_ctrl(
             ctx.as_ptr(),
             SSL_CTRL_SET_MSG_CALLBACK,
-            Some(std::mem::transmute::<MsgCbFn, unsafe extern "C" fn()>(msg_callback)),
+            Some(std::mem::transmute::<MsgCbFn, unsafe extern "C" fn()>(
+                msg_callback,
+            )),
         );
     }
 
@@ -348,20 +345,28 @@ fn parse_pre_tls13_body(body: &[u8], negotiated_version: Option<&str>) -> Client
     };
     let mut p = Cursor::new(body);
 
-    let Some(ct_len) = p.take_u8() else { return out };
-    let Some(cert_types) = p.take_slice(ct_len as usize) else { return out };
+    let Some(ct_len) = p.take_u8() else {
+        return out;
+    };
+    let Some(cert_types) = p.take_slice(ct_len as usize) else {
+        return out;
+    };
     out.certificate_types = cert_types.to_vec();
 
     let expects_sig_algs = matches!(negotiated_version, Some("tls1_2") | Some("tls1_3"));
     if expects_sig_algs {
-        let Some(sa_len) = p.take_u16() else { return out };
+        let Some(sa_len) = p.take_u16() else {
+            return out;
+        };
         let Some(sa_block) = p.take_slice(sa_len as usize) else {
             return out;
         };
         out.signature_algorithms = parse_sig_algs_block(sa_block);
     }
 
-    let Some(ca_len) = p.take_u16() else { return out };
+    let Some(ca_len) = p.take_u16() else {
+        return out;
+    };
     let Some(ca_block) = p.take_slice(ca_len as usize) else {
         return out;
     };
@@ -385,11 +390,15 @@ fn parse_tls13_body(body: &[u8]) -> ClientAuthRequest {
     };
     let mut p = Cursor::new(body);
 
-    let Some(ctx_len) = p.take_u8() else { return out };
+    let Some(ctx_len) = p.take_u8() else {
+        return out;
+    };
     if p.take_slice(ctx_len as usize).is_none() {
         return out;
     }
-    let Some(ext_len) = p.take_u16() else { return out };
+    let Some(ext_len) = p.take_u16() else {
+        return out;
+    };
     let Some(ext_block) = p.take_slice(ext_len as usize) else {
         return out;
     };
@@ -423,8 +432,7 @@ fn parse_tls13_extensions(mut block: &[u8], out: &mut ClientAuthRequest) {
             EXT_SIGNATURE_ALGORITHMS | EXT_SIGNATURE_ALGORITHMS_CERT => {
                 // 2-byte length prefix per RFC 8446 §4.2.3
                 if let Some(inner) = read_u16_prefixed(ext_body) {
-                    out.signature_algorithms
-                        .extend(parse_sig_algs_block(inner));
+                    out.signature_algorithms.extend(parse_sig_algs_block(inner));
                 }
             }
             EXT_CERTIFICATE_AUTHORITIES => {
@@ -730,7 +738,7 @@ mod tests {
             0x04, 0x03, 0x08, 0x04,
         ];
         let body: Vec<u8> = [
-            &[0x00u8][..],               // context len = 0
+            &[0x00u8][..],                // context len = 0
             &[0x00, ext.len() as u8][..], // extensions total len
             &ext[..],
         ]

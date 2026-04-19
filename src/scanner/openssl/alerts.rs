@@ -94,10 +94,9 @@ pub fn classify_openssl_error(op: &str, e: &SslError) -> ScannerError {
         // wrapper handles the retry loop. Seeing one means a logic bug
         // above us. Record as internal so it doesn't masquerade as a
         // server-side signal.
-        code => ScannerError::internal(format!(
-            "{op}: unexpected SSL error code {}",
-            code.as_raw()
-        )),
+        code => {
+            ScannerError::internal(format!("{op}: unexpected SSL error code {}", code.as_raw()))
+        }
     }
 }
 
@@ -106,16 +105,10 @@ pub fn classify_openssl_error(op: &str, e: &SslError) -> ScannerError {
 fn classify_error_stack(op: &str, stack: &openssl::error::ErrorStack) -> ScannerError {
     for err in stack.errors() {
         if let Some(alert_code) = alert_code_from_reason_code(err.reason_code()) {
-            return ScannerError::tls_alert(
-                alert_code_to_name(alert_code),
-                format!("{op}: {err}"),
-            );
+            return ScannerError::tls_alert(alert_code_to_name(alert_code), format!("{op}: {err}"));
         }
         if let Some(alert_code) = alert_code_from_reason_string(err.reason()) {
-            return ScannerError::tls_alert(
-                alert_code_to_name(alert_code),
-                format!("{op}: {err}"),
-            );
+            return ScannerError::tls_alert(alert_code_to_name(alert_code), format!("{op}: {err}"));
         }
     }
 
@@ -261,7 +254,10 @@ mod tests {
     #[test]
     fn string_fallback_rejects_non_alert_reasons() {
         assert_eq!(alert_code_from_reason_string(None), None);
-        assert_eq!(alert_code_from_reason_string(Some("some other reason")), None);
+        assert_eq!(
+            alert_code_from_reason_string(Some("some other reason")),
+            None
+        );
         assert_eq!(alert_code_from_reason_string(Some("alert")), None);
     }
 

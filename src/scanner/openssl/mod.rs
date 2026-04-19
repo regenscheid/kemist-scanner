@@ -43,14 +43,10 @@ pub fn ensure_legacy_providers() -> &'static Result<(), ScannerError> {
     static CELL: OnceLock<Result<(), ScannerError>> = OnceLock::new();
     CELL.get_or_init(|| {
         let default = Provider::load(None, "default").map_err(|e| {
-            ScannerError::openssl_provider_load_failed(format!(
-                "OSSL_PROVIDER_load(default): {e}"
-            ))
+            ScannerError::openssl_provider_load_failed(format!("OSSL_PROVIDER_load(default): {e}"))
         })?;
         let legacy = Provider::load(None, "legacy").map_err(|e| {
-            ScannerError::openssl_provider_load_failed(format!(
-                "OSSL_PROVIDER_load(legacy): {e}"
-            ))
+            ScannerError::openssl_provider_load_failed(format!("OSSL_PROVIDER_load(legacy): {e}"))
         })?;
         // Pin both providers for the process lifetime; see function
         // docstring for why this leak is deliberate.

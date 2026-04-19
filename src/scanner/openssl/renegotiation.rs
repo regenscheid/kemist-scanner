@@ -89,9 +89,7 @@ pub async fn probe(
     .await
     .unwrap_or_else(|e| RenegotiationObservation {
         secure_renegotiation_advertised: None,
-        client_initiated_verdict: RenegotiationVerdict::Error(format!(
-            "spawn_blocking_panic:{e}"
-        )),
+        client_initiated_verdict: RenegotiationVerdict::Error(format!("spawn_blocking_panic:{e}")),
         reason: Some(format!("spawn_blocking_panic:{e}")),
     })
 }
@@ -127,8 +125,8 @@ fn probe_blocking(
     let mut stream = match ssl.connect(tcp) {
         Ok(s) => s,
         Err(HandshakeError::Failure(mid)) => {
-            let cat = alerts::classify_openssl_error("reneg initial handshake", mid.error())
-                .category;
+            let cat =
+                alerts::classify_openssl_error("reneg initial handshake", mid.error()).category;
             return RenegotiationObservation {
                 secure_renegotiation_advertised: None,
                 client_initiated_verdict: RenegotiationVerdict::NotAttempted,
@@ -216,9 +214,9 @@ fn build_tls12_context() -> Result<SslContext, openssl::error::ErrorStack> {
 ///   category surfaces for triage.
 fn classify_reneg_error(category: &str) -> RenegotiationVerdict {
     match category {
-        "tls_alert_no_renegotiation"
-        | "tls_alert_handshake_failure"
-        | "connection_refused" => RenegotiationVerdict::ClientInitiatedRejected,
+        "tls_alert_no_renegotiation" | "tls_alert_handshake_failure" | "connection_refused" => {
+            RenegotiationVerdict::ClientInitiatedRejected
+        }
         other => RenegotiationVerdict::Error(other.to_string()),
     }
 }
