@@ -69,6 +69,9 @@ pub struct OpensslObservations {
     /// D1 — Per-suite probe results for RSA-kex, RC4, DES/3DES, NULL,
     /// anon-DH, DHE-RSA, etc. across TLS 1.0/1.1/1.2.
     pub cipher_probes: Option<ciphers::LegacyCipherProbeOutput>,
+    /// D4 — RFC 7919 FFDHE named-group probes across TLS 1.2 and TLS 1.3,
+    /// with D2 cross-check for servers that ignore `supported_groups`.
+    pub ffdhe_probes: Option<ffdhe::FfdheProbeOutput>,
     /// Per-probe non-fatal errors collected during the scan. Populated so
     /// every "not probed" outcome carries a reason string rather than going
     /// silent.
@@ -84,7 +87,8 @@ pub async fn run_all_probes(cfg: &ScanConfig) -> Result<OpensslObservations, Sca
 
     let mut out = OpensslObservations::default();
 
-    // D1 — legacy cipher enumeration.
+    // D1 — legacy cipher enumeration. D2 and D3 observers run inside
+    // the per-suite handshake driver.
     let cipher_out = ciphers::probe_legacy_suites(
         cfg.target,
         &cfg.hostname,
@@ -95,7 +99,18 @@ pub async fn run_all_probes(cfg: &ScanConfig) -> Result<OpensslObservations, Sca
     .await;
     out.cipher_probes = Some(cipher_out);
 
-    // D2-D8 hook in here as those modules land live.
+    // D4 — FFDHE named-group probing (TLS 1.2 + TLS 1.3).
+    let ffdhe_out = ffdhe::probe_ffdhe_groups(
+        cfg.target,
+        &cfg.hostname,
+        cfg.timeout,
+        cfg.timeout,
+        cfg.per_target_delay,
+    )
+    .await;
+    out.ffdhe_probes = Some(ffdhe_out);
+
+    // D5-D8 hook in here as those modules land live.
 
     Ok(out)
 }
