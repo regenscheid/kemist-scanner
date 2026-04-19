@@ -177,11 +177,17 @@ impl SslScanner {
         }
         pause().await;
 
-        results.fallback_scsv_accepted = self.test_fallback_scsv().await;
-        pause().await;
-
-        results.tls_renegotiation = self.test_tls_renegotiation().await;
-        pause().await;
+        // `fallback_scsv_accepted` is deprecated-in-place for schema v1 —
+        // it's a TLS-1.3-heuristic stub and gave false positives. Real
+        // observation lives in `openssl_observations.fallback_scsv`
+        // (Phase D5). Left unpopulated so the field renders null with a
+        // `superseded_by_fallback_scsv_enforced` reason via the output
+        // layer.
+        //
+        // Similarly `tls_renegotiation` was a pair of heuristics whose
+        // signal is now produced by `openssl_observations.renegotiation`
+        // (Phase D6) and the byte-level `hello_observed.secure_renegotiation`
+        // extension detection.
 
         results.heartbeat_echoes_oversized_payload = self.test_heartbleed(&mut results).await;
         pause().await;
@@ -216,6 +222,22 @@ impl SslScanner {
         .await;
         results.group_probes = Some(group_out);
         pause().await;
+
+        // OpenSSL legacy/misconfig probe subsystem: legacy ciphers, DH
+        // parameters, FFDHE groups, SCSV, renegotiation, CertificateRequest,
+        // plus SSLv3/TLS1.0/1.1 when routed through the OpenSSL path at
+        // `test_protocol_support`. Gated by the `legacy-probes` feature.
+        // A fatal setup error (providers won't load) lands in `scan_errors`
+        // and skips the subsystem; individual probe-level failures land
+        // inside `OpensslObservations.probe_errors` so the scan completes.
+        #[cfg(feature = "legacy-probes")]
+        {
+            match crate::scanner::openssl::run_all_probes(&self.config).await {
+                Ok(obs) => results.openssl_observations = Some(obs),
+                Err(e) => results.scan_errors.push(e),
+            }
+            pause().await;
+        }
 
         // Single characterization handshake captures cert chain AND
         // negotiated state (version/suite/group/ALPN + verifier-side signals
@@ -418,109 +440,9 @@ impl SslScanner {
         }
     }
 
-    async fn test_fallback_scsv(&self) -> Option<bool> {
-        // TLS Fallback SCSV (RFC 7507) test
-        // The test works by:
-        // 1. First check if server supports TLS 1.3
-        // 2. Then try to connect with TLS 1.2 and TLS_FALLBACK_SCSV
-        // 3. If server properly implements SCSV, it should reject the connection
-
-        // First, check if server supports TLS 1.3
-        let supports_tls13 = self.check_tls_version_support(TlsVersion::Tls13).await;
-        if !supports_tls13 {
-            // If server doesn't support TLS 1.3, test with TLS 1.2 -> TLS 1.1 fallback
-            return self.test_fallback_scsv_tls12_to_tls11().await;
-        }
-
-        // Server supports TLS 1.3, test TLS 1.3 -> TLS 1.2 fallback
-        self.test_fallback_scsv_tls13_to_tls12().await
-    }
-
     async fn check_tls_version_support(&self, version: TlsVersion) -> bool {
         let result = self.test_rustls_protocol(version).await;
         result.supported
-    }
-
-    async fn test_fallback_scsv_tls13_to_tls12(&self) -> Option<bool> {
-        // Try to connect with TLS 1.2 and indicate we support TLS 1.3
-        // If SCSV is supported, server should reject this connection
-
-        // Note: rustls doesn't easily allow us to inject TLS_FALLBACK_SCSV
-        // This is a simplified implementation that would need lower-level TLS control
-        // For now, we'll assume modern servers support SCSV if they support TLS 1.3
-
-        info!("Testing TLS Fallback SCSV (TLS 1.3 -> TLS 1.2)");
-
-        // Since we can't easily test the actual SCSV with rustls,
-        // we'll do a heuristic: modern servers that support TLS 1.3
-        // are likely to support Fallback SCSV
-        Some(true)
-    }
-
-    async fn test_fallback_scsv_tls12_to_tls11(&self) -> Option<bool> {
-        // Test TLS 1.2 -> TLS 1.1 fallback
-        let supports_tls12 = self.check_tls_version_support(TlsVersion::Tls12).await;
-        let supports_tls11 = self.check_tls_version_support(TlsVersion::Tls11).await;
-
-        if supports_tls12 && supports_tls11 {
-            info!("Testing TLS Fallback SCSV (TLS 1.2 -> TLS 1.1)");
-            // Similar limitation - assume support if both versions work
-            Some(true)
-        } else {
-            // Can't test SCSV meaningfully
-            None
-        }
-    }
-
-    async fn test_tls_renegotiation(&self) -> TlsRenegotiation {
-        // Test various aspects of TLS renegotiation
-        info!("Testing TLS renegotiation capabilities");
-
-        let mut renegotiation = TlsRenegotiation {
-            secure_renegotiation: None,
-            compression_supported: None,
-        };
-
-        // Test secure renegotiation (RFC 5746)
-        renegotiation.secure_renegotiation = self.test_secure_renegotiation().await;
-
-        // Test TLS compression offered
-        renegotiation.compression_supported = self.test_tls_compression().await;
-
-        renegotiation
-    }
-
-    async fn test_secure_renegotiation(&self) -> Option<bool> {
-        // Test if server supports secure renegotiation (RFC 5746)
-        // This extension prevents renegotiation attacks
-
-        // With rustls, secure renegotiation is typically enabled by default
-        // We can infer support based on successful TLS connections
-        if self.check_tls_version_support(TlsVersion::Tls12).await
-            || self.check_tls_version_support(TlsVersion::Tls13).await
-        {
-            // Modern TLS implementations typically support secure renegotiation
-            Some(true)
-        } else {
-            // If we can't establish any secure connection, we can't determine this
-            None
-        }
-    }
-
-    async fn test_tls_compression(&self) -> Option<bool> {
-        // Test if server supports TLS compression (CRIME vulnerability - CVE-2012-4929)
-        // Modern servers should have this disabled
-
-        // rustls doesn't support TLS compression, and modern servers disable it
-        // If we can connect with rustls, compression is likely disabled
-        if self.check_tls_version_support(TlsVersion::Tls12).await
-            || self.check_tls_version_support(TlsVersion::Tls13).await
-        {
-            // Modern implementations don't support compression
-            Some(false)
-        } else {
-            None
-        }
     }
 
     async fn test_heartbleed(&self, results: &mut ScanResults) -> Option<bool> {

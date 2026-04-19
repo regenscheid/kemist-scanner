@@ -75,7 +75,12 @@
         "groups",
         "extensions",
         "downgrade_signaling",
-        "sni_behavior"
+        "sni_behavior",
+        "legacy_cipher_suites",
+        "dh_parameters",
+        "ffdhe_support",
+        "server_key_exchange_signatures",
+        "renegotiation_behavior"
       ],
       "properties": {
         "versions_offered": {
@@ -163,9 +168,10 @@
         },
         "downgrade_signaling": {
           "type": "object",
-          "required": ["fallback_scsv_accepted"],
+          "required": ["fallback_scsv_accepted", "fallback_scsv_enforced"],
           "properties": {
-            "fallback_scsv_accepted": { "$ref": "#/$defs/observationBool" }
+            "fallback_scsv_accepted": { "$ref": "#/$defs/observationBool" },
+            "fallback_scsv_enforced": { "$ref": "#/$defs/observationBool" }
           },
           "additionalProperties": false
         },
@@ -177,6 +183,76 @@
               "type": ["string", "null"],
               "enum": ["same_cert", "different_cert", "rejected", "error", null]
             },
+            "method": { "$ref": "#/$defs/method" },
+            "reason": { "type": "string" }
+          },
+          "additionalProperties": false
+        },
+        "legacy_cipher_suites": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/legacyCipherSuiteEntry" }
+        },
+        "dh_parameters": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/dhParametersObservation" }
+        },
+        "ffdhe_support": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/ffdheObservation" }
+        },
+        "server_key_exchange_signatures": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/skeSigObservation" }
+        },
+        "renegotiation_behavior": {
+          "type": "object",
+          "required": ["method"],
+          "properties": {
+            "client_initiated_verdict": {
+              "type": ["string", "null"],
+              "enum": ["accepted", "rejected", "not_attempted", "error", null]
+            },
+            "method": { "$ref": "#/$defs/method" },
+            "reason": { "type": "string" }
+          },
+          "additionalProperties": false
+        },
+        "client_auth_request": {
+          "type": ["object", "null"],
+          "required": ["requested", "method"],
+          "properties": {
+            "requested": { "type": "boolean" },
+            "certificate_types": {
+              "type": "array",
+              "items": { "type": "integer", "minimum": 0, "maximum": 255 }
+            },
+            "signature_algorithms": { "type": "array", "items": { "type": "string" } },
+            "ca_distinguished_names": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["raw_der_b64"],
+                "properties": {
+                  "raw_der_b64": { "type": "string" },
+                  "common_name": { "type": "string" },
+                  "organization": { "type": "string" }
+                },
+                "additionalProperties": false
+              }
+            },
+            "oid_filters": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["oid", "values_b64"],
+                "properties": {
+                  "oid": { "type": "string" },
+                  "values_b64": { "type": "array", "items": { "type": "string" } }
+                },
+                "additionalProperties": false
+              }
+            },
+            "alert_on_empty_cert": { "type": ["string", "null"] },
             "method": { "$ref": "#/$defs/method" },
             "reason": { "type": "string" }
           },
@@ -299,6 +375,59 @@
           "then": { "properties": { "supported": { "type": "null" } }, "required": ["reason"] }
         }
       ]
+    },
+    "legacyCipherSuiteEntry": {
+      "type": "object",
+      "required": ["name", "openssl_name", "iana_code", "protocol_version", "supported", "method"],
+      "properties": {
+        "name": { "type": "string" },
+        "openssl_name": { "type": "string" },
+        "iana_code": { "type": "string", "pattern": "^0x[0-9A-Fa-f]{4}$" },
+        "protocol_version": { "type": "string", "enum": ["tls1_0", "tls1_1", "tls1_2"] },
+        "supported": { "type": ["boolean", "null"] },
+        "method": { "$ref": "#/$defs/method" },
+        "reason": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "dhParametersObservation": {
+      "type": "object",
+      "required": ["cipher_suite", "prime_bits", "classification", "generator", "prime_sha256", "method"],
+      "properties": {
+        "cipher_suite": { "type": "string" },
+        "prime_bits": { "type": "integer", "minimum": 0 },
+        "classification": {
+          "type": "string",
+          "enum": ["ffdhe2048", "ffdhe3072", "ffdhe4096", "ffdhe6144", "ffdhe8192", "custom"]
+        },
+        "generator": { "type": "integer", "minimum": 0 },
+        "prime_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "prime_raw_hex": { "type": "string", "pattern": "^[0-9a-f]+$" },
+        "method": { "$ref": "#/$defs/method" },
+        "reason": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "ffdheObservation": {
+      "type": "object",
+      "required": ["iana_code", "tls1_2", "tls1_3"],
+      "properties": {
+        "iana_code": { "type": "string", "pattern": "^0x[0-9A-Fa-f]{4}$" },
+        "tls1_2": { "$ref": "#/$defs/groupObservation" },
+        "tls1_3": { "$ref": "#/$defs/groupObservation" }
+      },
+      "additionalProperties": false
+    },
+    "skeSigObservation": {
+      "type": "object",
+      "required": ["cipher_suite", "signature_algorithm", "method"],
+      "properties": {
+        "cipher_suite": { "type": "string" },
+        "signature_algorithm": { "type": "string" },
+        "method": { "$ref": "#/$defs/method" },
+        "reason": { "type": "string" }
+      },
+      "additionalProperties": false
     },
     "certificateFacts": {
       "type": "object",
