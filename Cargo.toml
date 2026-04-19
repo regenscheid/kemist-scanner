@@ -10,8 +10,16 @@ categories = ["network-programming", "command-line-utilities"]
 readme = "README.md"
 
 [features]
-default = ["http-checks"]
+default = ["http-checks", "legacy-probes", "native-legacy"]
 http-checks = ["dep:reqwest"]
+# OpenSSL-backed legacy/misconfiguration probes (RSA-kex, weak ciphers, DH
+# parameters, FFDHE, TLS_FALLBACK_SCSV, renegotiation, CertificateRequest).
+# Vendors OpenSSL 3.5 LTS — no system libssl required at build or runtime.
+legacy-probes = ["dep:openssl", "dep:openssl-sys", "dep:openssl-src", "dep:foreign-types"]
+# native-tls-backed SSLv3/TLS1.0/TLS1.1 protocol-version probes. Fallback
+# backend when legacy-probes is off. Off-by-default scanner builds
+# (--no-default-features --features http-checks) lose legacy coverage entirely.
+native-legacy = ["dep:native-tls", "dep:tokio-native-tls"]
 
 [dependencies]
 # TLS implementation
@@ -20,9 +28,18 @@ rustls-native-certs = "0.8"
 webpki-roots = "0.26"
 rustls-pki-types = "1"
 
-# Add native-tls to support old version SSL/TLS protocol
-native-tls = "0.2"
-tokio-native-tls = "0.3"
+# Legacy SSL/TLS protocol probes. Two backend options, selected by cargo feature:
+#   - legacy-probes (preferred): vendored OpenSSL 3.5 LTS via the openssl* crates.
+#   - native-legacy (fallback): platform native-tls for SSLv3/TLS1.0/1.1 only.
+# Both ship in `default`; users opt out via --no-default-features.
+native-tls = { version = "0.2", optional = true }
+tokio-native-tls = { version = "0.3", optional = true }
+openssl = { version = "0.10", features = ["vendored"], optional = true }
+openssl-sys = { version = "0.9", optional = true }
+# Pinned exact to OpenSSL 3.5.5 LTS (supported through 2030-04-08). Exact pin
+# so upstream CVE-carrying patch bumps require deliberate review.
+openssl-src = { version = "=300.5.5", optional = true }
+foreign-types = { version = "0.3", optional = true }
 
 # Async runtime and networking
 tokio = { version = "1", features = ["full"] }

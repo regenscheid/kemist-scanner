@@ -306,12 +306,28 @@ impl SslScanner {
                     .await
                 }
                 TlsVersion::Ssl3 | TlsVersion::Tls10 | TlsVersion::Tls11 => {
-                    let legacy_scanner = crate::scanner::legacy::LegacyScanner::new(
-                        self.config.target,
-                        self.config.hostname.clone(),
-                        self.config.timeout,
-                    );
-                    legacy_scanner.test_legacy_protocol(version).await
+                    #[cfg(feature = "native-legacy")]
+                    {
+                        let legacy_scanner = crate::scanner::legacy::LegacyScanner::new(
+                            self.config.target,
+                            self.config.hostname.clone(),
+                            self.config.timeout,
+                        );
+                        legacy_scanner.test_legacy_protocol(version).await
+                    }
+                    #[cfg(not(feature = "native-legacy"))]
+                    {
+                        ProtocolSupport {
+                            version,
+                            supported: false,
+                            error: Some(
+                                "native_legacy_feature_disabled: rebuild with \
+                                 --features native-legacy or legacy-probes to probe \
+                                 SSLv3/TLS1.0/TLS1.1"
+                                    .to_string(),
+                            ),
+                        }
+                    }
                 }
             };
 

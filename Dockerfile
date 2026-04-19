@@ -9,10 +9,12 @@
 
 FROM rust:1.88-slim-bookworm AS builder
 
-# Dependencies required to build aws-lc-rs and native-tls.
+# Dependencies required to build aws-lc-rs (cmake/clang) and the vendored
+# OpenSSL 3.5 LTS used by the legacy-probes feature (perl/make). No system
+# libssl headers needed — openssl-src builds OpenSSL from C sources.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        pkg-config \
-        libssl-dev \
+        perl \
+        make \
         cmake \
         clang \
         ca-certificates \

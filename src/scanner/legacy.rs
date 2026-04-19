@@ -3,19 +3,24 @@ use std::net::SocketAddr;
 use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio::time::timeout;
+#[cfg(feature = "native-legacy")]
 use tokio_native_tls::{native_tls, TlsConnector};
 use tracing::info;
 
+#[cfg(feature = "native-legacy")]
 use crate::model::cipher::CipherInfo;
+#[cfg(feature = "native-legacy")]
 use crate::model::errors::ScannerError;
 use crate::model::protocol::{ProtocolSupport, TlsVersion};
 
+#[cfg(feature = "native-legacy")]
 pub struct LegacyScanner {
     target: SocketAddr,
     hostname: String,
     timeout: Duration,
 }
 
+#[cfg(feature = "native-legacy")]
 impl LegacyScanner {
     pub fn new(target: SocketAddr, hostname: String, timeout: Duration) -> Self {
         Self {

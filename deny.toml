@@ -18,11 +18,22 @@ allow = [
     "CDLA-Permissive-2.0",
 ]
 
-# aws-lc-sys links against AWS-LC (an OpenSSL fork). Required transitively via rustls's
-# aws-lc-rs crypto provider. Scoped exception — not a general OpenSSL allowance.
+# OpenSSL-licensed crates. aws-lc-sys vends AWS-LC (an OpenSSL fork) via
+# rustls's aws-lc-rs crypto provider. openssl/openssl-sys/openssl-src vend
+# upstream OpenSSL 3.x for the legacy-probes subsystem (see Cargo.toml
+# `legacy-probes` feature). All require the OpenSSL license exception —
+# this repo is MIT OR Apache-2.0 + OpenSSL (declared in LICENSE-OPENSSL).
 [[licenses.exceptions]]
 allow = ["OpenSSL"]
 crate = "aws-lc-sys"
+
+[[licenses.exceptions]]
+allow = ["OpenSSL"]
+crate = "openssl-sys"
+
+[[licenses.exceptions]]
+allow = ["OpenSSL"]
+crate = "openssl-src"
 
 [licenses.private]
 ignore = true
