@@ -25,6 +25,7 @@ use tracing::{debug, info};
 use crate::model::errors::ScannerError;
 use crate::model::protocol::TlsVersion;
 use crate::scanner::openssl::alerts;
+use crate::scanner::openssl::dh_params::{self, DhSnapshot};
 
 /// Per-suite probe outcome. Parallel to
 /// `crate::scanner::ciphers::ProbeOutcome` on the rustls side; downstream
@@ -55,10 +56,12 @@ pub struct LegacyCipherResult {
     /// versions; those appear as separate result entries.
     pub version: TlsVersion,
     pub outcome: LegacyProbeOutcome,
-    // Phase D2 observer populates `dh_snapshot` on DHE handshakes; Phase D3
-    // observer populates `ske_sig`. Kept as unit/string placeholders until
-    // those modules land — swapping in real types later is additive.
-    pub dh_snapshot: Option<()>,
+    /// Populated by [`crate::scanner::openssl::dh_params::snapshot`] for any
+    /// handshake whose server `tmp_key` is DH (i.e. DHE-RSA suites). `None`
+    /// for RSA-kex, ECDHE, and failed handshakes.
+    pub dh_snapshot: Option<DhSnapshot>,
+    /// Populated by Phase D3 (`ske_sig::snapshot`) — TLS 1.2
+    /// ServerKeyExchange signature algorithm name.
     pub ske_sig: Option<String>,
 }
 
@@ -228,7 +231,7 @@ pub async fn probe_legacy_suites(
         let version = t.version;
         let target_addr = target;
 
-        let outcome = tokio::task::spawn_blocking(move || {
+        let probe_out = tokio::task::spawn_blocking(move || {
             probe_single_suite_blocking(
                 target_addr,
                 &hostname_owned,
@@ -239,14 +242,16 @@ pub async fn probe_legacy_suites(
             )
         })
         .await
-        .unwrap_or_else(|join_err| {
-            LegacyProbeOutcome::Error(format!("spawn_blocking_panic: {join_err}"))
+        .unwrap_or_else(|join_err| ProbeRun {
+            outcome: LegacyProbeOutcome::Error(format!("spawn_blocking_panic: {join_err}")),
+            dh_snapshot: None,
         });
 
         debug!(
             suite = %t.openssl_name,
             version = ?t.version,
-            outcome = ?outcome,
+            outcome = ?probe_out.outcome,
+            dh_captured = probe_out.dh_snapshot.is_some(),
             "legacy probe result"
         );
 
@@ -255,8 +260,8 @@ pub async fn probe_legacy_suites(
             openssl_name: t.openssl_name.to_string(),
             iana_code: t.iana_code,
             version: t.version,
-            outcome,
-            dh_snapshot: None,
+            outcome: probe_out.outcome,
+            dh_snapshot: probe_out.dh_snapshot,
             ske_sig: None,
         });
 
@@ -268,9 +273,18 @@ pub async fn probe_legacy_suites(
     LegacyCipherProbeOutput { results }
 }
 
-/// Synchronous single-suite probe. Called inside `spawn_blocking`. Returns
-/// the probe outcome — never panics, never returns Err; failure categories
-/// are folded into `LegacyProbeOutcome::Error`.
+/// Internal return value of [`probe_single_suite_blocking`] — outcome plus
+/// any post-handshake observations (D2 DH snapshot; D3 SKE sig slot hooks
+/// in here later).
+struct ProbeRun {
+    outcome: LegacyProbeOutcome,
+    dh_snapshot: Option<DhSnapshot>,
+}
+
+/// Synchronous single-suite probe. Called inside `spawn_blocking`. Never
+/// panics, never returns Err; failure categories fold into
+/// `LegacyProbeOutcome::Error`. On handshake success, also observes DH
+/// parameters (D2) if the server's tmp key is DH.
 fn probe_single_suite_blocking(
     target: SocketAddr,
     hostname: &str,
@@ -278,11 +292,14 @@ fn probe_single_suite_blocking(
     version: TlsVersion,
     connect_timeout: Duration,
     handshake_timeout: Duration,
-) -> LegacyProbeOutcome {
+) -> ProbeRun {
     let Some(ossl_version) = tls_version_to_ossl(version) else {
-        return LegacyProbeOutcome::Error(format!(
-            "unsupported_tls_version_for_openssl:{version:?}"
-        ));
+        return ProbeRun {
+            outcome: LegacyProbeOutcome::Error(format!(
+                "unsupported_tls_version_for_openssl:{version:?}"
+            )),
+            dh_snapshot: None,
+        };
     };
 
     // TCP connect under connect_timeout. `connect_timeout` enforces
@@ -292,7 +309,10 @@ fn probe_single_suite_blocking(
         Ok(s) => s,
         Err(e) => {
             let se = ScannerError::from_io("openssl tcp connect", e);
-            return classify_scanner_error(se);
+            return ProbeRun {
+                outcome: classify_scanner_error(se),
+                dh_snapshot: None,
+            };
         }
     };
     let _ = tcp.set_read_timeout(Some(handshake_timeout));
@@ -304,37 +324,57 @@ fn probe_single_suite_blocking(
             // Usually means the cipher name isn't recognized by the local
             // OpenSSL build. Classify as Error, not NotSupported — this is
             // a kemist-side bug, not a server observation.
-            return LegacyProbeOutcome::Error(format!("openssl_ctx_build: {stack}"));
+            return ProbeRun {
+                outcome: LegacyProbeOutcome::Error(format!("openssl_ctx_build: {stack}")),
+                dh_snapshot: None,
+            };
         }
     };
 
     let mut ssl = match Ssl::new(&ctx) {
         Ok(s) => s,
-        Err(stack) => return LegacyProbeOutcome::Error(format!("openssl_ssl_new: {stack}")),
+        Err(stack) => {
+            return ProbeRun {
+                outcome: LegacyProbeOutcome::Error(format!("openssl_ssl_new: {stack}")),
+                dh_snapshot: None,
+            }
+        }
     };
     // Best-effort SNI; failure here is unlikely and non-fatal.
     let _ = ssl.set_hostname(hostname);
 
     match ssl.connect(tcp) {
-        Ok(_stream) => {
-            // Handshake completed. Phase D2 `dh_params::snapshot` and
-            // Phase D3 `ske_sig::snapshot` hook in here once implemented —
-            // they observe state from the completed `SslStream` without
-            // completing any application-data exchange.
-            LegacyProbeOutcome::Supported
+        Ok(stream) => {
+            // Handshake completed. Observe DH parameters for DHE handshakes;
+            // RSA-kex and ECDHE return `Ok(None)` from `snapshot` and land
+            // with `dh_snapshot: None`. A snapshot-level ErrorStack means
+            // the key was DH but OpenSSL wouldn't expose its parts — rare;
+            // swallow it (the Supported outcome is more important signal).
+            let dh_snapshot = dh_params::snapshot(stream.ssl()).unwrap_or(None);
+            ProbeRun {
+                outcome: LegacyProbeOutcome::Supported,
+                dh_snapshot,
+            }
         }
         Err(HandshakeError::Failure(mid)) => {
             let se = alerts::classify_openssl_error("openssl handshake", mid.error());
-            classify_scanner_error(se)
+            ProbeRun {
+                outcome: classify_scanner_error(se),
+                dh_snapshot: None,
+            }
         }
-        Err(HandshakeError::SetupFailure(stack)) => {
-            LegacyProbeOutcome::Error(format!("openssl_setup: {stack}"))
-        }
+        Err(HandshakeError::SetupFailure(stack)) => ProbeRun {
+            outcome: LegacyProbeOutcome::Error(format!("openssl_setup: {stack}")),
+            dh_snapshot: None,
+        },
         Err(HandshakeError::WouldBlock(_)) => {
             // Shouldn't happen with blocking socket + set_*_timeout; if it
             // does, record as Error so the anomaly surfaces rather than
             // masquerading as NotSupported.
-            LegacyProbeOutcome::Error("openssl_would_block".to_string())
+            ProbeRun {
+                outcome: LegacyProbeOutcome::Error("openssl_would_block".to_string()),
+                dh_snapshot: None,
+            }
         }
     }
 }
