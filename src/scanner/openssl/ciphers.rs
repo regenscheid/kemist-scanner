@@ -26,6 +26,7 @@ use crate::model::errors::ScannerError;
 use crate::model::protocol::TlsVersion;
 use crate::scanner::openssl::alerts;
 use crate::scanner::openssl::dh_params::{self, DhSnapshot};
+use crate::scanner::openssl::ske_sig;
 
 /// Per-suite probe outcome. Parallel to
 /// `crate::scanner::ciphers::ProbeOutcome` on the rustls side; downstream
@@ -245,6 +246,7 @@ pub async fn probe_legacy_suites(
         .unwrap_or_else(|join_err| ProbeRun {
             outcome: LegacyProbeOutcome::Error(format!("spawn_blocking_panic: {join_err}")),
             dh_snapshot: None,
+            ske_sig: None,
         });
 
         debug!(
@@ -252,6 +254,7 @@ pub async fn probe_legacy_suites(
             version = ?t.version,
             outcome = ?probe_out.outcome,
             dh_captured = probe_out.dh_snapshot.is_some(),
+            ske_sig = ?probe_out.ske_sig,
             "legacy probe result"
         );
 
@@ -262,7 +265,7 @@ pub async fn probe_legacy_suites(
             version: t.version,
             outcome: probe_out.outcome,
             dh_snapshot: probe_out.dh_snapshot,
-            ske_sig: None,
+            ske_sig: probe_out.ske_sig,
         });
 
         if i < last && !per_probe_delay.is_zero() {
@@ -274,11 +277,11 @@ pub async fn probe_legacy_suites(
 }
 
 /// Internal return value of [`probe_single_suite_blocking`] — outcome plus
-/// any post-handshake observations (D2 DH snapshot; D3 SKE sig slot hooks
-/// in here later).
+/// any post-handshake observations (D2 DH snapshot, D3 SKE signature).
 struct ProbeRun {
     outcome: LegacyProbeOutcome,
     dh_snapshot: Option<DhSnapshot>,
+    ske_sig: Option<String>,
 }
 
 /// Synchronous single-suite probe. Called inside `spawn_blocking`. Never
@@ -299,6 +302,7 @@ fn probe_single_suite_blocking(
                 "unsupported_tls_version_for_openssl:{version:?}"
             )),
             dh_snapshot: None,
+            ske_sig: None,
         };
     };
 
@@ -312,6 +316,7 @@ fn probe_single_suite_blocking(
             return ProbeRun {
                 outcome: classify_scanner_error(se),
                 dh_snapshot: None,
+                ske_sig: None,
             };
         }
     };
@@ -327,6 +332,7 @@ fn probe_single_suite_blocking(
             return ProbeRun {
                 outcome: LegacyProbeOutcome::Error(format!("openssl_ctx_build: {stack}")),
                 dh_snapshot: None,
+                ske_sig: None,
             };
         }
     };
@@ -337,6 +343,7 @@ fn probe_single_suite_blocking(
             return ProbeRun {
                 outcome: LegacyProbeOutcome::Error(format!("openssl_ssl_new: {stack}")),
                 dh_snapshot: None,
+                ske_sig: None,
             }
         }
     };
@@ -345,15 +352,18 @@ fn probe_single_suite_blocking(
 
     match ssl.connect(tcp) {
         Ok(stream) => {
-            // Handshake completed. Observe DH parameters for DHE handshakes;
-            // RSA-kex and ECDHE return `Ok(None)` from `snapshot` and land
-            // with `dh_snapshot: None`. A snapshot-level ErrorStack means
-            // the key was DH but OpenSSL wouldn't expose its parts — rare;
-            // swallow it (the Supported outcome is more important signal).
+            // Handshake completed. Observe DH parameters (D2) and the
+            // server's signature algorithm (D3). Both return None for
+            // handshakes where the observation doesn't apply (e.g. RSA-kex
+            // has no SKE signature; ECDHE has no DH parameters). A
+            // snapshot-level ErrorStack from D2 is swallowed — the
+            // Supported outcome is the primary signal.
             let dh_snapshot = dh_params::snapshot(stream.ssl()).unwrap_or(None);
+            let ske_sig = ske_sig::snapshot(stream.ssl());
             ProbeRun {
                 outcome: LegacyProbeOutcome::Supported,
                 dh_snapshot,
+                ske_sig,
             }
         }
         Err(HandshakeError::Failure(mid)) => {
@@ -361,11 +371,13 @@ fn probe_single_suite_blocking(
             ProbeRun {
                 outcome: classify_scanner_error(se),
                 dh_snapshot: None,
+                ske_sig: None,
             }
         }
         Err(HandshakeError::SetupFailure(stack)) => ProbeRun {
             outcome: LegacyProbeOutcome::Error(format!("openssl_setup: {stack}")),
             dh_snapshot: None,
+            ske_sig: None,
         },
         Err(HandshakeError::WouldBlock(_)) => {
             // Shouldn't happen with blocking socket + set_*_timeout; if it
@@ -374,6 +386,7 @@ fn probe_single_suite_blocking(
             ProbeRun {
                 outcome: LegacyProbeOutcome::Error("openssl_would_block".to_string()),
                 dh_snapshot: None,
+                ske_sig: None,
             }
         }
     }
