@@ -32,12 +32,14 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
-          - target: aarch64-unknown-linux-gnu
-            os: ubuntu-latest
-          - target: x86_64-apple-darwin
-            os: macos-latest
-          - target: aarch64-apple-darwin
-            os: macos-latest
+          # aarch64-linux cross-compile breaks on openssl-sys (native-tls
+          # dep) without cross-compiled libssl-dev on the x86 runner.
+          # arm64 users can pull the multi-arch Docker image instead.
+          # Re-enable with a cross setup (e.g. ``cross`` tool) if
+          # standalone arm64 Linux binaries become a requirement.
+          #
+          # macOS targets also disabled — GitHub bills them at 10x the
+          # Linux rate and nothing downstream consumes them.
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4

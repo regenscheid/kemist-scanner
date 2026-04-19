@@ -7,7 +7,7 @@
 #
 # Target compressed size: < 50 MB.
 
-FROM rust:1.86-slim-bookworm AS builder
+FROM rust:1.88-slim-bookworm AS builder
 
 # Dependencies required to build aws-lc-rs and native-tls.
 RUN apt-get update && apt-get install -y --no-install-recommends \
