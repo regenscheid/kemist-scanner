@@ -134,21 +134,20 @@ pub struct Tls {
     pub versions_offered: TlsVersionsOffered,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub negotiated: Option<TlsNegotiated>,
+    /// Cipher-suite probes across TLS 1.0/1.1/1.2/1.3. Each entry is
+    /// tagged with the `provider` that probed it (aws-lc-rs or openssl)
+    /// so consumers that care about backend attribution can filter.
     pub cipher_suites: TlsCipherSuites,
-    pub groups: BTreeMap<String, GroupObservation>,
+    /// Key-exchange group probes partitioned by TLS version. FFDHE
+    /// groups appear under both `tls1_2` and `tls1_3`; aws-lc-rs modern
+    /// groups (X25519, ECDH, ML-KEM, hybrids) appear under `tls1_3`.
+    pub groups: TlsGroups,
     pub extensions: TlsExtensions,
     pub downgrade_signaling: DowngradeSignaling,
     pub sni_behavior: SniBehavior,
-    /// OpenSSL-backed legacy cipher enumeration (RSA-kex, RC4, DES/3DES,
-    /// NULL, anon-DH, DHE-RSA, etc.) across TLS 1.0/1.1/1.2. Empty when
-    /// `legacy-probes` is disabled.
-    pub legacy_cipher_suites: Vec<LegacyCipherSuiteEntry>,
     /// DH parameters captured from every completed DHE handshake,
     /// classified against RFC 7919 FFDHE primes.
     pub dh_parameters: Vec<DhParametersObservation>,
-    /// RFC 7919 FFDHE named-group probes per protocol version, keyed
-    /// by group name (ffdhe2048…ffdhe8192).
-    pub ffdhe_support: BTreeMap<String, FfdheObservation>,
     /// Signature algorithm the server selected in each completed TLS 1.2
     /// ServerKeyExchange / TLS 1.3 CertificateVerify.
     pub server_key_exchange_signatures: Vec<SkeSigObservation>,
@@ -229,13 +228,40 @@ pub struct CipherSuiteEntry {
     pub method: Method,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// OpenSSL-style short name (e.g. `"AES128-SHA"`). Only present for
+    /// probes run via the OpenSSL backend — useful as a reproduction aid
+    /// (`openssl s_client -cipher <name>`). aws-lc-rs probes don't use
+    /// cipher strings, so this is absent for the modern path.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub openssl_name: Option<String>,
+    /// Which backend produced this observation: `"aws_lc_rs"` for the
+    /// rustls + aws-lc-rs modern path, `"openssl"` for the vendored
+    /// OpenSSL legacy/misconfig path.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
 }
 
 #[derive(Serialize, Debug, Clone)]
 pub struct TlsCipherSuites {
+    pub tls1_0: Vec<CipherSuiteEntry>,
+    pub tls1_1: Vec<CipherSuiteEntry>,
     pub tls1_2: Vec<CipherSuiteEntry>,
     pub tls1_3: Vec<CipherSuiteEntry>,
     pub server_enforces_order: ObservationBool,
+}
+
+/// Per-TLS-version key-exchange group observations. Keys are group
+/// names (e.g. `"X25519"`, `"ffdhe2048"`), values are the per-group
+/// observation for that TLS version.
+///
+/// Not every group appears under both versions:
+/// - FFDHE groups can appear under both `tls1_2` and `tls1_3`.
+/// - aws-lc-rs modern groups (X25519, ECDH NIST curves, ML-KEM,
+///   PQC hybrids) are TLS 1.3-only and appear only under `tls1_3`.
+#[derive(Serialize, Debug, Clone, Default)]
+pub struct TlsGroups {
+    pub tls1_2: BTreeMap<String, GroupObservation>,
+    pub tls1_3: BTreeMap<String, GroupObservation>,
 }
 
 /// Per-group `{supported, method, reason?}` envelope. Field name differs from `value` per spec.
@@ -245,6 +271,16 @@ pub struct GroupObservation {
     pub method: Method,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// IANA codepoint as `"0xNNNN"`. Populated for OpenSSL-backed FFDHE
+    /// observations (where the probe knows the codepoint explicitly);
+    /// absent for aws-lc-rs-backed modern groups that emit by debug name
+    /// only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub iana_code: Option<String>,
+    /// Which backend produced this observation. See
+    /// [`CipherSuiteEntry::provider`] for the full contract.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
 }
 
 #[allow(dead_code)] // `probe` consumed by PR 8
@@ -254,6 +290,8 @@ impl GroupObservation {
             supported: Some(supported),
             method: Method::Probe,
             reason: None,
+            iana_code: None,
+            provider: None,
         }
     }
     pub fn not_probed(reason: &str) -> Self {
@@ -261,6 +299,8 @@ impl GroupObservation {
             supported: None,
             method: Method::NotProbed,
             reason: Some(reason.into()),
+            iana_code: None,
+            provider: None,
         }
     }
 }
@@ -323,20 +363,6 @@ pub struct SniBehavior {
 // docs/OUTPUT_SCHEMA.md for field semantics.
 // ----------------------------------------------------------------------
 
-/// One entry in `tls.legacy_cipher_suites`.
-#[derive(Serialize, Debug, Clone)]
-pub struct LegacyCipherSuiteEntry {
-    pub name: String,
-    pub openssl_name: String,
-    pub iana_code: String,
-    /// `"tls1_0"` / `"tls1_1"` / `"tls1_2"`.
-    pub protocol_version: String,
-    pub supported: Option<bool>,
-    pub method: Method,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
-}
-
 /// One entry in `tls.dh_parameters`.
 #[derive(Serialize, Debug, Clone)]
 pub struct DhParametersObservation {
@@ -358,14 +384,6 @@ pub struct DhParametersObservation {
     pub method: Method,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
-}
-
-/// One entry in `tls.ffdhe_support`, keyed by group name.
-#[derive(Serialize, Debug, Clone)]
-pub struct FfdheObservation {
-    pub iana_code: String,
-    pub tls1_2: GroupObservation,
-    pub tls1_3: GroupObservation,
 }
 
 /// One entry in `tls.server_key_exchange_signatures`.

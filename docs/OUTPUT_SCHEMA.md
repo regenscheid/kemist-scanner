@@ -140,33 +140,65 @@ from rustls's post-handshake `ClientConnection` state:
 ### `tls.cipher_suites`
 ```
 {
-  tls1_2: [ {name, iana_code, supported, method, reason?}, ... ],
-  tls1_3: [ {name, iana_code, supported, method, reason?}, ... ],
+  tls1_0: [ CipherSuiteEntry, ... ],   # OpenSSL legacy path only
+  tls1_1: [ CipherSuiteEntry, ... ],   # OpenSSL legacy path only
+  tls1_2: [ CipherSuiteEntry, ... ],   # aws-lc-rs + OpenSSL legacy
+  tls1_3: [ CipherSuiteEntry, ... ],   # aws-lc-rs only
   server_enforces_order: ObservationBool
 }
-```
 
-One entry per aws-lc-rs-shipped suite, probed individually. `iana_code`
-is a `"0xNNNN"` string (four hex chars). `server_enforces_order` compares
-two handshakes with reversed cipher orderings.
-
-Suites outside aws-lc-rs' ship set are **absent from the arrays** — the
-scanner can't probe what the provider doesn't implement. Consumers
-cross-check against `capabilities.provider_cipher_suites`.
-
-### `tls.groups`
-Map keyed by group name (e.g. `"X25519MLKEM768"`, `"secp256r1"`):
-```
-{
-  "X25519MLKEM768": {supported: true, method: "probe"},
-  "MLKEM512": {supported: null, method: "not_probed",
-               reason: "aws_lc_rs_no_mlkem512_support"},
-  ...
+CipherSuiteEntry = {
+  name:          "TLS_RSA_WITH_AES_128_CBC_SHA",
+  iana_code:     "0x002F",
+  supported:     bool | null,
+  method:        Method,
+  reason?:       string,
+  openssl_name?: "AES128-SHA",                 // present only for openssl-backed probes
+  provider?:     "aws_lc_rs" | "openssl"       // backend that ran the probe
 }
 ```
 
-12 target groups (classical, PQC hybrids, standalone ML-KEM,
-Kyber768Draft00). Entries aws-lc-rs doesn't ship emit `not_probed` with
+One entry per probed suite, partitioned by TLS version. Suites outside
+aws-lc-rs' ship set aren't probed via the rustls path — the openssl
+path fills those gaps for RSA-kex / RC4 / DES/3DES / NULL / anon-DH /
+EXPORT / IDEA and reports them under `provider: "openssl"`. Consumers
+who want provider-specific filtering key on the `provider` field;
+consumers who just want "does the server support X?" read the full
+array for each version. `server_enforces_order` still compares two
+aws-lc-rs handshakes with reversed cipher orderings.
+
+### `tls.groups`
+Per-TLS-version maps of key-exchange group observations:
+```
+{
+  tls1_2: { "ffdhe2048": GroupObservation, "ffdhe3072": GroupObservation, ... },
+  tls1_3: { "X25519": GroupObservation, "MLKEM768": GroupObservation,
+            "ffdhe2048": GroupObservation, ... }
+}
+
+GroupObservation = {
+  supported:   bool | null,
+  method:      Method,
+  reason?:     string,
+  iana_code?:  "0x0100",                       // present for openssl-backed FFDHE probes
+  provider?:   "aws_lc_rs" | "openssl"
+}
+```
+
+`tls1_3` holds the aws-lc-rs modern groups (classical, PQC hybrids,
+standalone ML-KEM, Kyber768Draft00) *plus* the TLS 1.3 outcomes for
+RFC 7919 FFDHE codepoints. `tls1_2` holds only FFDHE outcomes — the
+aws-lc-rs groups are TLS 1.3-only by design. Entries aws-lc-rs doesn't
+ship emit `not_probed` with a specific reason.
+
+**FFDHE cross-check.** A TLS 1.2 FFDHE entry with
+`{supported: false, reason: "server_ignored_group_offer_returned_custom_prime"}`
+means the server completed a DHE handshake but returned a prime that
+doesn't match the advertised codepoint — i.e. it ignored
+`supported_groups`. Distinct from a plain `false` (no alert / server
+just refused the group).
+
+Entries aws-lc-rs doesn't ship emit `not_probed` with
 a specific reason — never `supported: false` without a real probe.
 
 ### `tls.extensions`

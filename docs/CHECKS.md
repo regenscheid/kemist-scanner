@@ -69,10 +69,10 @@ run against a vendored OpenSSL 3.5 LTS (`openssl-src = "=300.5.5"`).
 
 | Observation | How | Output field | Source |
 |---|---|---|---|
-| Legacy cipher suite probe | Per-suite handshake with single-suite cipher list + SECLEVEL=0 + version pinned | `tls.legacy_cipher_suites[]` | [openssl/ciphers.rs](../src/scanner/openssl/ciphers.rs) |
+| Legacy cipher suite probe | Per-suite handshake with single-suite cipher list + SECLEVEL=0 + version pinned | `tls.cipher_suites.{tls1_0, tls1_1, tls1_2}[]` entries with `provider: "openssl"` | [openssl/ciphers.rs](../src/scanner/openssl/ciphers.rs) |
 | DH parameter capture | `SSL_get_peer_tmp_key` after every successful DHE handshake; SHA-256 of prime classified against RFC 7919 | `tls.dh_parameters[]` | [openssl/dh_params.rs](../src/scanner/openssl/dh_params.rs) |
 | SKE / CertificateVerify signature | `SSL_ctrl(SSL_CTRL_GET_PEER_SIGNATURE_NAME, …)` post-handshake | `tls.server_key_exchange_signatures[]` | [openssl/ske_sig.rs](../src/scanner/openssl/ske_sig.rs) |
-| FFDHE named-group probe | `set_groups_list("ffdheNNNN")` × `{TLS 1.2 + DHE cipher list, TLS 1.3}`; cross-checks observed prime against advertised group | `tls.ffdhe_support.*` | [openssl/ffdhe.rs](../src/scanner/openssl/ffdhe.rs) |
+| FFDHE named-group probe | `set_groups_list("ffdheNNNN")` × `{TLS 1.2 + DHE cipher list, TLS 1.3}`; cross-checks observed prime against advertised group | `tls.groups.{tls1_2, tls1_3}.ffdheNNNN` entries with `provider: "openssl"` | [openssl/ffdhe.rs](../src/scanner/openssl/ffdhe.rs) |
 | TLS_FALLBACK_SCSV enforcement | Characterize server max → probe one step below with `SslMode::SEND_FALLBACK_SCSV`; expect `inappropriate_fallback` alert | `tls.downgrade_signaling.fallback_scsv_enforced` | [openssl/fallback_scsv.rs](../src/scanner/openssl/fallback_scsv.rs) |
 | Client-initiated renegotiation | TLS 1.2 handshake → `SSL_renegotiate` → `SSL_do_handshake`; observe alert / close / success | `tls.renegotiation_behavior` | [openssl/renegotiation.rs](../src/scanner/openssl/renegotiation.rs) |
 | CertificateRequest capture | `SSL_CTX_set_msg_callback` (via `SSL_CTX_callback_ctrl`) intercepting msg_type 13; parse TLS 1.2 and TLS 1.3 shapes | `tls.client_auth_request` | [openssl/client_auth.rs](../src/scanner/openssl/client_auth.rs) |

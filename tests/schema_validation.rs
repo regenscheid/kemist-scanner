@@ -335,14 +335,37 @@ fn fully_populated_openssl_observations_match_schema_v1() {
 
     // Cross-check the output actually carries the new fields — schema
     // validation alone doesn't prove the builder populated anything; it
-    // only proves the shape is legal.
+    // only proves the shape is legal. Legacy probes land in the merged
+    // tls.cipher_suites.* and tls.groups.{tls1_2,tls1_3} locations.
     let tls = record_value.get("tls").unwrap();
-    assert_eq!(tls.get("legacy_cipher_suites").unwrap().as_array().unwrap().len(), 4);
+    let cs = tls.get("cipher_suites").unwrap();
+    // Fixture has 1 TLS 1.0 row (RC4-SHA), 0 TLS 1.1 rows, 2 TLS 1.2
+    // rows (AES128-SHA supported + DHE-RSA-AES128-SHA supported +
+    // NULL-SHA rejected = 3).
+    assert_eq!(cs.get("tls1_0").unwrap().as_array().unwrap().len(), 1);
+    assert_eq!(cs.get("tls1_1").unwrap().as_array().unwrap().len(), 0);
+    assert_eq!(cs.get("tls1_2").unwrap().as_array().unwrap().len(), 3);
+    // Every emitted entry carries the provider tag.
+    for v in ["tls1_0", "tls1_2"] {
+        for row in cs.get(v).unwrap().as_array().unwrap() {
+            assert_eq!(
+                row.get("provider").unwrap().as_str(),
+                Some("openssl"),
+                "legacy probe entry should be tagged provider=openssl"
+            );
+        }
+    }
     assert_eq!(tls.get("dh_parameters").unwrap().as_array().unwrap().len(), 1);
-    assert_eq!(tls.get("ffdhe_support").unwrap().as_object().unwrap().len(), 3);
+    let groups = tls.get("groups").unwrap();
+    // Three FFDHE probe rows produce three tls1_2 + three tls1_3 entries.
+    assert_eq!(groups.get("tls1_2").unwrap().as_object().unwrap().len(), 3);
+    assert_eq!(groups.get("tls1_3").unwrap().as_object().unwrap().len(), 3);
     assert_eq!(tls.get("server_key_exchange_signatures").unwrap().as_array().unwrap().len(), 1);
     assert!(tls.get("renegotiation_behavior").is_some());
     assert!(tls.get("client_auth_request").is_some());
+    // No more legacy_cipher_suites / ffdhe_support at top level.
+    assert!(tls.get("legacy_cipher_suites").is_none());
+    assert!(tls.get("ffdhe_support").is_none());
     assert_eq!(
         tls.get("downgrade_signaling")
             .unwrap()
@@ -394,9 +417,11 @@ fn ffdhe_cross_check_reason_surfaces_in_output() {
     let ctx = fixture_ctx();
     let record = build_scan_result(&results, &ctx);
     let value = serde_json::to_value(&record).expect("serialize");
+    // FFDHE TLS 1.2 outcome now lives in the merged
+    // `tls.groups.tls1_2.{name}` slot.
     let tls12 = value
-        .pointer("/tls/ffdhe_support/ffdhe2048/tls1_2")
-        .expect("ffdhe2048.tls1_2 present");
+        .pointer("/tls/groups/tls1_2/ffdhe2048")
+        .expect("tls.groups.tls1_2.ffdhe2048 present");
     assert_eq!(tls12.get("supported").unwrap().as_bool(), Some(false));
     assert_eq!(
         tls12.get("reason").unwrap().as_str(),
@@ -419,9 +444,19 @@ fn legacy_probes_disabled_renders_empty_schema_sections() {
     assert!(validator.iter_errors(&record_value).collect::<Vec<_>>().is_empty());
 
     let tls = record_value.get("tls").unwrap();
-    assert_eq!(tls.get("legacy_cipher_suites").unwrap().as_array().unwrap().len(), 0);
+    // cipher_suites.tls1_0/1_1 are always present, empty when
+    // legacy-probes is off. tls1_2/1_3 depend on whether rustls cipher
+    // probes ran (fixture has them absent).
+    let cs = tls.get("cipher_suites").unwrap();
+    assert_eq!(cs.get("tls1_0").unwrap().as_array().unwrap().len(), 0);
+    assert_eq!(cs.get("tls1_1").unwrap().as_array().unwrap().len(), 0);
+    // groups keeps its per-version shape even with feature off.
+    let groups = tls.get("groups").unwrap();
+    assert_eq!(groups.get("tls1_2").unwrap().as_object().unwrap().len(), 0);
+    // No merged-away fields at top level.
+    assert!(tls.get("legacy_cipher_suites").is_none());
+    assert!(tls.get("ffdhe_support").is_none());
     assert_eq!(tls.get("dh_parameters").unwrap().as_array().unwrap().len(), 0);
-    assert_eq!(tls.get("ffdhe_support").unwrap().as_object().unwrap().len(), 0);
     assert_eq!(
         tls.get("renegotiation_behavior")
             .unwrap()

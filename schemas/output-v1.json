@@ -76,9 +76,7 @@
         "extensions",
         "downgrade_signaling",
         "sni_behavior",
-        "legacy_cipher_suites",
         "dh_parameters",
-        "ffdhe_support",
         "server_key_exchange_signatures",
         "renegotiation_behavior"
       ],
@@ -110,8 +108,10 @@
         },
         "cipher_suites": {
           "type": "object",
-          "required": ["tls1_2", "tls1_3", "server_enforces_order"],
+          "required": ["tls1_0", "tls1_1", "tls1_2", "tls1_3", "server_enforces_order"],
           "properties": {
+            "tls1_0": { "type": "array", "items": { "$ref": "#/$defs/cipherSuiteEntry" } },
+            "tls1_1": { "type": "array", "items": { "$ref": "#/$defs/cipherSuiteEntry" } },
             "tls1_2": { "type": "array", "items": { "$ref": "#/$defs/cipherSuiteEntry" } },
             "tls1_3": { "type": "array", "items": { "$ref": "#/$defs/cipherSuiteEntry" } },
             "server_enforces_order": { "$ref": "#/$defs/observationBool" }
@@ -120,7 +120,18 @@
         },
         "groups": {
           "type": "object",
-          "additionalProperties": { "$ref": "#/$defs/groupObservation" }
+          "required": ["tls1_2", "tls1_3"],
+          "properties": {
+            "tls1_2": {
+              "type": "object",
+              "additionalProperties": { "$ref": "#/$defs/groupObservation" }
+            },
+            "tls1_3": {
+              "type": "object",
+              "additionalProperties": { "$ref": "#/$defs/groupObservation" }
+            }
+          },
+          "additionalProperties": false
         },
         "extensions": {
           "type": "object",
@@ -188,17 +199,9 @@
           },
           "additionalProperties": false
         },
-        "legacy_cipher_suites": {
-          "type": "array",
-          "items": { "$ref": "#/$defs/legacyCipherSuiteEntry" }
-        },
         "dh_parameters": {
           "type": "array",
           "items": { "$ref": "#/$defs/dhParametersObservation" }
-        },
-        "ffdhe_support": {
-          "type": "object",
-          "additionalProperties": { "$ref": "#/$defs/ffdheObservation" }
         },
         "server_key_exchange_signatures": {
           "type": "array",
@@ -350,7 +353,9 @@
       "properties": {
         "supported": { "type": ["boolean", "null"] },
         "method": { "$ref": "#/$defs/method" },
-        "reason": { "type": "string" }
+        "reason": { "type": "string" },
+        "iana_code": { "type": "string", "pattern": "^0x[0-9A-Fa-f]{4}$" },
+        "provider": { "type": "string", "enum": ["aws_lc_rs", "openssl"] }
       },
       "additionalProperties": false
     },
@@ -362,7 +367,9 @@
         "iana_code": { "type": "string", "pattern": "^0x[0-9A-Fa-f]{4}$" },
         "supported": { "type": ["boolean", "null"] },
         "method": { "$ref": "#/$defs/method" },
-        "reason": { "type": "string" }
+        "reason": { "type": "string" },
+        "openssl_name": { "type": "string" },
+        "provider": { "type": "string", "enum": ["aws_lc_rs", "openssl"] }
       },
       "additionalProperties": false,
       "allOf": [
@@ -375,20 +382,6 @@
           "then": { "properties": { "supported": { "type": "null" } }, "required": ["reason"] }
         }
       ]
-    },
-    "legacyCipherSuiteEntry": {
-      "type": "object",
-      "required": ["name", "openssl_name", "iana_code", "protocol_version", "supported", "method"],
-      "properties": {
-        "name": { "type": "string" },
-        "openssl_name": { "type": "string" },
-        "iana_code": { "type": "string", "pattern": "^0x[0-9A-Fa-f]{4}$" },
-        "protocol_version": { "type": "string", "enum": ["tls1_0", "tls1_1", "tls1_2"] },
-        "supported": { "type": ["boolean", "null"] },
-        "method": { "$ref": "#/$defs/method" },
-        "reason": { "type": "string" }
-      },
-      "additionalProperties": false
     },
     "dhParametersObservation": {
       "type": "object",
@@ -405,16 +398,6 @@
         "prime_raw_hex": { "type": "string", "pattern": "^[0-9a-f]+$" },
         "method": { "$ref": "#/$defs/method" },
         "reason": { "type": "string" }
-      },
-      "additionalProperties": false
-    },
-    "ffdheObservation": {
-      "type": "object",
-      "required": ["iana_code", "tls1_2", "tls1_3"],
-      "properties": {
-        "iana_code": { "type": "string", "pattern": "^0x[0-9A-Fa-f]{4}$" },
-        "tls1_2": { "$ref": "#/$defs/groupObservation" },
-        "tls1_3": { "$ref": "#/$defs/groupObservation" }
       },
       "additionalProperties": false
     },

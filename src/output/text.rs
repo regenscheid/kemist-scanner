@@ -14,9 +14,8 @@
 use colored::Colorize;
 
 use crate::model::scan_result::{
-    CipherSuiteEntry, ClientAuthRequestEntry, DhParametersObservation, FfdheObservation,
-    GroupObservation, LegacyCipherSuiteEntry, Method, ObservationBool, RenegotiationBehavior,
-    ScanResult, SkeSigObservation, TlsExtensions,
+    CipherSuiteEntry, ClientAuthRequestEntry, DhParametersObservation, GroupObservation, Method,
+    ObservationBool, RenegotiationBehavior, ScanResult, SkeSigObservation, TlsExtensions,
 };
 
 /// Render one scan record to stdout. Compact (~50 lines).
@@ -134,19 +133,26 @@ fn render_negotiated(r: &ScanResult) {
 fn render_cipher_suites(r: &ScanResult) {
     section("Cipher suites (probed)");
     let cs = &r.tls.cipher_suites;
-    if !cs.tls1_3.is_empty() {
-        println!("  {}:", "TLS 1.3".bold());
-        for e in &cs.tls1_3 {
+    // Print newest → oldest so the "normal" modern suites show at the
+    // top and legacy findings fall below where they're less likely to
+    // distract on a clean scan.
+    let mut any = false;
+    for (label, arr) in [
+        ("TLS 1.3", &cs.tls1_3),
+        ("TLS 1.2", &cs.tls1_2),
+        ("TLS 1.1", &cs.tls1_1),
+        ("TLS 1.0", &cs.tls1_0),
+    ] {
+        if arr.is_empty() {
+            continue;
+        }
+        any = true;
+        println!("  {}:", label.bold());
+        for e in arr {
             print_cipher_entry(e);
         }
     }
-    if !cs.tls1_2.is_empty() {
-        println!("  {}:", "TLS 1.2".bold());
-        for e in &cs.tls1_2 {
-            print_cipher_entry(e);
-        }
-    }
-    if cs.tls1_2.is_empty() && cs.tls1_3.is_empty() {
+    if !any {
         println!("    {}", "(no cipher suites probed)".dimmed());
     }
     // server_enforces_order
@@ -168,12 +174,26 @@ fn render_cipher_suites(r: &ScanResult) {
 
 fn render_groups(r: &ScanResult) {
     section("Key exchange groups");
-    if r.tls.groups.is_empty() {
+    let g = &r.tls.groups;
+    if g.tls1_2.is_empty() && g.tls1_3.is_empty() {
         println!("    {}", "(no groups probed)".dimmed());
         return;
     }
-    for (name, obs) in &r.tls.groups {
-        print_group(name, obs);
+    // TLS 1.3 first — aws-lc-rs modern groups + FFDHE 1.3 outcomes.
+    if !g.tls1_3.is_empty() {
+        println!("  {}:", "TLS 1.3".bold());
+        for (name, obs) in &g.tls1_3 {
+            print_group(name, obs);
+        }
+    }
+    // TLS 1.2 — FFDHE only. This is where the D4/D2 cross-check
+    // finding (`server_ignored_group_offer_returned_custom_prime`)
+    // surfaces, handled inside print_group.
+    if !g.tls1_2.is_empty() {
+        println!("  {}:", "TLS 1.2".bold());
+        for (name, obs) in &g.tls1_2 {
+            print_group(name, obs);
+        }
     }
 }
 
@@ -286,95 +306,31 @@ fn render_extensions(r: &ScanResult) {
     }
 }
 
-/// Render every OpenSSL-backed legacy-probe section. Each subsection
-/// is gated on "did we actually learn something?" so the text output
-/// stays compact when `legacy-probes` is disabled or the target server
-/// cleanly rejects everything.
+/// Render the OpenSSL-backed probe sections that don't fold into
+/// `cipher_suites` or `groups` — DH parameters, SKE signatures, SCSV,
+/// renegotiation, CertificateRequest. Each subsection is gated on "did
+/// we actually learn something?" so the text output stays compact when
+/// `legacy-probes` is disabled or the target rejects everything cleanly.
 fn render_legacy_probes(r: &ScanResult) {
     let tls = &r.tls;
 
-    // `fallback_scsv_enforced` lives under `tls.downgrade_signaling` and is
-    // always present; render alongside the legacy sections for context.
     let scsv = &tls.downgrade_signaling.fallback_scsv_enforced;
     let has_scsv_signal = scsv.value.is_some() || scsv.method != Method::NotProbed;
 
-    // Emit the whole block only if there's anything worth showing — avoids
-    // 20 empty lines in the common "modern server, no legacy" case.
-    let has_legacy_anything = !tls.legacy_cipher_suites.is_empty()
-        || !tls.dh_parameters.is_empty()
-        || !tls.ffdhe_support.is_empty()
+    let anything = !tls.dh_parameters.is_empty()
         || !tls.server_key_exchange_signatures.is_empty()
         || tls.client_auth_request.is_some()
         || tls.renegotiation_behavior.client_initiated_verdict.is_some()
         || has_scsv_signal;
-    if !has_legacy_anything {
+    if !anything {
         return;
     }
 
-    render_legacy_cipher_suites(&tls.legacy_cipher_suites);
     render_dh_parameters(&tls.dh_parameters);
-    render_ffdhe_support(&tls.ffdhe_support);
     render_ske_signatures(&tls.server_key_exchange_signatures);
     render_downgrade_signaling(scsv);
     render_renegotiation_behavior(&tls.renegotiation_behavior);
     render_client_auth_request(tls.client_auth_request.as_ref());
-}
-
-fn render_legacy_cipher_suites(entries: &[LegacyCipherSuiteEntry]) {
-    if entries.is_empty() {
-        return;
-    }
-    section("Legacy cipher suites (OpenSSL probe)");
-    // Group by protocol version so a reader can see at a glance which
-    // weak suites each version accepts.
-    for version in ["tls1_0", "tls1_1", "tls1_2"] {
-        let rows: Vec<&LegacyCipherSuiteEntry> = entries
-            .iter()
-            .filter(|e| e.protocol_version == version)
-            .collect();
-        if rows.is_empty() {
-            continue;
-        }
-        println!("  {}:", label_for_version(version).bold());
-        for e in rows {
-            print_legacy_cipher_entry(e);
-        }
-    }
-    println!();
-}
-
-fn label_for_version(v: &str) -> &str {
-    match v {
-        "tls1_0" => "TLS 1.0",
-        "tls1_1" => "TLS 1.1",
-        "tls1_2" => "TLS 1.2",
-        other => other,
-    }
-}
-
-fn print_legacy_cipher_entry(e: &LegacyCipherSuiteEntry) {
-    let (glyph, name_style) = match (e.supported, &e.method) {
-        // A weak suite that's `supported` is the interesting finding —
-        // call it out in yellow even though the observation is
-        // technically positive. The text view is optimized for triage,
-        // not rule-engine consumption; the JSON output stays neutral.
-        (Some(true), _) => ("+", e.name.yellow().bold()),
-        (Some(false), _) => ("-", e.name.dimmed()),
-        (None, _) => ("?", e.name.yellow()),
-    };
-    let tail = match (&e.method, &e.reason) {
-        (Method::Error, Some(r)) => format!("  [{}: {}]", "error".yellow(), r.dimmed()),
-        (Method::NotProbed, Some(r)) => format!("  [{}: {}]", "not_probed".yellow(), r.dimmed()),
-        _ => String::new(),
-    };
-    println!(
-        "    {} {:<42} {:<8} ({}){}",
-        glyph,
-        name_style,
-        e.iana_code,
-        e.openssl_name.dimmed(),
-        tail
-    );
 }
 
 fn render_dh_parameters(entries: &[DhParametersObservation]) {
@@ -409,39 +365,6 @@ fn render_dh_parameters(entries: &[DhParametersObservation]) {
     println!();
 }
 
-fn render_ffdhe_support(groups: &std::collections::BTreeMap<String, FfdheObservation>) {
-    if groups.is_empty() {
-        return;
-    }
-    section("FFDHE named groups (TLS 1.2 / TLS 1.3)");
-    for (name, obs) in groups {
-        println!(
-            "    {:<10} {}   tls1_2: {}   tls1_3: {}",
-            name,
-            obs.iana_code.dimmed(),
-            ffdhe_cell(&obs.tls1_2),
-            ffdhe_cell(&obs.tls1_3),
-        );
-    }
-    println!();
-}
-
-fn ffdhe_cell(obs: &GroupObservation) -> String {
-    match (obs.supported, &obs.method, obs.reason.as_deref()) {
-        (Some(true), _, _) => format!("{}", "+".green()),
-        (Some(false), _, Some(r))
-            if r == "server_ignored_group_offer_returned_custom_prime" =>
-        {
-            // The misconfig finding — server accepted a DHE handshake
-            // with a prime that doesn't match the advertised group.
-            format!("{} {}", "!".red().bold(), "server_ignored_offer".yellow())
-        }
-        (Some(false), _, _) => format!("{}", "-".dimmed()),
-        (None, Method::Error, Some(r)) => format!("{} [{}]", "?".yellow(), r.dimmed()),
-        (None, _, _) => format!("{}", "?".yellow()),
-    }
-}
-
 fn render_ske_signatures(sigs: &[SkeSigObservation]) {
     if sigs.is_empty() {
         return;
@@ -464,7 +387,22 @@ fn render_ske_signatures(sigs: &[SkeSigObservation]) {
 
 fn render_downgrade_signaling(scsv: &ObservationBool) {
     section("Downgrade signaling");
+    // Reason-string flag set when the server rejected the downgraded
+    // handshake with handshake_failure instead of the RFC 7507-mandated
+    // inappropriate_fallback alert. Effective protection; non-compliant
+    // wording. Worth surfacing so an eyeball can see the caveat without
+    // dropping into the JSON output.
+    let non_compliant = scsv
+        .reason
+        .as_deref()
+        .map(|r| r.starts_with("rejected_via_non_mandated_alert:"))
+        .unwrap_or(false);
     let line = match (scsv.value, &scsv.method) {
+        (Some(true), _) if non_compliant => format!(
+            "{} {}",
+            "enforced".green(),
+            "(via handshake_failure — not RFC-compliant alert)".yellow()
+        ),
         (Some(true), _) => format!("{} {}", "enforced".green(), "(TLS_FALLBACK_SCSV)".dimmed()),
         (Some(false), _) => format!(
             "{} {}",
@@ -679,43 +617,99 @@ fn print_obs_bool(label: &str, o: &ObservationBool) {
 }
 
 fn print_cipher_entry(e: &CipherSuiteEntry) {
+    // Supported-but-weak suites (RC4, NULL, anon-DH, etc.) are the
+    // interesting finding even though the observation is technically
+    // positive. Upgrade to yellow+bold for attention. Keyed on name
+    // substrings so both aws-lc-rs and OpenSSL entries get the same
+    // treatment.
+    let weak = is_weak_cipher_name(&e.name);
     let (glyph, name_style) = match (e.supported, &e.method) {
+        (Some(true), _) if weak => ("+", e.name.yellow().bold()),
         (Some(true), _) => ("+", e.name.green()),
         (Some(false), _) => ("-", e.name.dimmed()),
         (None, _) => ("?", e.name.yellow()),
     };
+    // OpenSSL short name (e.g. "AES128-SHA") is useful for manual
+    // reproduction — render it in parentheses when present.
+    let ossl_suffix = e
+        .openssl_name
+        .as_deref()
+        .map(|s| format!("  ({})", s.dimmed()))
+        .unwrap_or_default();
     let tail = match (&e.method, &e.reason) {
         (Method::Error, Some(r)) => format!("  [{}]", r.dimmed()),
         (Method::NotProbed, Some(r)) => format!("  [{}]", r.dimmed()),
         _ => String::new(),
     };
-    println!("    {} {:<48} {}{}", glyph, name_style, e.iana_code, tail);
+    println!(
+        "    {} {:<48} {}{}{}",
+        glyph, name_style, e.iana_code, ossl_suffix, tail
+    );
+}
+
+/// Name-substring heuristic for "this suite is a weak-crypto finding."
+/// Matches both IANA (`TLS_RSA_WITH_RC4_128_SHA`) and OpenSSL short
+/// names (`RC4-SHA`). Only affects text-view color; JSON stays neutral.
+fn is_weak_cipher_name(name: &str) -> bool {
+    let n = name.to_ascii_uppercase();
+    n.contains("RC4")
+        || n.contains("NULL")
+        || n.contains("_DES_")
+        || n.contains("-DES-")
+        || n.contains("3DES")
+        || n.contains("DES-CBC3")
+        || n.contains("_ANON_")
+        || n.contains("ADH-")
+        || n.contains("AECDH")
+        || n.contains("EXPORT")
+        || n.starts_with("EXP-")
+        || n.contains("IDEA")
+        || n.contains("_MD5")
 }
 
 fn print_group(name: &str, obs: &GroupObservation) {
-    let (glyph, name_style) = match (obs.supported, &obs.method) {
-        (Some(true), _) => {
+    // Misconfig finding carried in the reason string for TLS 1.2 FFDHE
+    // entries where the server ignored our codepoint and returned a
+    // custom prime. Surface with a red `!` glyph + yellow callout so
+    // a reader doesn't parse it as "merely not supported."
+    let ignored_offer = obs
+        .reason
+        .as_deref()
+        .map(|r| r == "server_ignored_group_offer_returned_custom_prime")
+        .unwrap_or(false);
+
+    let (glyph, name_style) = match (obs.supported, &obs.method, ignored_offer) {
+        (_, _, true) => ("!", name.red().bold()),
+        (Some(true), _, _) => {
             if is_pqc_group(name) {
                 ("+", name.cyan().bold())
             } else {
                 ("+", name.green())
             }
         }
-        (Some(false), _) => ("-", name.dimmed()),
-        (None, _) => ("?", name.yellow()),
+        (Some(false), _, _) => ("-", name.dimmed()),
+        (None, _, _) => ("?", name.yellow()),
     };
-    // IANA codepoint ties every line to a concrete identifier, mirroring
-    // how cipher suites render. Keeps probed lines from looking empty.
-    let code = match crate::scanner::groups::iana_code_for(name) {
-        Some(c) => format!("0x{c:04X}"),
-        None => "0x????".to_string(),
-    };
-    let tail = match (&obs.method, &obs.reason) {
-        (Method::NotProbed, Some(r)) => {
-            format!("  [{}: {}]", "not_probed".yellow(), r.dimmed())
+
+    // IANA codepoint — prefer what the observation itself carries
+    // (populated for OpenSSL FFDHE entries), else look up from the
+    // aws-lc-rs probe table for modern groups.
+    let code = obs.iana_code.clone().unwrap_or_else(|| {
+        crate::scanner::groups::iana_code_for(name)
+            .map(|c| format!("0x{c:04X}"))
+            .unwrap_or_else(|| "0x????".to_string())
+    });
+
+    let tail = if ignored_offer {
+        format!("  [{}]", "server_ignored_offer".yellow())
+    } else {
+        match (&obs.method, &obs.reason) {
+            (Method::NotProbed, Some(r)) => {
+                format!("  [{}: {}]", "not_probed".yellow(), r.dimmed())
+            }
+            (Method::Error, Some(r)) => format!("  [{}: {}]", "error".yellow(), r.dimmed()),
+            _ => String::new(),
         }
-        (Method::Error, Some(r)) => format!("  [{}: {}]", "error".yellow(), r.dimmed()),
-        _ => String::new(),
     };
     println!("    {} {:<30} {}{}", glyph, name_style, code, tail);
 }

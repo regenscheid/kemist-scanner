@@ -14,18 +14,28 @@ default-on `legacy-probes` cargo feature. See
 [docs/OUTPUT_SCHEMA.md](docs/OUTPUT_SCHEMA.md) for field-by-field
 semantics and [docs/CHECKS.md](docs/CHECKS.md) for per-probe mechanics.
 
-- `tls.legacy_cipher_suites` — per-suite probes for RSA-kex, RC4,
-  DES/3DES, IDEA, NULL, anon-DH, and DHE-RSA across TLS 1.0/1.1/1.2.
-  Covers the suite categories aws-lc-rs deliberately omits.
+- `tls.cipher_suites.{tls1_0, tls1_1}` — new per-version sub-arrays
+  for OpenSSL legacy probes (RSA-kex, RC4, DES/3DES, IDEA, NULL,
+  anon-DH, DHE-RSA). TLS 1.2 legacy probes also land in the existing
+  `tls.cipher_suites.tls1_2` array alongside aws-lc-rs entries; every
+  entry now carries a `provider` tag (`"aws_lc_rs"` or `"openssl"`) so
+  consumers that care about backend attribution can filter. OpenSSL
+  entries additionally carry `openssl_name` (e.g. `"AES128-SHA"`) as a
+  manual reproduction aid.
 - `tls.dh_parameters` — prime bit-length, generator, SHA-256 of the
   prime, and classification against RFC 7919 FFDHE constants
   (ffdhe2048…ffdhe8192 / custom). Captured on every completed DHE
   handshake.
-- `tls.ffdhe_support` — per-group × per-version probes for the five
-  RFC 7919 codepoints. Includes a cross-check that detects servers
-  that complete a DHE handshake with a custom prime despite a
-  specific FFDHE codepoint being advertised (`supported_groups`
-  ignored).
+- `tls.groups.{tls1_2, tls1_3}` — the previously-flat groups map is
+  now partitioned by TLS version. aws-lc-rs modern groups
+  (classical, PQC hybrids, standalone ML-KEM) land in `tls1_3`; RFC
+  7919 FFDHE outcomes appear in both `tls1_2` and `tls1_3`. Each entry
+  carries a `provider` tag; OpenSSL-backed FFDHE entries also carry
+  `iana_code`. The cross-check for "server completed a DHE handshake
+  with a custom prime despite `supported_groups` advertising a specific
+  FFDHE codepoint" surfaces as
+  `{supported: false, reason: "server_ignored_group_offer_returned_custom_prime"}`
+  in the tls1_2 slot of the merged groups map.
 - `tls.server_key_exchange_signatures` — the signature algorithm the
   server actually chose for each TLS 1.2 ServerKeyExchange / TLS 1.3
   CertificateVerify (distinct from the algorithms it advertises).
@@ -50,6 +60,25 @@ of native-tls. The output shape (`tls.versions_offered.*`) is
 unchanged. Consumers can still get native-tls coverage with
 `--no-default-features --features http-checks,native-legacy` (see
 "Build surface" below).
+
+### Changed — output-section unification
+
+Two top-level sections were removed in favor of merging their contents
+into the equivalent canonical locations. Both existed only in the
+pre-release (Unreleased) timeline; there are no tagged-version
+consumers. Migration mapping for anyone who built against the
+pre-release schema:
+
+| Old location | New location |
+|---|---|
+| `tls.legacy_cipher_suites[]` | `tls.cipher_suites.{tls1_0, tls1_1, tls1_2}[]` entries with `provider == "openssl"` |
+| `tls.ffdhe_support.{name}.tls1_2` | `tls.groups.tls1_2.{name}` |
+| `tls.ffdhe_support.{name}.tls1_3` | `tls.groups.tls1_3.{name}` |
+
+`tls.groups` also changed shape: previously a flat
+`BTreeMap<String, GroupObservation>` (TLS 1.3-only by convention),
+now a nested `{tls1_2, tls1_3}` map where each sub-object is the same
+`{name: GroupObservation}` structure as before.
 
 ### Changed — deprecations
 

@@ -116,11 +116,32 @@ fn classify_probe_outcome(
     downgrade_target: SslVersion,
 ) -> FallbackScsvResult {
     match outcome {
+        // RFC 7507-compliant enforcement: server detected the SCSV in a
+        // downgraded handshake and sent the mandated alert.
         ProbeOutcome::Alert(cat) if cat == "tls_alert_inappropriate_fallback" => {
             FallbackScsvResult {
                 enforced: Some(true),
                 reason: format!(
                     "inappropriate_fallback_alert_at_{}_with_server_max_{}",
+                    version_label(downgrade_target),
+                    version_label(server_max)
+                ),
+            }
+        }
+        // Pragmatic enforcement: server rejected the downgraded
+        // handshake but used `handshake_failure` (alert 40) instead of
+        // the RFC-mandated `inappropriate_fallback` (alert 86). Common
+        // in older nginx and certain F5 configs — effective protection
+        // against downgrade attacks, just not strictly RFC-compliant.
+        // We emit `Some(true)` with an explicit reason flag so:
+        // - rule engines checking "is the server protected?" get `true`
+        // - rule engines checking "is the server RFC 7507 compliant?"
+        //   key on the reason substring and can downgrade the finding
+        ProbeOutcome::Alert(cat) if cat == "tls_alert_handshake_failure" => {
+            FallbackScsvResult {
+                enforced: Some(true),
+                reason: format!(
+                    "rejected_via_non_mandated_alert:handshake_failure_at_{}_with_server_max_{}",
                     version_label(downgrade_target),
                     version_label(server_max)
                 ),
@@ -302,7 +323,26 @@ mod tests {
     }
 
     #[test]
+    fn classification_treats_handshake_failure_as_pragmatic_enforcement() {
+        // Many real servers emit handshake_failure instead of the
+        // RFC 7507-mandated inappropriate_fallback when enforcing SCSV.
+        // We record that as `enforced: true` but flag the non-compliance
+        // in the reason so rule engines keyed on RFC literalism can
+        // downgrade the finding.
+        let r = classify_probe_outcome(
+            ProbeOutcome::Alert("tls_alert_handshake_failure".to_string()),
+            SslVersion::TLS1_3,
+            SslVersion::TLS1_2,
+        );
+        assert_eq!(r.enforced, Some(true));
+        assert!(r.reason.starts_with("rejected_via_non_mandated_alert:"));
+    }
+
+    #[test]
     fn classification_treats_other_alerts_as_inconclusive() {
+        // protocol_version (alert 70) is a plausible non-SCSV rejection —
+        // server might have TLS 1.1 disabled altogether and would reject
+        // the probe even without FALLBACK_SCSV. Stays inconclusive.
         let r = classify_probe_outcome(
             ProbeOutcome::Alert("tls_alert_protocol_version".to_string()),
             SslVersion::TLS1_2,

@@ -6,18 +6,17 @@
 //! scanner measured" to "what the JSON contract says."
 
 use chrono::{DateTime, Utc};
-use std::collections::BTreeMap;
 
 use crate::model::cert::CertificateInfo;
 use crate::model::errors::ScannerError;
 use crate::model::protocol::TlsVersion;
 use crate::model::scan_result::{
     Capabilities, CertificateFacts, Certificates, CipherSuiteEntry, ClientAuthRequestEntry,
-    DhParametersObservation, DowngradeSignaling, FfdheObservation, GroupObservation, Hsts, Http,
-    LegacyCipherSuiteEntry, Method, ObservationBool, OcspStapling, PublicKey,
-    RenegotiationBehavior, ScanMetadata, ScanResult, Scanner as ScannerMeta, SctObservation,
-    SecurityTxt, SkeSigObservation, SniBehavior, Tls, TlsCipherSuites, TlsExtensions,
-    TlsNegotiated, TlsVersionsOffered, Validation, VersionOffered, SCHEMA_VERSION,
+    DhParametersObservation, DowngradeSignaling, GroupObservation, Hsts, Http, Method,
+    ObservationBool, OcspStapling, PublicKey, RenegotiationBehavior, ScanMetadata, ScanResult,
+    Scanner as ScannerMeta, SctObservation, SecurityTxt, SkeSigObservation, SniBehavior, Tls,
+    TlsCipherSuites, TlsExtensions, TlsGroups, TlsNegotiated, TlsVersionsOffered, Validation,
+    VersionOffered, SCHEMA_VERSION,
 };
 #[cfg(feature = "legacy-probes")]
 use crate::model::scan_result::{ClientAuthCaDn, ClientAuthOidFilter};
@@ -140,9 +139,7 @@ fn build_tls(results: &ScanResults) -> Tls {
             fallback_scsv_enforced: build_fallback_scsv_enforced(results),
         },
         sni_behavior: build_sni_behavior(results),
-        legacy_cipher_suites: build_legacy_cipher_suites(results),
         dh_parameters: build_dh_parameters(results),
-        ffdhe_support: build_ffdhe_support(results),
         server_key_exchange_signatures: build_ske_sigs(results),
         renegotiation_behavior: build_renegotiation_behavior(results),
         client_auth_request: build_client_auth_request(results),
@@ -200,87 +197,214 @@ fn build_negotiated_from_state(results: &ScanResults) -> Option<TlsNegotiated> {
 }
 
 fn build_cipher_suites(results: &ScanResults) -> TlsCipherSuites {
-    let Some(probes) = &results.cipher_probes else {
-        // Probes didn't run (e.g. --no-ciphersuites, or connection refused
-        // before probing started). Emit an empty schema structure with
-        // server_enforces_order marked not_probed.
-        return TlsCipherSuites {
-            tls1_2: Vec::new(),
-            tls1_3: Vec::new(),
-            server_enforces_order: ObservationBool::not_probed("cipher_probes_did_not_run"),
-        };
-    };
-
-    let to_entry = |r: &crate::scanner::ciphers::CipherProbeResult| {
-        use crate::scanner::ciphers::ProbeOutcome;
-        let (supported, method, reason) = match &r.outcome {
-            ProbeOutcome::Supported => (Some(true), Method::Probe, None),
-            ProbeOutcome::NotSupported => (Some(false), Method::Probe, None),
-            ProbeOutcome::Error(e) => (None, Method::Error, Some(e.clone())),
-        };
-        CipherSuiteEntry {
-            name: r.name.clone(),
-            iana_code: format!("0x{:04X}", r.iana_code),
-            supported,
-            method,
-            reason,
-        }
-    };
-
+    // One canonical place for every probed cipher suite, partitioned by
+    // TLS version. aws-lc-rs modern probes land in tls1_2/tls1_3;
+    // OpenSSL legacy probes land in tls1_0/tls1_1/tls1_2 (all tagged
+    // with `provider` so consumers who care about backend attribution
+    // can filter).
+    let mut tls1_0 = Vec::new();
+    let mut tls1_1 = Vec::new();
     let mut tls1_2 = Vec::new();
     let mut tls1_3 = Vec::new();
-    for r in &probes.results {
-        let entry = to_entry(r);
-        match r.version {
-            TlsVersion::Tls12 => tls1_2.push(entry),
-            TlsVersion::Tls13 => tls1_3.push(entry),
-            _ => {}
-        }
-    }
 
-    let server_enforces_order = match probes.server_enforces_order {
-        Some(v) => ObservationBool::probe(v),
-        None => match &probes.order_probe_error {
-            Some(e) => ObservationBool::error(e),
-            None => ObservationBool::not_probed("order_probe_inconclusive"),
-        },
+    // aws-lc-rs modern probes.
+    let server_enforces_order = if let Some(probes) = &results.cipher_probes {
+        for r in &probes.results {
+            use crate::scanner::ciphers::ProbeOutcome;
+            let (supported, method, reason) = match &r.outcome {
+                ProbeOutcome::Supported => (Some(true), Method::Probe, None),
+                ProbeOutcome::NotSupported => (Some(false), Method::Probe, None),
+                ProbeOutcome::Error(e) => (None, Method::Error, Some(e.clone())),
+            };
+            let entry = CipherSuiteEntry {
+                name: r.name.clone(),
+                iana_code: format!("0x{:04X}", r.iana_code),
+                supported,
+                method,
+                reason,
+                openssl_name: None,
+                provider: Some("aws_lc_rs".to_string()),
+            };
+            match r.version {
+                TlsVersion::Tls12 => tls1_2.push(entry),
+                TlsVersion::Tls13 => tls1_3.push(entry),
+                _ => {}
+            }
+        }
+        match probes.server_enforces_order {
+            Some(v) => ObservationBool::probe(v),
+            None => match &probes.order_probe_error {
+                Some(e) => ObservationBool::error(e),
+                None => ObservationBool::not_probed("order_probe_inconclusive"),
+            },
+        }
+    } else {
+        ObservationBool::not_probed("cipher_probes_did_not_run")
     };
 
+    // OpenSSL legacy probes. Feature-gated — entirely absent when
+    // `legacy-probes` is compiled off, leaving just aws-lc-rs entries.
+    merge_openssl_cipher_probes(results, &mut tls1_0, &mut tls1_1, &mut tls1_2);
+
     TlsCipherSuites {
+        tls1_0,
+        tls1_1,
         tls1_2,
         tls1_3,
         server_enforces_order,
     }
 }
 
-fn build_groups(results: &ScanResults) -> BTreeMap<String, GroupObservation> {
-    let mut map = BTreeMap::new();
-    let Some(probes) = &results.group_probes else {
-        return map;
-    };
-    for r in &probes.results {
-        use crate::scanner::groups::GroupProbeOutcome;
-        let obs = match &r.outcome {
-            GroupProbeOutcome::Supported => GroupObservation {
+fn merge_openssl_cipher_probes(
+    results: &ScanResults,
+    tls1_0: &mut Vec<CipherSuiteEntry>,
+    tls1_1: &mut Vec<CipherSuiteEntry>,
+    tls1_2: &mut Vec<CipherSuiteEntry>,
+) {
+    #[cfg(feature = "legacy-probes")]
+    {
+        use crate::scanner::openssl::ciphers::LegacyProbeOutcome;
+        let Some(obs) = results.openssl_observations.as_ref() else {
+            return;
+        };
+        let Some(probes) = obs.cipher_probes.as_ref() else {
+            return;
+        };
+        for r in &probes.results {
+            let (supported, method, reason) = match &r.outcome {
+                LegacyProbeOutcome::Supported => (Some(true), Method::Probe, None),
+                LegacyProbeOutcome::NotSupported => (Some(false), Method::Probe, None),
+                LegacyProbeOutcome::Error(e) => (None, Method::Error, Some(e.clone())),
+            };
+            let entry = CipherSuiteEntry {
+                name: r.name.clone(),
+                iana_code: format!("0x{:04X}", r.iana_code),
+                supported,
+                method,
+                reason,
+                openssl_name: Some(r.openssl_name.clone()),
+                provider: Some("openssl".to_string()),
+            };
+            match r.version {
+                TlsVersion::Tls10 => tls1_0.push(entry),
+                TlsVersion::Tls11 => tls1_1.push(entry),
+                TlsVersion::Tls12 => tls1_2.push(entry),
+                _ => {}
+            }
+        }
+    }
+    #[cfg(not(feature = "legacy-probes"))]
+    {
+        let _ = (results, tls1_0, tls1_1, tls1_2);
+    }
+}
+
+fn build_groups(results: &ScanResults) -> TlsGroups {
+    // All observations live under one roof, partitioned by TLS version.
+    // aws-lc-rs probes are TLS 1.3-only. OpenSSL FFDHE probes produce
+    // per-version outcomes that split across tls1_2 and tls1_3.
+    let mut out = TlsGroups::default();
+
+    if let Some(probes) = &results.group_probes {
+        for r in &probes.results {
+            use crate::scanner::groups::GroupProbeOutcome;
+            let obs = match &r.outcome {
+                GroupProbeOutcome::Supported => GroupObservation {
+                    supported: Some(true),
+                    method: Method::Probe,
+                    reason: None,
+                    iana_code: None,
+                    provider: Some("aws_lc_rs".to_string()),
+                },
+                GroupProbeOutcome::NotSupported => GroupObservation {
+                    supported: Some(false),
+                    method: Method::Probe,
+                    reason: None,
+                    iana_code: None,
+                    provider: Some("aws_lc_rs".to_string()),
+                },
+                GroupProbeOutcome::Error(ctx) => GroupObservation {
+                    supported: None,
+                    method: Method::Error,
+                    reason: Some(ctx.clone()),
+                    iana_code: None,
+                    provider: Some("aws_lc_rs".to_string()),
+                },
+                GroupProbeOutcome::NotProbed(reason) => {
+                    let mut o = GroupObservation::not_probed(reason.as_str());
+                    o.provider = Some("aws_lc_rs".to_string());
+                    o
+                }
+            };
+            // src/scanner/groups.rs is TLS 1.3-only by design, so every
+            // entry lands in tls1_3.
+            out.tls1_3.insert(r.name.clone(), obs);
+        }
+    }
+
+    merge_openssl_ffdhe(results, &mut out);
+    out
+}
+
+fn merge_openssl_ffdhe(results: &ScanResults, out: &mut TlsGroups) {
+    #[cfg(feature = "legacy-probes")]
+    {
+        use crate::scanner::openssl::ffdhe::FfdheOutcome;
+        let Some(obs) = results.openssl_observations.as_ref() else {
+            return;
+        };
+        let Some(probes) = obs.ffdhe_probes.as_ref() else {
+            return;
+        };
+        let to_obs = |o: &FfdheOutcome, iana: &str| match o {
+            FfdheOutcome::Supported => GroupObservation {
                 supported: Some(true),
                 method: Method::Probe,
                 reason: None,
+                iana_code: Some(iana.to_string()),
+                provider: Some("openssl".to_string()),
             },
-            GroupProbeOutcome::NotSupported => GroupObservation {
+            FfdheOutcome::NotSupported => GroupObservation {
                 supported: Some(false),
                 method: Method::Probe,
                 reason: None,
+                iana_code: Some(iana.to_string()),
+                provider: Some("openssl".to_string()),
             },
-            GroupProbeOutcome::Error(ctx) => GroupObservation {
+            FfdheOutcome::IgnoredGroupReturnedCustomPrime => GroupObservation {
+                supported: Some(false),
+                method: Method::Probe,
+                reason: Some("server_ignored_group_offer_returned_custom_prime".to_string()),
+                iana_code: Some(iana.to_string()),
+                provider: Some("openssl".to_string()),
+            },
+            FfdheOutcome::Error(e) => GroupObservation {
                 supported: None,
                 method: Method::Error,
-                reason: Some(ctx.clone()),
+                reason: Some(e.clone()),
+                iana_code: Some(iana.to_string()),
+                provider: Some("openssl".to_string()),
             },
-            GroupProbeOutcome::NotProbed(reason) => GroupObservation::not_probed(reason.as_str()),
+            FfdheOutcome::NotProbed(r) => GroupObservation {
+                supported: None,
+                method: Method::NotProbed,
+                reason: Some(r.clone()),
+                iana_code: Some(iana.to_string()),
+                provider: Some("openssl".to_string()),
+            },
         };
-        map.insert(r.name.clone(), obs);
+        for r in &probes.results {
+            let iana = format!("0x{:04X}", r.iana_code);
+            out.tls1_2
+                .insert(r.group_name.clone(), to_obs(&r.tls12_outcome, &iana));
+            out.tls1_3
+                .insert(r.group_name.clone(), to_obs(&r.tls13_outcome, &iana));
+        }
     }
-    map
+    #[cfg(not(feature = "legacy-probes"))]
+    {
+        let _ = (results, out);
+    }
 }
 
 fn build_extensions(results: &ScanResults) -> TlsExtensions {
@@ -556,46 +680,6 @@ fn build_fallback_scsv_enforced(results: &ScanResults) -> ObservationBool {
     }
 }
 
-fn build_legacy_cipher_suites(results: &ScanResults) -> Vec<LegacyCipherSuiteEntry> {
-    #[cfg(feature = "legacy-probes")]
-    {
-        use crate::scanner::openssl::ciphers::LegacyProbeOutcome;
-        let Some(obs) = results.openssl_observations.as_ref() else {
-            return Vec::new();
-        };
-        let Some(probes) = obs.cipher_probes.as_ref() else {
-            return Vec::new();
-        };
-        probes
-            .results
-            .iter()
-            .map(|r| {
-                let (supported, method, reason) = match &r.outcome {
-                    LegacyProbeOutcome::Supported => (Some(true), Method::Probe, None),
-                    LegacyProbeOutcome::NotSupported => (Some(false), Method::Probe, None),
-                    LegacyProbeOutcome::Error(e) => {
-                        (None, Method::Error, Some(e.clone()))
-                    }
-                };
-                LegacyCipherSuiteEntry {
-                    name: r.name.clone(),
-                    openssl_name: r.openssl_name.clone(),
-                    iana_code: format!("0x{:04X}", r.iana_code),
-                    protocol_version: protocol_version_tag(r.version),
-                    supported,
-                    method,
-                    reason,
-                }
-            })
-            .collect()
-    }
-    #[cfg(not(feature = "legacy-probes"))]
-    {
-        let _ = results;
-        Vec::new()
-    }
-}
-
 fn build_dh_parameters(results: &ScanResults) -> Vec<DhParametersObservation> {
     #[cfg(feature = "legacy-probes")]
     {
@@ -627,65 +711,6 @@ fn build_dh_parameters(results: &ScanResults) -> Vec<DhParametersObservation> {
     {
         let _ = results;
         Vec::new()
-    }
-}
-
-fn build_ffdhe_support(results: &ScanResults) -> BTreeMap<String, FfdheObservation> {
-    #[cfg(feature = "legacy-probes")]
-    {
-        use crate::scanner::openssl::ffdhe::FfdheOutcome;
-        let Some(obs) = results.openssl_observations.as_ref() else {
-            return BTreeMap::new();
-        };
-        let Some(probes) = obs.ffdhe_probes.as_ref() else {
-            return BTreeMap::new();
-        };
-        let to_group_obs = |o: &FfdheOutcome| match o {
-            FfdheOutcome::Supported => GroupObservation {
-                supported: Some(true),
-                method: Method::Probe,
-                reason: None,
-            },
-            FfdheOutcome::NotSupported => GroupObservation {
-                supported: Some(false),
-                method: Method::Probe,
-                reason: None,
-            },
-            FfdheOutcome::IgnoredGroupReturnedCustomPrime => GroupObservation {
-                supported: Some(false),
-                method: Method::Probe,
-                reason: Some("server_ignored_group_offer_returned_custom_prime".to_string()),
-            },
-            FfdheOutcome::Error(e) => GroupObservation {
-                supported: None,
-                method: Method::Error,
-                reason: Some(e.clone()),
-            },
-            FfdheOutcome::NotProbed(r) => GroupObservation {
-                supported: None,
-                method: Method::NotProbed,
-                reason: Some(r.clone()),
-            },
-        };
-        probes
-            .results
-            .iter()
-            .map(|r| {
-                (
-                    r.group_name.clone(),
-                    FfdheObservation {
-                        iana_code: format!("0x{:04X}", r.iana_code),
-                        tls1_2: to_group_obs(&r.tls12_outcome),
-                        tls1_3: to_group_obs(&r.tls13_outcome),
-                    },
-                )
-            })
-            .collect()
-    }
-    #[cfg(not(feature = "legacy-probes"))]
-    {
-        let _ = results;
-        BTreeMap::new()
     }
 }
 
@@ -798,19 +823,6 @@ fn build_client_auth_request(results: &ScanResults) -> Option<ClientAuthRequestE
         let _ = results;
         None
     }
-}
-
-#[cfg(feature = "legacy-probes")]
-fn protocol_version_tag(v: TlsVersion) -> String {
-    match v {
-        TlsVersion::Tls10 => "tls1_0",
-        TlsVersion::Tls11 => "tls1_1",
-        TlsVersion::Tls12 => "tls1_2",
-        TlsVersion::Tls13 => "tls1_3",
-        TlsVersion::Ssl3 => "ssl3",
-        TlsVersion::Ssl2 => "ssl2",
-    }
-    .to_string()
 }
 
 pub fn print_json_pretty(results: &ScanResults, ctx: &JsonEmitContext) -> Result<(), ScannerError> {
