@@ -74,6 +74,8 @@ pub struct OpensslObservations {
     pub ffdhe_probes: Option<ffdhe::FfdheProbeOutput>,
     /// D5 — `TLS_FALLBACK_SCSV` (RFC 7507) enforcement observation.
     pub fallback_scsv: Option<fallback_scsv::FallbackScsvResult>,
+    /// D6 — Client-initiated renegotiation verdict.
+    pub renegotiation: Option<renegotiation::RenegotiationObservation>,
     /// Per-probe non-fatal errors collected during the scan. Populated so
     /// every "not probed" outcome carries a reason string rather than going
     /// silent.
@@ -116,7 +118,11 @@ pub async fn run_all_probes(cfg: &ScanConfig) -> Result<OpensslObservations, Sca
     let scsv = fallback_scsv::probe(cfg.target, &cfg.hostname, cfg.timeout, cfg.timeout).await;
     out.fallback_scsv = Some(scsv);
 
-    // D6-D8 hook in here as those modules land live.
+    // D6 — Client-initiated renegotiation behavior.
+    let reneg = renegotiation::probe(cfg.target, &cfg.hostname, cfg.timeout, cfg.timeout).await;
+    out.renegotiation = Some(reneg);
+
+    // D7-D8 hook in here as those modules land live.
 
     Ok(out)
 }
