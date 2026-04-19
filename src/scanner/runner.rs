@@ -317,6 +317,8 @@ fn empty_scan_results(target: &Target, addr: SocketAddr) -> crate::scanner::Scan
         sni_behavior: None,
         hello_observed: None,
         http_observations: None,
+        #[cfg(feature = "legacy-probes")]
+        openssl_observations: None,
         scan_errors: vec![],
     }
 }

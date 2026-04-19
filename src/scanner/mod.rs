@@ -4,6 +4,8 @@ pub mod groups;
 pub mod hello;
 pub mod http;
 pub mod legacy;
+#[cfg(feature = "legacy-probes")]
+pub mod openssl;
 pub mod probe;
 pub mod runner;
 pub mod sni;
@@ -105,6 +107,13 @@ pub struct ScanResults {
     /// Populated by PR 10. Feeds the top-level `http` field in schema.
     #[serde(skip_serializing)]
     pub http_observations: Option<HttpObservations>,
+    /// OpenSSL-backed legacy-probe subsystem output — legacy ciphers, DH
+    /// parameters, FFDHE groups, SCSV, renegotiation, client-auth request.
+    /// Gated on the `legacy-probes` cargo feature. Feeds the new `tls.*`
+    /// sections per docs/OUTPUT_SCHEMA.md additions.
+    #[cfg(feature = "legacy-probes")]
+    #[serde(skip_serializing)]
+    pub openssl_observations: Option<openssl::OpensslObservations>,
     /// Probe-level failures accumulated during the scan. Never aborts scan()
     /// even if every entry errors — downstream consumers read this alongside
     /// the partial observations.
@@ -147,6 +156,8 @@ impl SslScanner {
             sni_behavior: None,
             hello_observed: None,
             http_observations: None,
+            #[cfg(feature = "legacy-probes")]
+            openssl_observations: None,
             scan_errors: vec![],
         };
 

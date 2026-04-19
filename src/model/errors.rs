@@ -81,6 +81,22 @@ impl ScannerError {
         Self::new("internal_scanner_error", context)
     }
 
+    /// The OpenSSL legacy/default provider failed to load at scanner startup.
+    /// Emitted once per scan run when `legacy-probes` is on but the vendored
+    /// OpenSSL refuses to initialize — usually a linkage or platform issue
+    /// that aborts the entire legacy-probe subsystem for this run.
+    pub fn openssl_provider_load_failed(context: impl Into<String>) -> Self {
+        Self::new("openssl_provider_load_failed", context)
+    }
+
+    /// A legacy-probe check was requested but its backend isn't available in
+    /// this build (e.g. `legacy-probes` feature disabled, or runtime
+    /// dependency missing). Emitted per affected observation so downstream
+    /// consumers see the "not probed" signal with a clear reason.
+    pub fn legacy_probe_unavailable(context: impl Into<String>) -> Self {
+        Self::new("legacy_probe_unavailable", context)
+    }
+
     /// Whether this failure category is worth retrying. TLS alerts and cert
     /// parse errors are real signal about the server — do NOT retry those.
     /// Connection-level failures may be transient (load balancer blip, DNS
