@@ -159,9 +159,20 @@ pub async fn probe_hello_extensions(
 }
 
 fn record_contains_server_hello(bytes: &[u8]) -> bool {
-    // Needs at least 5 bytes record header + 4 bytes handshake header +
-    // some body. 9 bytes total minimum.
-    bytes.len() >= 9 && bytes[0] == 0x16 && bytes[5] == 0x02
+    // Needs at least 5 bytes record header + 4 bytes handshake header.
+    if bytes.len() < 9 {
+        return false;
+    }
+    if bytes[0] != 0x16 || bytes[5] != 0x02 {
+        return false;
+    }
+    // Only break out of the read loop once the ENTIRE first record has
+    // arrived. TCP routinely delivers the ServerHello header in a
+    // separate short segment before the body; stopping early trips the
+    // parser's bounds check (record_length_exceeds_buffer). Compare the
+    // record length in bytes 3-4 to how much we've actually read.
+    let record_len = u16::from_be_bytes([bytes[3], bytes[4]]) as usize;
+    bytes.len() >= 5 + record_len
 }
 
 /// Parse a TLS record stream. If the first handshake record is a

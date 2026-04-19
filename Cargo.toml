@@ -38,7 +38,17 @@ openssl = { version = "0.10", features = ["vendored"], optional = true }
 openssl-sys = { version = "0.9", optional = true }
 # Pinned exact to OpenSSL 3.5.5 LTS (supported through 2030-04-08). Exact pin
 # so upstream CVE-carrying patch bumps require deliberate review.
-openssl-src = { version = "=300.5.5", optional = true }
+#
+# Features beyond openssl-sys's default `legacy`:
+# - `weak-crypto` — compiles in RC4, single-DES, MD2/MD4 code (passes
+#   `enable-weak-ssl-ciphers` to OpenSSL's Configure). Without this the
+#   D1 cipher probe can't register `RC4-SHA`/`DES-CBC3-SHA`/etc. in
+#   SSL_CTX_set_cipher_list — it returns `no cipher match`.
+# - `ssl3` — compiles in the SSLv3 protocol code. Without this, the D8
+#   SSLv3 protocol-version probe fails at context build. The legacy
+#   provider alone enables SSLv3 primitives but not the SSLv3
+#   record-layer / protocol code itself.
+openssl-src = { version = "=300.5.5", features = ["weak-crypto", "ssl3"], optional = true }
 foreign-types = { version = "0.3", optional = true }
 
 # Async runtime and networking
@@ -87,6 +97,13 @@ reqwest = { version = "0.12", optional = true, default-features = false, feature
 
 [build-dependencies]
 chrono = { version = "0.4", features = ["serde"] }
+# Must also appear in [build-dependencies] — feature unification under
+# resolver = "2" does NOT propagate features from [dependencies] to the
+# build-dep chain. Without this block, openssl-sys's build-dep view of
+# openssl-src ignores our `weak-crypto`/`ssl3` features and OpenSSL is
+# compiled with `no-weak-ssl-ciphers` / `no-ssl3`, which strips RC4 /
+# single-DES / 3DES / SSLv3 from the cipher-list tables.
+openssl-src = { version = "=300.5.5", features = ["weak-crypto", "ssl3"], optional = true }
 
 [dev-dependencies]
 tokio-test = "0.4"

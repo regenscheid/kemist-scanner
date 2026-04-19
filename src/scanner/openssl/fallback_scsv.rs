@@ -182,7 +182,8 @@ fn probe_scsv_blocking(
     let tcp = match std::net::TcpStream::connect_timeout(&target, connect_timeout) {
         Ok(s) => s,
         Err(e) => {
-            return ProbeOutcome::Error(ScannerError::from_io("scsv tcp connect", e).category);
+            let se = ScannerError::from_io("scsv tcp connect", e);
+            return ProbeOutcome::Error(format!("{}: {}", se.category, se.context));
         }
     };
     let _ = tcp.set_read_timeout(Some(handshake_timeout));
@@ -206,7 +207,12 @@ fn probe_scsv_blocking(
             if se.category.starts_with("tls_alert_") {
                 ProbeOutcome::Alert(se.category)
             } else {
-                ProbeOutcome::Error(se.category)
+                // Preserve context: `connection_refused: scsv handshake:
+                // connection reset by peer` reads very differently from
+                // a bare `connection_refused`, even though both end up
+                // as `enforced: None` — a reviewer can tell whether the
+                // server closed the TCP socket mid-handshake vs. pre-TCP.
+                ProbeOutcome::Error(format!("{}: {}", se.category, se.context))
             }
         }
         Err(HandshakeError::SetupFailure(stack)) => {

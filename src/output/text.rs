@@ -551,10 +551,8 @@ fn render_client_auth_request(ca: Option<&ClientAuthRequestEntry>) {
 
 fn render_sni_behavior(r: &ScanResult) {
     section("SNI behavior (omitted probe)");
-    match (
-        &r.tls.sni_behavior.omitted_probe,
-        &r.tls.sni_behavior.method,
-    ) {
+    let sni = &r.tls.sni_behavior;
+    match (&sni.omitted_probe, &sni.method) {
         (Some(s), _) => {
             let colored = match s.as_str() {
                 "same_cert" => s.normal(),
@@ -563,7 +561,16 @@ fn render_sni_behavior(r: &ScanResult) {
                 "error" => s.yellow(),
                 _ => s.normal(),
             };
-            println!("  {}", colored);
+            // A rejected/error probe is much more useful with the reason
+            // attached: "server required SNI" reads very differently
+            // from "TCP reset mid-probe".
+            let tail = sni
+                .reason
+                .as_deref()
+                .filter(|_| matches!(s.as_str(), "rejected" | "error"))
+                .map(|r| format!("  [{}]", r.dimmed()))
+                .unwrap_or_default();
+            println!("  {}{}", colored, tail);
         }
         (None, m) => println!("  {} [{}]", "—".yellow(), method_label(m).yellow()),
     }

@@ -182,10 +182,13 @@ fn probe_blocking(
         Err(e) => {
             let se = alerts::classify_openssl_error("reneg handshake", &e);
             let verdict = classify_reneg_error(&se.category);
+            // Preserve context — the verdict is already definitive, but
+            // the reason carries diagnostic detail (e.g. the specific
+            // alert bytes or the "connection reset by peer" message).
             RenegotiationObservation {
                 secure_renegotiation_advertised: None,
                 client_initiated_verdict: verdict,
-                reason: Some(se.category),
+                reason: Some(format!("{}: {}", se.category, se.context)),
             }
         }
     }

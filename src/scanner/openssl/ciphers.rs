@@ -402,7 +402,15 @@ fn build_legacy_context(
     builder.set_min_proto_version(Some(ossl_version))?;
     builder.set_max_proto_version(Some(ossl_version))?;
     builder.set_security_level(0);
-    builder.set_cipher_list(cipher_list)?;
+    // `@SECLEVEL=0` in the cipher STRING is load-bearing in addition to
+    // `set_security_level(0)` on the SSL_CTX. The cipher-list parser
+    // applies its own seclevel filter based on the string; without the
+    // `@SECLEVEL=0` prefix, OpenSSL 3.x uses the default SECLEVEL (2),
+    // which excludes RC4, single-DES, and other <80-bit-security
+    // primitives even with the legacy provider loaded — causing
+    // `set_cipher_list` to return "no cipher match" before any handshake
+    // is attempted.
+    builder.set_cipher_list(&format!("{}:@SECLEVEL=0", cipher_list))?;
     builder.set_verify(SslVerifyMode::NONE);
     Ok(builder.build())
 }
