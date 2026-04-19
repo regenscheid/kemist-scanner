@@ -66,6 +66,9 @@ impl LegacyRuntime {
 /// individual `tls.*` sections per the schema.
 #[derive(Debug, Default, Clone)]
 pub struct OpensslObservations {
+    /// D1 — Per-suite probe results for RSA-kex, RC4, DES/3DES, NULL,
+    /// anon-DH, DHE-RSA, etc. across TLS 1.0/1.1/1.2.
+    pub cipher_probes: Option<ciphers::LegacyCipherProbeOutput>,
     /// Per-probe non-fatal errors collected during the scan. Populated so
     /// every "not probed" outcome carries a reason string rather than going
     /// silent.
@@ -76,8 +79,23 @@ pub struct OpensslObservations {
 /// honoring the scan config's `per_target_delay`. Returns `Err` only on
 /// fatal setup (provider load failure); per-probe errors land in
 /// `OpensslObservations::probe_errors` and the scan continues.
-pub async fn run_all_probes(_cfg: &ScanConfig) -> Result<OpensslObservations, ScannerError> {
+pub async fn run_all_probes(cfg: &ScanConfig) -> Result<OpensslObservations, ScannerError> {
     let _runtime = LegacyRuntime::load()?;
-    // Phase B scaffolding: no live probes yet. Phase D modules plug in here.
-    Ok(OpensslObservations::default())
+
+    let mut out = OpensslObservations::default();
+
+    // D1 — legacy cipher enumeration.
+    let cipher_out = ciphers::probe_legacy_suites(
+        cfg.target,
+        &cfg.hostname,
+        cfg.timeout,
+        cfg.timeout,
+        cfg.per_target_delay,
+    )
+    .await;
+    out.cipher_probes = Some(cipher_out);
+
+    // D2-D8 hook in here as those modules land live.
+
+    Ok(out)
 }
