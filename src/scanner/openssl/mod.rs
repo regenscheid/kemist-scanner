@@ -72,6 +72,8 @@ pub struct OpensslObservations {
     /// D4 — RFC 7919 FFDHE named-group probes across TLS 1.2 and TLS 1.3,
     /// with D2 cross-check for servers that ignore `supported_groups`.
     pub ffdhe_probes: Option<ffdhe::FfdheProbeOutput>,
+    /// D5 — `TLS_FALLBACK_SCSV` (RFC 7507) enforcement observation.
+    pub fallback_scsv: Option<fallback_scsv::FallbackScsvResult>,
     /// Per-probe non-fatal errors collected during the scan. Populated so
     /// every "not probed" outcome carries a reason string rather than going
     /// silent.
@@ -110,7 +112,11 @@ pub async fn run_all_probes(cfg: &ScanConfig) -> Result<OpensslObservations, Sca
     .await;
     out.ffdhe_probes = Some(ffdhe_out);
 
-    // D5-D8 hook in here as those modules land live.
+    // D5 — TLS_FALLBACK_SCSV (RFC 7507) enforcement.
+    let scsv = fallback_scsv::probe(cfg.target, &cfg.hostname, cfg.timeout, cfg.timeout).await;
+    out.fallback_scsv = Some(scsv);
+
+    // D6-D8 hook in here as those modules land live.
 
     Ok(out)
 }
