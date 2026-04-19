@@ -1,6 +1,6 @@
 //! Human-readable terminal renderer for schema-v1 `ScanResult` records.
 //!
-//! Downstream rule engines consume the  JSON output; this view is for 
+//! Downstream rule engines consume the  JSON output; this view is for
 //! interactive debugging of single scans.
 //!
 //! ## Glyph legend
