@@ -1,4 +1,4 @@
-//! Phase D6 — Client-initiated renegotiation probe.
+//! Client-initiated renegotiation probe.
 //!
 //! After a completed TLS 1.2 handshake, issue `SSL_renegotiate` + drive
 //! `SSL_do_handshake`. Observe whether the server honors the request:

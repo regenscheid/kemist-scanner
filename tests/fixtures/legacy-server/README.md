@@ -1,9 +1,9 @@
 # Legacy-probe integration fixture
 
-Deliberately misconfigured TLS server for exercising Phase D1–D7 of the
-legacy-probes subsystem. Boots an nginx 1.25 container on OpenSSL 1.1.1
-that accepts weak primitives (RC4, DES, 3DES, NULL, anon) with a
-1024-bit custom DH prime and `ssl_verify_client optional`.
+Deliberately misconfigured TLS server for exercising the legacy-probes
+subsystem. Boots an nginx 1.25 container on OpenSSL 1.1.1 that accepts
+weak primitives (RC4, DES, 3DES, NULL, anon) with a 1024-bit custom DH
+prime and `ssl_verify_client optional`.
 
 **Never expose this to an untrusted network.** Everything about it is
 wrong on purpose.

@@ -60,8 +60,8 @@ pub fn ensure_legacy_providers() -> &'static Result<(), ScannerError> {
     })
 }
 
-/// Aggregate output of every probe in the OpenSSL subsystem. Each Phase-D
-/// module fills its slot; default is empty.
+/// Aggregate output of every probe in the OpenSSL subsystem. Each
+/// submodule fills its slot; default is empty.
 ///
 /// Not serialized directly — `src/output/json.rs` consumes this and emits
 /// individual `tls.*` sections per the schema.

@@ -1,7 +1,7 @@
 # Legacy-probe integration fixture.
 #
 # Deliberately misconfigured nginx on OpenSSL 1.1.1 (Debian bullseye base)
-# so every Phase D1-D7 probe has something real to observe:
+# so every legacy-probe observation has something real to land on:
 #
 #   @SECLEVEL=0   — permits RC4, DES, 3DES, NULL, anon, etc.
 #   TLSv1 TLSv1.1 TLSv1.2 TLSv1.3 all enabled

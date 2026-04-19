@@ -141,22 +141,21 @@ pub struct Tls {
     pub sni_behavior: SniBehavior,
     /// OpenSSL-backed legacy cipher enumeration (RSA-kex, RC4, DES/3DES,
     /// NULL, anon-DH, DHE-RSA, etc.) across TLS 1.0/1.1/1.2. Empty when
-    /// `legacy-probes` is disabled. See Phase D1.
+    /// `legacy-probes` is disabled.
     pub legacy_cipher_suites: Vec<LegacyCipherSuiteEntry>,
     /// DH parameters captured from every completed DHE handshake,
-    /// classified against RFC 7919 FFDHE primes. See Phase D2.
+    /// classified against RFC 7919 FFDHE primes.
     pub dh_parameters: Vec<DhParametersObservation>,
-    /// RFC 7919 FFDHE named-group probes per protocol version. See
-    /// Phase D4. Keyed by group name (ffdhe2048…ffdhe8192).
+    /// RFC 7919 FFDHE named-group probes per protocol version, keyed
+    /// by group name (ffdhe2048…ffdhe8192).
     pub ffdhe_support: BTreeMap<String, FfdheObservation>,
     /// Signature algorithm the server selected in each completed TLS 1.2
-    /// ServerKeyExchange / TLS 1.3 CertificateVerify. See Phase D3.
+    /// ServerKeyExchange / TLS 1.3 CertificateVerify.
     pub server_key_exchange_signatures: Vec<SkeSigObservation>,
-    /// Client-initiated renegotiation verdict. See Phase D6.
+    /// Client-initiated renegotiation verdict.
     pub renegotiation_behavior: RenegotiationBehavior,
     /// Server's `CertificateRequest` contents (`None` when the server
-    /// didn't request client auth, or the probe couldn't run). See
-    /// Phase D7.
+    /// didn't request client auth, or the probe couldn't run).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub client_auth_request: Option<ClientAuthRequestEntry>,
 }
@@ -302,10 +301,11 @@ pub struct DowngradeSignaling {
     /// over-reported enforcement. Scheduled for removal in schema v2.
     /// Consumers should migrate to `fallback_scsv_enforced`.
     pub fallback_scsv_accepted: ObservationBool,
-    /// Real SCSV enforcement observation from Phase D5. `{value: true}`
-    /// when the server returned `inappropriate_fallback` on a deliberate
-    /// downgrade probe; `{value: false}` when it accepted the downgraded
-    /// handshake; `{value: null}` with reason string when inconclusive.
+    /// Real SCSV enforcement observation. `{value: true}` when the
+    /// server returned `inappropriate_fallback` on a deliberate
+    /// downgrade probe; `{value: false}` when it accepted the
+    /// downgraded handshake; `{value: null}` with reason string when
+    /// inconclusive.
     pub fallback_scsv_enforced: ObservationBool,
 }
 
@@ -318,12 +318,12 @@ pub struct SniBehavior {
 }
 
 // ----------------------------------------------------------------------
-// Phase D1-D7 output shapes. Populated by src/output/json.rs builders
-// that consume `ScanResults.openssl_observations`. See the plan's §5 for
-// the schema contract and docs/OUTPUT_SCHEMA.md for field semantics.
+// OpenSSL legacy-probe output shapes. Populated by src/output/json.rs
+// builders that consume `ScanResults.openssl_observations`. See
+// docs/OUTPUT_SCHEMA.md for field semantics.
 // ----------------------------------------------------------------------
 
-/// One entry in `tls.legacy_cipher_suites`. Phase D1.
+/// One entry in `tls.legacy_cipher_suites`.
 #[derive(Serialize, Debug, Clone)]
 pub struct LegacyCipherSuiteEntry {
     pub name: String,
@@ -337,7 +337,7 @@ pub struct LegacyCipherSuiteEntry {
     pub reason: Option<String>,
 }
 
-/// One entry in `tls.dh_parameters`. Phase D2.
+/// One entry in `tls.dh_parameters`.
 #[derive(Serialize, Debug, Clone)]
 pub struct DhParametersObservation {
     /// Which completed cipher suite produced this observation — downstream
@@ -351,8 +351,8 @@ pub struct DhParametersObservation {
     /// Lowercase hex (64 chars).
     pub prime_sha256: String,
     /// Optional raw prime, lowercase hex. Omitted by default (bandwidth);
-    /// populated when the CLI requests `--include-dh-raw` (not yet
-    /// wired — TODO Phase F).
+    /// populated when the CLI requests `--include-dh-raw` (flag not yet
+    /// wired).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prime_raw_hex: Option<String>,
     pub method: Method,
@@ -360,7 +360,7 @@ pub struct DhParametersObservation {
     pub reason: Option<String>,
 }
 
-/// One entry in `tls.ffdhe_support`, keyed by group name. Phase D4.
+/// One entry in `tls.ffdhe_support`, keyed by group name.
 #[derive(Serialize, Debug, Clone)]
 pub struct FfdheObservation {
     pub iana_code: String,
@@ -368,7 +368,7 @@ pub struct FfdheObservation {
     pub tls1_3: GroupObservation,
 }
 
-/// One entry in `tls.server_key_exchange_signatures`. Phase D3.
+/// One entry in `tls.server_key_exchange_signatures`.
 #[derive(Serialize, Debug, Clone)]
 pub struct SkeSigObservation {
     pub cipher_suite: String,
@@ -378,7 +378,7 @@ pub struct SkeSigObservation {
     pub reason: Option<String>,
 }
 
-/// Shape of `tls.renegotiation_behavior`. Phase D6.
+/// Shape of `tls.renegotiation_behavior`.
 #[derive(Serialize, Debug, Clone)]
 pub struct RenegotiationBehavior {
     /// `"accepted"` / `"rejected"` / `"not_attempted"` / `"error"` — or
@@ -409,7 +409,7 @@ pub struct ClientAuthOidFilter {
     pub values_b64: Vec<String>,
 }
 
-/// Shape of `tls.client_auth_request`. Phase D7.
+/// Shape of `tls.client_auth_request`.
 #[derive(Serialize, Debug, Clone)]
 pub struct ClientAuthRequestEntry {
     pub requested: bool,

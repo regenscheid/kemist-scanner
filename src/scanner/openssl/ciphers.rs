@@ -1,10 +1,9 @@
-//! Phase D1 — Legacy cipher enumeration and RSA-kex probing across
-//! TLS 1.0 / TLS 1.1 / TLS 1.2.
+//! Legacy cipher enumeration and RSA-kex probing across TLS 1.0 / TLS 1.1
+//! / TLS 1.2.
 //!
 //! Covers RSA-kex, RC4, single-DES/3DES, NULL, anon-DH, and a few DHE-RSA
-//! suites (the last category drives the Phase D2 DH-parameter observer and
-//! Phase D3 SKE signature observer, which are hooked in when those modules
-//! land live).
+//! suites (the last category drives the [`super::dh_params`] and
+//! [`super::ske_sig`] post-handshake observers).
 //!
 //! Probe discipline: one suite per ClientHello, single TLS version pinned
 //! via `set_min/max_proto_version`, `set_security_level(0)` to unblock the
@@ -61,8 +60,9 @@ pub struct LegacyCipherResult {
     /// handshake whose server `tmp_key` is DH (i.e. DHE-RSA suites). `None`
     /// for RSA-kex, ECDHE, and failed handshakes.
     pub dh_snapshot: Option<DhSnapshot>,
-    /// Populated by Phase D3 (`ske_sig::snapshot`) — TLS 1.2
-    /// ServerKeyExchange signature algorithm name.
+    /// Populated by [`super::ske_sig::snapshot`] — the server's chosen
+    /// TLS 1.2 ServerKeyExchange (or TLS 1.3 CertificateVerify)
+    /// signature algorithm name.
     pub ske_sig: Option<String>,
 }
 

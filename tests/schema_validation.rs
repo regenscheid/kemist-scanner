@@ -175,10 +175,10 @@ fn error_category_strings_are_canonical() {
 }
 
 // --------------------------------------------------------------------
-// Phase G3 — legacy-probe output schema coverage.
-// Synthesize a populated `OpensslObservations` and verify the resulting
-// JSON still validates against `schemas/output-v1.json`. Exercises every
-// new `tls.*` section added in Phase E / F.
+// Legacy-probe output schema coverage. Synthesize a populated
+// `OpensslObservations` and verify the resulting JSON still validates
+// against `schemas/output-v1.json`, plus that every new `tls.*` section
+// actually carries the values the builders produced.
 // --------------------------------------------------------------------
 
 #[cfg(feature = "legacy-probes")]

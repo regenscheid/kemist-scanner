@@ -283,6 +283,7 @@ mod tests {
     // `classify_openssl_error` is exercised at integration level — the
     // openssl crate doesn't expose a public constructor for `SslError`
     // with arbitrary cause, so unit tests can only reach the pure helpers
-    // above. Phase G integration tests cover the classifier against real
+    // above. The docker-fixture integration tests in
+    // `tests/openssl_probe.rs` cover the classifier against real
     // handshake failures.
 }

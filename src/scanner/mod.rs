@@ -179,14 +179,14 @@ impl SslScanner {
 
         // `fallback_scsv_accepted` is deprecated-in-place for schema v1 —
         // it's a TLS-1.3-heuristic stub and gave false positives. Real
-        // observation lives in `openssl_observations.fallback_scsv`
-        // (Phase D5). Left unpopulated so the field renders null with a
+        // observation lives in `openssl_observations.fallback_scsv`.
+        // Left unpopulated so the field renders null with a
         // `superseded_by_fallback_scsv_enforced` reason via the output
         // layer.
         //
         // Similarly `tls_renegotiation` was a pair of heuristics whose
         // signal is now produced by `openssl_observations.renegotiation`
-        // (Phase D6) and the byte-level `hello_observed.secure_renegotiation`
+        // and the byte-level `hello_observed.secure_renegotiation`
         // extension detection.
 
         results.heartbeat_echoes_oversized_payload = self.test_heartbleed(&mut results).await;

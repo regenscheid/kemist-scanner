@@ -1,4 +1,4 @@
-//! Phase D4 — RFC 7919 FFDHE named-group probing for TLS 1.2 and TLS 1.3.
+//! RFC 7919 FFDHE named-group probing for TLS 1.2 and TLS 1.3.
 //!
 //! aws-lc-rs does not implement FFDHE key-exchange arithmetic, so
 //! [`crate::scanner::groups`] cannot probe these codepoints — this module
@@ -12,7 +12,7 @@
 //! - TLS 1.3 — advertise the codepoint in both `supported_groups` and
 //!   `key_share`, with the protocol pinned to TLS 1.3.
 //!
-//! Cross-check with Phase D2 (`dh_params`): after a successful TLS 1.2
+//! Cross-checks against [`super::dh_params`]: after a successful TLS 1.2
 //! handshake, the observed prime's SHA-256 must match the advertised
 //! codepoint. Servers that complete a DHE handshake but return a
 //! *custom* prime have ignored `supported_groups` — a misconfiguration

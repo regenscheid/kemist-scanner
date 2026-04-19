@@ -1,5 +1,4 @@
-//! Phase D3 — ServerKeyExchange / CertificateVerify signature algorithm
-//! capture.
+//! ServerKeyExchange / CertificateVerify signature algorithm capture.
 //!
 //! Records the signature algorithm the server *chose* for its signed
 //! handshake message. In TLS 1.2 this is the SKE signature (DHE/ECDHE);

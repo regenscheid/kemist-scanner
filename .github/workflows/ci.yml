@@ -110,6 +110,45 @@ jobs:
     - name: Test
       run: cargo test ${{ matrix.args }} --verbose
 
+  release_size_gate:
+    # Guards against accidental binary-size regressions now that
+    # `legacy-probes` links a second crypto library (vendored OpenSSL 3.5
+    # LTS). The threshold below was set by measuring the release binary
+    # once the OpenSSL subsystem landed; raise it deliberately if a new
+    # probe honestly needs the space, don't silently accept creep.
+    name: Release binary size gate
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Cache cargo registry
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          target
+        key: ${{ runner.os }}-cargo-release-size-${{ hashFiles('**/Cargo.lock') }}
+
+    - name: Build release
+      run: cargo build --release --locked
+
+    - name: Check binary size
+      run: |
+        SIZE=$(stat -c%s target/release/kemist)
+        # 12 MiB. Current release binary is ~9 MiB on Linux; the
+        # headroom absorbs platform variance + small future additions.
+        MAX=$((12 * 1024 * 1024))
+        echo "kemist release binary: ${SIZE} bytes (limit ${MAX})"
+        if [ "${SIZE}" -gt "${MAX}" ]; then
+          echo "::error::release binary exceeds ${MAX} bytes (got ${SIZE})"
+          exit 1
+        fi
+
   security_audit:
     name: Security audit
     runs-on: ubuntu-latest

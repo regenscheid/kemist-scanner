@@ -1,4 +1,4 @@
-//! Phase D5 — `TLS_FALLBACK_SCSV` (RFC 7507) enforcement probe.
+//! `TLS_FALLBACK_SCSV` (RFC 7507) enforcement probe.
 //!
 //! Algorithm:
 //! 1. Quick characterization handshake: let OpenSSL pick the highest

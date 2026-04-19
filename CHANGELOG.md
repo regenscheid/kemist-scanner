@@ -111,6 +111,42 @@ maintainer process: subscribe to `openssl-announce@openssl.org`; run
   `test_fallback_scsv*`, `test_tls_renegotiation`,
   `test_secure_renegotiation`, `test_tls_compression`.
   Superseded by real wire probes.
+- Deleted the `#[allow(dead_code)]` OpenSSL cipher-enumeration stubs
+  in [src/scanner/legacy.rs](src/scanner/legacy.rs) (lines 97-217 of
+  the pre-change file). Their intended behavior now lives in
+  [src/scanner/openssl/ciphers.rs](src/scanner/openssl/ciphers.rs).
+
+### Release-gate smoke test
+
+Before tagging a release, run the manual smoke procedure. The docker
+fixture at [tests/fixtures/legacy-server/](tests/fixtures/legacy-server/)
+gives full coverage locally; the badssl.com subdomains below extend
+coverage to third-party servers that deliberately misconfigure specific
+things.
+
+```bash
+# Local fixture — full coverage, offline.
+cd tests/fixtures/legacy-server && ./generate-certs.sh && docker compose up -d
+KEMIST_LEGACY_FIXTURE_ADDR=127.0.0.1:14443 \
+KEMIST_LEGACY_FIXTURE_HOSTNAME=legacy-fixture.local \
+  cargo test --features legacy-probes --test openssl_probe -- --ignored
+docker compose down
+
+# badssl — requires internet, spot-checks specific misconfigs.
+./target/release/kemist rc4.badssl.com:443 --json \
+  | jq '.tls.legacy_cipher_suites[] | select(.supported)'           # expect RC4 entries
+./target/release/kemist 3des.badssl.com:443 --json \
+  | jq '.tls.legacy_cipher_suites[] | select(.supported)'           # expect 3DES
+./target/release/kemist dh1024.badssl.com:443 --json \
+  | jq '.tls.dh_parameters'                                          # expect prime_bits: 1024
+./target/release/kemist client-cert-missing.badssl.com:443 --json \
+  | jq '.tls.client_auth_request'                                    # expect requested: true
+./target/release/kemist mozilla-modern.badssl.com:443 --json \
+  | jq '.tls.legacy_cipher_suites | map(select(.supported)) | length' # expect 0
+```
+
+Binary-size gate is enforced in CI ([.github/workflows/ci.yml](.github/workflows/ci.yml))
+at 12 MiB. Current release binary size is ~9 MiB on Linux.
 
 ## [0.1.0] — 2026-04-18
 

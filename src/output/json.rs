@@ -515,10 +515,11 @@ pub fn print_json(results: &ScanResults, ctx: &JsonEmitContext) -> Result<(), Sc
 }
 
 // ---------------------------------------------------------------------
-// Phase D1-D7 output builders. Each reads `results.openssl_observations`
-// (when the `legacy-probes` feature is on) and emits the corresponding
-// schema section. With the feature off, every builder returns an empty
-// / not-probed default so the schema shape stays stable.
+// OpenSSL legacy-probe output builders. Each reads
+// `results.openssl_observations` (when the `legacy-probes` feature is on)
+// and emits the corresponding schema section. With the feature off, every
+// builder returns an empty / not-probed default so the schema shape stays
+// stable.
 // ---------------------------------------------------------------------
 
 fn build_fallback_scsv_enforced(results: &ScanResults) -> ObservationBool {

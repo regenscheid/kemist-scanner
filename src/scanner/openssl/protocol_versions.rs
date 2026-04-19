@@ -1,4 +1,4 @@
-//! Phase D8 — SSLv3 / TLS 1.0 / TLS 1.1 protocol-version probes.
+//! SSLv3 / TLS 1.0 / TLS 1.1 protocol-version probes (OpenSSL path).
 //!
 //! Replaces the `native-tls`-backed path at
 //! `src/scanner/legacy.rs:28-95` when the `legacy-probes` feature is on.

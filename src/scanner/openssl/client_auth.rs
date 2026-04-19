@@ -1,4 +1,4 @@
-//! Phase D7 — CertificateRequest capture.
+//! CertificateRequest capture.
 //!
 //! Intercepts the server's `CertificateRequest` handshake message via an
 //! OpenSSL `SSL_CTX_set_msg_callback` hook, parses the body into structured

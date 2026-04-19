@@ -1,7 +1,7 @@
-//! Phase D2 — Finite-field DH parameter capture.
+//! Finite-field DH parameter capture.
 //!
 //! Called as a post-handshake observer after every successful DHE handshake
-//! driven by Phase D1. Extracts the server's tmp key via
+//! driven by [`super::ciphers`]. Extracts the server's tmp key via
 //! `SSL_get_peer_tmp_key`, projects onto the DH key type, and captures:
 //!
 //! - `prime_bits` via `EVP_PKEY_get_bits` (downstream Logjam check).
