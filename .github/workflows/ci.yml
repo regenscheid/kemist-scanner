@@ -49,13 +49,13 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-        
+
     steps:
     - uses: actions/checkout@v4
-    
+
     - name: Install Rust
       uses: dtolnay/rust-toolchain@stable
-    
+
     - name: Cache cargo registry
       uses: actions/cache@v4
       with:
@@ -64,12 +64,51 @@ jobs:
           ~/.cargo/git
           target
         key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-    
+
     - name: Build
       run: cargo build --verbose
-    
+
     - name: Build release
       run: cargo build --release --verbose
+
+  feature_matrix:
+    # Proves the legacy-probe feature boundary is honestly opt-out. Each
+    # variant exercises a different subset of the dep graph; if any of
+    # the three fails to compile, the feature gating drifted.
+    name: Feature matrix
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: no-legacy-probes
+            # native-tls fallback for SSLv3/TLS1.0/1.1; openssl omitted.
+            args: "--no-default-features --features http-checks,native-legacy"
+          - variant: minimal
+            # No legacy backend at all; the new tls.* sections render as
+            # empty/feature_disabled but the schema shape stays stable.
+            args: "--no-default-features --features http-checks"
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Cache cargo registry
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          target
+        key: ${{ runner.os }}-cargo-feature-${{ matrix.variant }}-${{ hashFiles('**/Cargo.lock') }}
+
+    - name: Build
+      run: cargo build ${{ matrix.args }} --verbose
+
+    - name: Test
+      run: cargo test ${{ matrix.args }} --verbose
 
   security_audit:
     name: Security audit
@@ -106,13 +145,13 @@ jobs:
   integration_test:
     name: Integration Tests
     runs-on: ubuntu-latest
-    
+
     steps:
     - uses: actions/checkout@v4
-    
+
     - name: Install Rust
       uses: dtolnay/rust-toolchain@stable
-    
+
     - name: Cache cargo registry
       uses: actions/cache@v4
       with:
@@ -121,25 +160,78 @@ jobs:
           ~/.cargo/git
           target
         key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-    
+
     - name: Build kemist
       run: cargo build --release
-    
+
     - name: Build and run test servers
       run: |
         cd docker
         docker compose -f docker-compose.yml build
         docker compose -f docker-compose.yml up -d
         sleep 15
-    
+
     - name: Run integration tests
       run: |
         cd docker
         chmod +x test-heartbleed.sh
         ./test-heartbleed.sh || echo "Heartbleed test completed"
-    
+
     - name: Cleanup
       if: always()
       run: |
         cd docker
         docker compose -f docker-compose.yml down
+
+  legacy_fixture_test:
+    # integration tests: boots the OpenSSL 1.1.1 nginx fixture
+    # at tests/fixtures/legacy-server/ (deliberately misconfigured with
+    # @SECLEVEL=0, weak cipher list, 1024-bit custom DH, optional client
+    # auth) and runs the `#[ignore]`-gated probe tests against it.
+    name: Legacy probe integration (docker fixture)
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Cache cargo registry
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          target
+        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+    - name: Build kemist (legacy-probes on)
+      run: cargo build --tests --features legacy-probes
+
+    - name: Generate fixture certificates and DH parameters
+      run: |
+        cd tests/fixtures/legacy-server
+        ./generate-certs.sh
+
+    - name: Start fixture
+      run: |
+        cd tests/fixtures/legacy-server
+        docker compose up -d
+        # Allow nginx to finish startup handshake generation on slow runners.
+        for i in {1..30}; do
+          if nc -zv 127.0.0.1 14443 2>/dev/null; then break; fi
+          sleep 1
+        done
+
+    - name: Run integration tests
+      env:
+        KEMIST_LEGACY_FIXTURE_ADDR: 127.0.0.1:14443
+        KEMIST_LEGACY_FIXTURE_HOSTNAME: legacy-fixture.local
+      run: cargo test --features legacy-probes --test openssl_probe -- --ignored --test-threads=1
+
+    - name: Cleanup
+      if: always()
+      run: |
+        cd tests/fixtures/legacy-server
+        docker compose down || true

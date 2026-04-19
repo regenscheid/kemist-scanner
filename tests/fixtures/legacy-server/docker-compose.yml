@@ -1,0 +1,40 @@
+# Legacy-probe integration fixture.
+#
+# Deliberately misconfigured nginx on OpenSSL 1.1.1 (Debian bullseye base)
+# so every Phase D1-D7 probe has something real to observe:
+#
+#   @SECLEVEL=0   — permits RC4, DES, 3DES, NULL, anon, etc.
+#   TLSv1 TLSv1.1 TLSv1.2 TLSv1.3 all enabled
+#   1024-bit custom ssl_dhparam   — exercises `classification: custom`
+#   ssl_verify_client optional    — triggers CertificateRequest emit
+#
+# nginx:1.25 ships with OpenSSL 1.1.1 via Debian bullseye. The container
+# listens on 14443 so the host port doesn't collide with system services.
+#
+# Boot sequence:
+#   1. ./generate-certs.sh — produces server.crt / server.key /
+#      client-ca.crt / dh1024.pem in this directory.
+#   2. docker compose up -d
+#   3. Point kemist at 127.0.0.1:14443 with SNI "legacy-fixture.local".
+#
+# CI wires this via .github/workflows/ci.yml::legacy_fixture_test.
+
+services:
+  legacy-nginx:
+    image: nginx:1.25
+    container_name: kemist-legacy-fixture
+    ports:
+      - "14443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./server.crt:/etc/nginx/certs/server.crt:ro
+      - ./server.key:/etc/nginx/certs/server.key:ro
+      - ./client-ca.crt:/etc/nginx/certs/client-ca.crt:ro
+      - ./dh1024.pem:/etc/nginx/certs/dh1024.pem:ro
+    # Healthcheck pings TLS on the exposed port; nginx is ready once the
+    # SSL socket accepts connections.
+    healthcheck:
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/localhost/443 && echo ok"]
+      interval: 2s
+      timeout: 2s
+      retries: 15

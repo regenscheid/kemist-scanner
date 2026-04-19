@@ -173,3 +173,261 @@ fn error_category_strings_are_canonical() {
         "tls_alert_bad_certificate"
     );
 }
+
+// --------------------------------------------------------------------
+// Phase G3 — legacy-probe output schema coverage.
+// Synthesize a populated `OpensslObservations` and verify the resulting
+// JSON still validates against `schemas/output-v1.json`. Exercises every
+// new `tls.*` section added in Phase E / F.
+// --------------------------------------------------------------------
+
+#[cfg(feature = "legacy-probes")]
+#[test]
+fn fully_populated_openssl_observations_match_schema_v1() {
+    use kemist::model::protocol::TlsVersion;
+    use kemist::scanner::openssl::{
+        ciphers::{LegacyCipherProbeOutput, LegacyCipherResult, LegacyProbeOutcome},
+        client_auth::{CaDnEntry, ClientAuthRequest, OidFilter},
+        dh_params::{DhClassification, DhSnapshot},
+        fallback_scsv::FallbackScsvResult,
+        ffdhe::{FfdheOutcome, FfdheProbeOutput, FfdheProbeResult},
+        renegotiation::{RenegotiationObservation, RenegotiationVerdict},
+        OpensslObservations,
+    };
+
+    // DH snapshot matching ffdhe2048 so the dh_parameters entry covers
+    // the non-custom classification branch.
+    let dh = DhSnapshot {
+        prime_bits: 2048,
+        generator: 2,
+        prime_sha256: [
+            0x9c, 0xd3, 0xb7, 0xf3, 0x36, 0x87, 0x2f, 0x46, 0xc0, 0x94, 0x28, 0xd1, 0xbb, 0xc1,
+            0x98, 0x77, 0xa4, 0xd4, 0x40, 0x51, 0x2c, 0xda, 0x8d, 0x1c, 0x1c, 0xf0, 0xcd, 0x6e,
+            0x33, 0x69, 0x89, 0x66,
+        ],
+        classification: DhClassification::Ffdhe2048,
+    };
+
+    // Cipher-probe list covering every LegacyProbeOutcome variant and the
+    // DHE + SKE-sig observer slots.
+    let cipher_probes = LegacyCipherProbeOutput {
+        results: vec![
+            LegacyCipherResult {
+                name: "TLS_RSA_WITH_AES_128_CBC_SHA".to_string(),
+                openssl_name: "AES128-SHA".to_string(),
+                iana_code: 0x002F,
+                version: TlsVersion::Tls12,
+                outcome: LegacyProbeOutcome::Supported,
+                dh_snapshot: None,
+                ske_sig: None,
+            },
+            LegacyCipherResult {
+                name: "TLS_DHE_RSA_WITH_AES_128_CBC_SHA".to_string(),
+                openssl_name: "DHE-RSA-AES128-SHA".to_string(),
+                iana_code: 0x0033,
+                version: TlsVersion::Tls12,
+                outcome: LegacyProbeOutcome::Supported,
+                dh_snapshot: Some(dh.clone()),
+                ske_sig: Some("rsa_pkcs1_sha1".to_string()),
+            },
+            LegacyCipherResult {
+                name: "TLS_RSA_WITH_NULL_SHA".to_string(),
+                openssl_name: "NULL-SHA".to_string(),
+                iana_code: 0x0002,
+                version: TlsVersion::Tls12,
+                outcome: LegacyProbeOutcome::NotSupported,
+                dh_snapshot: None,
+                ske_sig: None,
+            },
+            LegacyCipherResult {
+                name: "TLS_RSA_WITH_RC4_128_SHA".to_string(),
+                openssl_name: "RC4-SHA".to_string(),
+                iana_code: 0x0005,
+                version: TlsVersion::Tls10,
+                outcome: LegacyProbeOutcome::Error("connection_timeout".to_string()),
+                dh_snapshot: None,
+                ske_sig: None,
+            },
+        ],
+    };
+
+    // FFDHE probe: one Supported, one NotSupported, one
+    // IgnoredGroupReturnedCustomPrime to exercise the cross-check reason.
+    let ffdhe_probes = FfdheProbeOutput {
+        results: vec![
+            FfdheProbeResult {
+                group_name: "ffdhe2048".to_string(),
+                iana_code: 0x0100,
+                tls12_outcome: FfdheOutcome::Supported,
+                tls13_outcome: FfdheOutcome::NotSupported,
+            },
+            FfdheProbeResult {
+                group_name: "ffdhe3072".to_string(),
+                iana_code: 0x0101,
+                tls12_outcome: FfdheOutcome::IgnoredGroupReturnedCustomPrime,
+                tls13_outcome: FfdheOutcome::NotProbed("provider_limit".to_string()),
+            },
+            FfdheProbeResult {
+                group_name: "ffdhe4096".to_string(),
+                iana_code: 0x0102,
+                tls12_outcome: FfdheOutcome::Error("tls_alert_protocol_version".to_string()),
+                tls13_outcome: FfdheOutcome::NotSupported,
+            },
+        ],
+    };
+
+    let fallback_scsv = FallbackScsvResult {
+        enforced: Some(true),
+        reason: "inappropriate_fallback_alert_at_tls1_2_with_server_max_tls1_3".to_string(),
+    };
+
+    let renegotiation = RenegotiationObservation {
+        secure_renegotiation_advertised: None,
+        client_initiated_verdict: RenegotiationVerdict::ClientInitiatedRejected,
+        reason: Some("tls_alert_no_renegotiation".to_string()),
+    };
+
+    let client_auth = ClientAuthRequest {
+        requested: true,
+        certificate_types: vec![0x01, 0x40],
+        signature_algorithms: vec![
+            "ecdsa_secp256r1_sha256".to_string(),
+            "rsa_pss_rsae_sha256".to_string(),
+        ],
+        ca_distinguished_names: vec![CaDnEntry {
+            raw_der_b64: "3017310f300d06035504030c064b65696d737407".to_string(),
+            common_name: Some("kemist test CA".to_string()),
+            organization: Some("kemist".to_string()),
+        }],
+        oid_filters: vec![OidFilter {
+            oid: "1.3.6.1.5.5.7.3.2".to_string(),
+            values_b64: vec!["deadbeef".to_string()],
+        }],
+        alert_on_empty_cert: Some("tls_alert_certificate_required".to_string()),
+        negotiated_version: Some("tls1_3".to_string()),
+    };
+
+    let mut results = fixture_results();
+    results.openssl_observations = Some(OpensslObservations {
+        cipher_probes: Some(cipher_probes),
+        ffdhe_probes: Some(ffdhe_probes),
+        fallback_scsv: Some(fallback_scsv),
+        renegotiation: Some(renegotiation),
+        client_auth: Some(client_auth),
+        probe_errors: vec![],
+    });
+
+    let ctx = fixture_ctx();
+    let record = build_scan_result(&results, &ctx);
+    let record_value = serde_json::to_value(&record).expect("serialize");
+    let schema_value = load_schema();
+    let validator = jsonschema::validator_for(&schema_value).expect("schema compiles");
+    let errors: Vec<_> = validator.iter_errors(&record_value).collect();
+    if !errors.is_empty() {
+        for e in &errors {
+            eprintln!("schema error at {}: {}", e.instance_path, e);
+        }
+        panic!(
+            "populated legacy-probe record failed schema validation: {} error(s)",
+            errors.len()
+        );
+    }
+
+    // Cross-check the output actually carries the new fields — schema
+    // validation alone doesn't prove the builder populated anything; it
+    // only proves the shape is legal.
+    let tls = record_value.get("tls").unwrap();
+    assert_eq!(tls.get("legacy_cipher_suites").unwrap().as_array().unwrap().len(), 4);
+    assert_eq!(tls.get("dh_parameters").unwrap().as_array().unwrap().len(), 1);
+    assert_eq!(tls.get("ffdhe_support").unwrap().as_object().unwrap().len(), 3);
+    assert_eq!(tls.get("server_key_exchange_signatures").unwrap().as_array().unwrap().len(), 1);
+    assert!(tls.get("renegotiation_behavior").is_some());
+    assert!(tls.get("client_auth_request").is_some());
+    assert_eq!(
+        tls.get("downgrade_signaling")
+            .unwrap()
+            .get("fallback_scsv_enforced")
+            .unwrap()
+            .get("value")
+            .unwrap()
+            .as_bool(),
+        Some(true)
+    );
+    // Deprecated field renders null with the supersession reason.
+    let deprecated = tls
+        .get("downgrade_signaling")
+        .unwrap()
+        .get("fallback_scsv_accepted")
+        .unwrap();
+    assert!(deprecated.get("value").unwrap().is_null());
+    assert_eq!(
+        deprecated.get("reason").unwrap().as_str(),
+        Some("superseded_by_fallback_scsv_enforced")
+    );
+}
+
+#[cfg(feature = "legacy-probes")]
+#[test]
+fn ffdhe_cross_check_reason_surfaces_in_output() {
+    use kemist::scanner::openssl::{
+        ffdhe::{FfdheOutcome, FfdheProbeOutput, FfdheProbeResult},
+        OpensslObservations,
+    };
+
+    let mut results = fixture_results();
+    results.openssl_observations = Some(OpensslObservations {
+        cipher_probes: None,
+        ffdhe_probes: Some(FfdheProbeOutput {
+            results: vec![FfdheProbeResult {
+                group_name: "ffdhe2048".to_string(),
+                iana_code: 0x0100,
+                tls12_outcome: FfdheOutcome::IgnoredGroupReturnedCustomPrime,
+                tls13_outcome: FfdheOutcome::Supported,
+            }],
+        }),
+        fallback_scsv: None,
+        renegotiation: None,
+        client_auth: None,
+        probe_errors: vec![],
+    });
+
+    let ctx = fixture_ctx();
+    let record = build_scan_result(&results, &ctx);
+    let value = serde_json::to_value(&record).expect("serialize");
+    let tls12 = value
+        .pointer("/tls/ffdhe_support/ffdhe2048/tls1_2")
+        .expect("ffdhe2048.tls1_2 present");
+    assert_eq!(tls12.get("supported").unwrap().as_bool(), Some(false));
+    assert_eq!(
+        tls12.get("reason").unwrap().as_str(),
+        Some("server_ignored_group_offer_returned_custom_prime")
+    );
+}
+
+#[cfg(not(feature = "legacy-probes"))]
+#[test]
+fn legacy_probes_disabled_renders_empty_schema_sections() {
+    // Schema shape is stable regardless of feature state: the new tls.*
+    // sections still appear, they're just empty / null / not_probed.
+    let results = fixture_results();
+    let ctx = fixture_ctx();
+    let record = build_scan_result(&results, &ctx);
+    let record_value = serde_json::to_value(&record).expect("serialize");
+
+    let schema_value = load_schema();
+    let validator = jsonschema::validator_for(&schema_value).expect("schema compiles");
+    assert!(validator.iter_errors(&record_value).collect::<Vec<_>>().is_empty());
+
+    let tls = record_value.get("tls").unwrap();
+    assert_eq!(tls.get("legacy_cipher_suites").unwrap().as_array().unwrap().len(), 0);
+    assert_eq!(tls.get("dh_parameters").unwrap().as_array().unwrap().len(), 0);
+    assert_eq!(tls.get("ffdhe_support").unwrap().as_object().unwrap().len(), 0);
+    assert_eq!(
+        tls.get("renegotiation_behavior")
+            .unwrap()
+            .get("reason")
+            .unwrap()
+            .as_str(),
+        Some("feature_disabled")
+    );
+}

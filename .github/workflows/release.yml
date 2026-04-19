@@ -32,17 +32,23 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
-          # aarch64-linux cross-compile breaks on openssl-sys (native-tls
-          # dep) without cross-compiled libssl-dev on the x86 runner.
-          # arm64 users can pull the multi-arch Docker image instead.
-          # Re-enable with a cross setup (e.g. ``cross`` tool) if
-          # standalone arm64 Linux binaries become a requirement.
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+          # Unblocked by vendoring OpenSSL 3.5 LTS via the `legacy-probes`
+          # feature: openssl-src builds OpenSSL's C sources for the target
+          # triple, so we no longer need a cross-compiled libssl-dev on
+          # the x86 runner. Still ubuntu-latest here — `cross` is not
+          # required because openssl-src handles the target toolchain.
           #
-          # macOS targets also disabled — GitHub bills them at 10x the
-          # Linux rate and nothing downstream consumes them.
+          # macOS targets are disabled for now
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      - name: Install aarch64 toolchain
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu perl make
       - uses: taiki-e/upload-rust-binary-action@v1
         with:
           bin: kemist
