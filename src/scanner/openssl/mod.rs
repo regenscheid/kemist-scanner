@@ -76,6 +76,10 @@ pub struct OpensslObservations {
     pub fallback_scsv: Option<fallback_scsv::FallbackScsvResult>,
     /// D6 — Client-initiated renegotiation verdict.
     pub renegotiation: Option<renegotiation::RenegotiationObservation>,
+    /// D7 — Server `CertificateRequest` observation. `None` when the
+    /// probe's outer setup failed; `Some(req)` with `req.requested: false`
+    /// when the server did not request a client certificate.
+    pub client_auth: Option<client_auth::ClientAuthRequest>,
     /// Per-probe non-fatal errors collected during the scan. Populated so
     /// every "not probed" outcome carries a reason string rather than going
     /// silent.
@@ -122,7 +126,11 @@ pub async fn run_all_probes(cfg: &ScanConfig) -> Result<OpensslObservations, Sca
     let reneg = renegotiation::probe(cfg.target, &cfg.hostname, cfg.timeout, cfg.timeout).await;
     out.renegotiation = Some(reneg);
 
-    // D7-D8 hook in here as those modules land live.
+    // D7 — CertificateRequest capture via msg_callback.
+    let ca = client_auth::probe(cfg.target, &cfg.hostname, cfg.timeout, cfg.timeout).await;
+    out.client_auth = ca;
+
+    // D8 hooks in here as that module lands live.
 
     Ok(out)
 }
