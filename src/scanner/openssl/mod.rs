@@ -18,30 +18,30 @@ pub mod protocol_versions;
 pub mod renegotiation;
 pub mod ske_sig;
 
+use std::sync::OnceLock;
+
 use ::openssl::provider::Provider;
 
 use crate::model::errors::ScannerError;
 use crate::scanner::ScanConfig;
 
-/// Holds the OpenSSL default + legacy providers for the scanner's lifetime.
+/// Ensures the OpenSSL `default` and `legacy` providers are loaded exactly
+/// once for the lifetime of the process, then stay loaded.
 ///
-/// The legacy provider enables RC4, single-DES, MD4, and SSLv3-era primitives
-/// that the default provider excludes in OpenSSL 3.x. Both must be loaded
-/// before any `SSL_CTX` is built; the providers' lifetimes are tied to this
-/// struct via RAII.
-pub struct LegacyRuntime {
-    // Providers must stay alive for every probe; dropping them unloads the
-    // backing `OSSL_PROVIDER`. Named with leading underscore to silence the
-    // "unused field" lint — the Drop side-effect is the whole point.
-    _default: Provider,
-    _legacy: Provider,
-}
-
-impl LegacyRuntime {
-    /// Load the default + legacy providers into the global library context.
-    /// Returns a non-transient `ScannerError` on failure — the whole
-    /// legacy-probe subsystem is unavailable for this run.
-    pub fn load() -> Result<Self, ScannerError> {
+/// Implementation: `Provider::load` returns an RAII handle whose `Drop`
+/// calls `OSSL_PROVIDER_unload`. `Provider` doesn't implement `Send`/`Sync`
+/// so we can't store it in a static. Instead we intentionally
+/// `std::mem::forget` the handles after a successful load — the providers
+/// stay in OpenSSL's global registry, any thread can build `SSL_CTX`
+/// against them, and we never need to touch the handle again.
+///
+/// The return value is a `&'static Result<(), ScannerError>` — on the
+/// unlikely-but-real failure path (missing legacy provider for some
+/// vendored builds, for instance), every caller gets the same cached
+/// error rather than re-hitting the C library per probe.
+pub fn ensure_legacy_providers() -> &'static Result<(), ScannerError> {
+    static CELL: OnceLock<Result<(), ScannerError>> = OnceLock::new();
+    CELL.get_or_init(|| {
         let default = Provider::load(None, "default").map_err(|e| {
             ScannerError::openssl_provider_load_failed(format!(
                 "OSSL_PROVIDER_load(default): {e}"
@@ -52,11 +52,12 @@ impl LegacyRuntime {
                 "OSSL_PROVIDER_load(legacy): {e}"
             ))
         })?;
-        Ok(Self {
-            _default: default,
-            _legacy: legacy,
-        })
-    }
+        // Pin both providers for the process lifetime; see function
+        // docstring for why this leak is deliberate.
+        std::mem::forget(default);
+        std::mem::forget(legacy);
+        Ok(())
+    })
 }
 
 /// Aggregate output of every probe in the OpenSSL subsystem. Each Phase-D
@@ -91,7 +92,9 @@ pub struct OpensslObservations {
 /// fatal setup (provider load failure); per-probe errors land in
 /// `OpensslObservations::probe_errors` and the scan continues.
 pub async fn run_all_probes(cfg: &ScanConfig) -> Result<OpensslObservations, ScannerError> {
-    let _runtime = LegacyRuntime::load()?;
+    if let Err(e) = ensure_legacy_providers() {
+        return Err(e.clone());
+    }
 
     let mut out = OpensslObservations::default();
 

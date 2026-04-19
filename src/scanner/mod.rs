@@ -317,7 +317,22 @@ impl SslScanner {
                     .await
                 }
                 TlsVersion::Ssl3 | TlsVersion::Tls10 | TlsVersion::Tls11 => {
-                    #[cfg(feature = "native-legacy")]
+                    // Backend priority: OpenSSL (legacy-probes) > native-tls
+                    // (native-legacy) > "not probed" placeholder. The two
+                    // backend cfg branches are mutually exclusive so the
+                    // else-branch only kicks in when neither feature is on.
+                    #[cfg(feature = "legacy-probes")]
+                    {
+                        crate::scanner::openssl::protocol_versions::probe_protocol(
+                            self.config.target,
+                            &self.config.hostname,
+                            version,
+                            self.config.timeout,
+                            self.config.timeout,
+                        )
+                        .await
+                    }
+                    #[cfg(all(feature = "native-legacy", not(feature = "legacy-probes")))]
                     {
                         let legacy_scanner = crate::scanner::legacy::LegacyScanner::new(
                             self.config.target,
@@ -326,14 +341,14 @@ impl SslScanner {
                         );
                         legacy_scanner.test_legacy_protocol(version).await
                     }
-                    #[cfg(not(feature = "native-legacy"))]
+                    #[cfg(not(any(feature = "legacy-probes", feature = "native-legacy")))]
                     {
                         ProtocolSupport {
                             version,
                             supported: false,
                             error: Some(
-                                "native_legacy_feature_disabled: rebuild with \
-                                 --features native-legacy or legacy-probes to probe \
+                                "legacy_feature_disabled: rebuild with \
+                                 --features legacy-probes or native-legacy to probe \
                                  SSLv3/TLS1.0/TLS1.1"
                                     .to_string(),
                             ),
