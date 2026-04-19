@@ -9,9 +9,9 @@ evaluation lives in downstream projects.
 | Version | How | Source |
 |---|---|---|
 | SSL 2.0 | Raw TCP + hand-crafted SSL 2.0 CLIENT-HELLO (legacy msg format) | [scanner/legacy.rs::test_sslv2](../src/scanner/legacy.rs) |
-| SSL 3.0 | native-tls with min/max protocol pinned | `scanner/legacy.rs::test_legacy_protocol` |
-| TLS 1.0 | native-tls with min/max protocol pinned | same |
-| TLS 1.1 | native-tls with min/max protocol pinned | same |
+| SSL 3.0 | OpenSSL 3.5 with `min/max = SSL3`, legacy provider + seclevel 0 (with `legacy-probes`). Falls back to native-tls pinned protocol when only `native-legacy` is enabled. | [scanner/openssl/protocol_versions.rs](../src/scanner/openssl/protocol_versions.rs) / [scanner/legacy.rs::test_legacy_protocol](../src/scanner/legacy.rs) |
+| TLS 1.0 | same path as SSL 3.0 | same |
+| TLS 1.1 | same path as SSL 3.0 | same |
 | TLS 1.2 | rustls with `with_protocol_versions(&[&TLS12])` | [scanner/mod.rs::test_rustls_protocol](../src/scanner/mod.rs) |
 | TLS 1.3 | rustls with `with_protocol_versions(&[&TLS13])` | same |
 
@@ -58,6 +58,50 @@ registry.
 two handshakes with reversed cipher orderings. Same negotiated suite
 both times → `true` (server picks, ignores client order); different →
 `false` (server honors client preference).
+
+## Legacy ciphers & misconfiguration (OpenSSL subsystem)
+
+Gated by the `legacy-probes` cargo feature (default-on). Fills observation
+gaps that aws-lc-rs cannot reach: RSA-kex suites, RC4, DES/3DES, NULL,
+anon-DH, FFDHE arithmetic, TLS_FALLBACK_SCSV enforcement, client
+renegotiation behavior, and CertificateRequest contents. All probes
+run against a vendored OpenSSL 3.5 LTS (`openssl-src = "=300.5.5"`).
+
+| Observation | How | Output field | Source |
+|---|---|---|---|
+| Legacy cipher suite probe | Per-suite handshake with single-suite cipher list + SECLEVEL=0 + version pinned | `tls.legacy_cipher_suites[]` | [openssl/ciphers.rs](../src/scanner/openssl/ciphers.rs) |
+| DH parameter capture | `SSL_get_peer_tmp_key` after every successful DHE handshake; SHA-256 of prime classified against RFC 7919 | `tls.dh_parameters[]` | [openssl/dh_params.rs](../src/scanner/openssl/dh_params.rs) |
+| SKE / CertificateVerify signature | `SSL_ctrl(SSL_CTRL_GET_PEER_SIGNATURE_NAME, …)` post-handshake | `tls.server_key_exchange_signatures[]` | [openssl/ske_sig.rs](../src/scanner/openssl/ske_sig.rs) |
+| FFDHE named-group probe | `set_groups_list("ffdheNNNN")` × `{TLS 1.2 + DHE cipher list, TLS 1.3}`; cross-checks observed prime against advertised group | `tls.ffdhe_support.*` | [openssl/ffdhe.rs](../src/scanner/openssl/ffdhe.rs) |
+| TLS_FALLBACK_SCSV enforcement | Characterize server max → probe one step below with `SslMode::SEND_FALLBACK_SCSV`; expect `inappropriate_fallback` alert | `tls.downgrade_signaling.fallback_scsv_enforced` | [openssl/fallback_scsv.rs](../src/scanner/openssl/fallback_scsv.rs) |
+| Client-initiated renegotiation | TLS 1.2 handshake → `SSL_renegotiate` → `SSL_do_handshake`; observe alert / close / success | `tls.renegotiation_behavior` | [openssl/renegotiation.rs](../src/scanner/openssl/renegotiation.rs) |
+| CertificateRequest capture | `SSL_CTX_set_msg_callback` (via `SSL_CTX_callback_ctrl`) intercepting msg_type 13; parse TLS 1.2 and TLS 1.3 shapes | `tls.client_auth_request` | [openssl/client_auth.rs](../src/scanner/openssl/client_auth.rs) |
+
+Error classification for every OpenSSL probe flows through
+[openssl/alerts.rs](../src/scanner/openssl/alerts.rs) — same
+`tls_alert_<snake_name>` categories as the rustls path, so rule engines
+can key on alert categories without knowing which backend produced them.
+
+**FFDHE cross-check.** A TLS 1.2 FFDHE probe that completes a DHE
+handshake but returns a prime that doesn't match the advertised
+codepoint surfaces as
+`{supported: false, reason: "server_ignored_group_offer_returned_custom_prime"}`.
+Distinct from a plain `supported: false` — the server ignored
+`supported_groups` entirely.
+
+**CertificateRequest probe discipline.** The scanner never provisions
+a real client certificate. OpenSSL's default behavior with no cert
+configured is to send an empty `Certificate` message; the server's
+alert on that response distinguishes required from optional mTLS.
+
+**Feature-disabled rendering.** When `legacy-probes` is compiled off,
+every field above renders as `[]` / `{}` / `null` with
+`reason: "feature_disabled"` — the schema shape is stable across
+feature matrices.
+
+**Pre-1.3 protocol-version probing** (SSL 3.0, TLS 1.0, TLS 1.1) also
+moves onto this subsystem when `legacy-probes` is on; see the top of
+this document for the backend-selection table.
 
 ## Key exchange groups
 

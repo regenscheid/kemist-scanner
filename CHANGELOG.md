@@ -4,6 +4,114 @@ All notable changes to kemist are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); version
 numbers follow [semver](https://semver.org/).
 
+## [Unreleased]
+
+### Added — Legacy TLS & misconfiguration probe subsystem
+
+Fills observation gaps that rustls + aws-lc-rs cannot reach. All new
+probes are backed by vendored OpenSSL 3.5 LTS and gated behind the
+default-on `legacy-probes` cargo feature. See
+[docs/OUTPUT_SCHEMA.md](docs/OUTPUT_SCHEMA.md) for field-by-field
+semantics and [docs/CHECKS.md](docs/CHECKS.md) for per-probe mechanics.
+
+- `tls.legacy_cipher_suites` — per-suite probes for RSA-kex, RC4,
+  DES/3DES, IDEA, NULL, anon-DH, and DHE-RSA across TLS 1.0/1.1/1.2.
+  Covers the suite categories aws-lc-rs deliberately omits.
+- `tls.dh_parameters` — prime bit-length, generator, SHA-256 of the
+  prime, and classification against RFC 7919 FFDHE constants
+  (ffdhe2048…ffdhe8192 / custom). Captured on every completed DHE
+  handshake.
+- `tls.ffdhe_support` — per-group × per-version probes for the five
+  RFC 7919 codepoints. Includes a cross-check that detects servers
+  that complete a DHE handshake with a custom prime despite a
+  specific FFDHE codepoint being advertised (`supported_groups`
+  ignored).
+- `tls.server_key_exchange_signatures` — the signature algorithm the
+  server actually chose for each TLS 1.2 ServerKeyExchange / TLS 1.3
+  CertificateVerify (distinct from the algorithms it advertises).
+- `tls.downgrade_signaling.fallback_scsv_enforced` — active RFC 7507
+  probe. Attempts a handshake one protocol version below the server's
+  max with `SSL_MODE_SEND_FALLBACK_SCSV` and observes whether the
+  server returns `inappropriate_fallback`.
+- `tls.renegotiation_behavior` — active probe of client-initiated
+  renegotiation via `SSL_renegotiate` + `SSL_do_handshake`. Records
+  whether the server accepted, rejected, or did not complete.
+- `tls.client_auth_request` — server `CertificateRequest` contents
+  (`certificate_types`, accepted signature algorithms, CA DN list with
+  parsed CN/O, TLS 1.3 `oid_filters`) and the alert the server emits
+  after our empty-Certificate response — the "required mTLS vs
+  optional" signal. The scanner never sends a real client certificate.
+
+### Changed — SSLv3 / TLS 1.0 / TLS 1.1 protocol probing
+
+When `legacy-probes` is enabled (the default), SSLv3 / TLS 1.0 / TLS 1.1
+protocol-version probes run through the vendored OpenSSL path instead
+of native-tls. The output shape (`tls.versions_offered.*`) is
+unchanged. Consumers can still get native-tls coverage with
+`--no-default-features --features http-checks,native-legacy` (see
+"Build surface" below).
+
+### Changed — deprecations
+
+- `tls.downgrade_signaling.fallback_scsv_accepted` is deprecated in
+  schema v1 and always renders as
+  `{value: null, method: "not_probed", reason: "superseded_by_fallback_scsv_enforced"}`.
+  The previous implementation was a TLS 1.3-support heuristic that
+  over-reported enforcement. Scheduled for removal in schema v2;
+  consumers should migrate to `fallback_scsv_enforced`.
+- `tls.extensions.secure_renegotiation` (the RFC 5746 extension
+  advertisement, observed passively in the ServerHello) remains
+  authoritative for that signal. The new
+  `tls.renegotiation_behavior.client_initiated_verdict` is a separate
+  active-probe observation — they answer different questions.
+
+### Build surface
+
+- New optional crates in [Cargo.toml](Cargo.toml): `openssl = "0.10"`
+  with `vendored` feature; `openssl-sys = "0.9"`; `openssl-src = "=300.5.5"`
+  (exact pin — OpenSSL 3.5.5 LTS); `foreign-types = "0.3"`. All gated
+  behind the `legacy-probes` cargo feature.
+- `native-tls` and `tokio-native-tls` converted to optional; gated
+  behind the new `native-legacy` cargo feature. Both `legacy-probes`
+  and `native-legacy` ship in `default` — the stock build is
+  unchanged from the user's perspective.
+- Escape hatches for downstream packagers:
+  - `--no-default-features --features http-checks` — minimum build;
+    SSLv3/TLS1.0/TLS1.1 probing and the entire legacy-probe output
+    surface are disabled (render as empty / `feature_disabled`). The
+    schema shape stays stable.
+  - `--no-default-features --features http-checks,native-legacy` —
+    skip the OpenSSL build (no `perl` / `make` needed) but keep
+    SSLv3/TLS1.0/TLS1.1 protocol-version probes through native-tls.
+    Other legacy-probe observations are not produced in this mode.
+- [Dockerfile](Dockerfile) builder stage now installs `perl` + `make`
+  for `openssl-src`; drops `pkg-config` + `libssl-dev` (vendored
+  OpenSSL needs no system headers).
+- [deny.toml](deny.toml) `OpenSSL` license exception extended from
+  `aws-lc-sys` alone to also cover `openssl-sys` and `openssl-src`.
+- OpenSSL license text added at [LICENSE-OPENSSL](LICENSE-OPENSSL) —
+  required by the Apache-2.0 distribution terms of OpenSSL 3.x.
+
+### CVE response
+
+Pinning `openssl-src = "=300.5.5"` (exact, no caret) means every
+OpenSSL CVE is now a kemist CVE. Upgrades are deliberate: a version
+bump goes through normal review rather than floating. Recommended
+maintainer process: subscribe to `openssl-announce@openssl.org`; run
+`cargo audit` weekly in CI; gate release on green audit.
+
+### Internal
+
+- New subsystem at [src/scanner/openssl/](src/scanner/openssl/) — ten
+  submodules (`mod`, `alerts`, `ciphers`, `dh_params`, `ske_sig`,
+  `ffdhe`, `fallback_scsv`, `renegotiation`, `client_auth`,
+  `protocol_versions`). Rustls probe path is unchanged except for the
+  call site that invokes `run_all_probes`.
+- Deleted ~90 LOC of heuristic stubs in [src/scanner/mod.rs](src/scanner/mod.rs):
+  `test_fallback_scsv*`, `test_tls_renegotiation`,
+  `test_secure_renegotiation`, `test_tls_compression`.
+  Superseded by real wire probes.
+
 ## [0.1.0] — 2026-04-18
 
 Initial release. Fork of [shyuan/tlsferret](https://github.com/shyuan/tlsferret)
