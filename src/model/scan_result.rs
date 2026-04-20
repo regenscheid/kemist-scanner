@@ -470,6 +470,10 @@ pub struct CertificateFacts {
     pub embedded_scts: u32,
     pub fingerprint_sha256: String,
     pub fingerprint_sha1: String,
+    /// Parsed X.509 v3 extension observations. Always present;
+    /// serializes to `{}` when no sub-fields are populated. See
+    /// [`crate::model::cert_extensions::CertExtensions`].
+    pub extensions: crate::model::cert_extensions::CertExtensions,
 }
 
 #[derive(Serialize, Debug, Clone)]

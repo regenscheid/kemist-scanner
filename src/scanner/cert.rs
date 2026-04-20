@@ -11,8 +11,20 @@ use std::collections::HashMap;
 use std::sync::OnceLock;
 use x509_parser::prelude::*;
 
+use crate::model::cert_extensions::CertExtensions;
+
 /// RFC 6962 embedded Signed Certificate Timestamp extension OID.
 const SCT_EXTENSION_OID: &str = "1.3.6.1.4.1.11129.2.4.2";
+
+/// Extract X.509 v3 extension fields into [`CertExtensions`].
+///
+/// Step A1 placeholder: returns [`CertExtensions::default()`] — every
+/// sub-field stays `None` / empty so the serialized form is `{}`.
+/// Per-extension parsers land in steps A2–A5; this function's
+/// signature stays stable across those steps.
+pub fn extract_extensions(_cert: &X509Certificate) -> CertExtensions {
+    CertExtensions::default()
+}
 
 /// Canonical PQC signature OIDs per the kemist spec (NIST + IETF drafts).
 /// Downstream consumers look at `is_pqc_signature` first; the resolved name

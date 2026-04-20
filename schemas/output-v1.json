@@ -455,7 +455,26 @@
         },
         "embedded_scts": { "type": "integer", "minimum": 0 },
         "fingerprint_sha256": { "type": "string" },
-        "fingerprint_sha1": { "type": "string" }
+        "fingerprint_sha1": { "type": "string" },
+        "extensions": { "$ref": "#/$defs/certExtensions" }
+      },
+      "additionalProperties": false
+    },
+    "certExtensions": {
+      "type": "object",
+      "description": "X.509 v3 extension observations. Sub-fields populated by steps A2–A5; A1 emits `{}` on every cert.",
+      "properties": {
+        "basic_constraints":            { "type": "object" },
+        "key_usage":                    { "type": "object" },
+        "extended_key_usage":           { "type": "object" },
+        "authority_key_identifier":     { "type": "string" },
+        "subject_key_identifier":       { "type": "string" },
+        "authority_information_access": { "type": "object" },
+        "crl_distribution_points":      { "type": "object" },
+        "name_constraints":             { "type": "object" },
+        "certificate_policies":         { "type": "object" },
+        "must_staple":                  { "type": "boolean" },
+        "scts":                         { "type": "array" }
       },
       "additionalProperties": false
     }

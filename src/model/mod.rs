@@ -1,4 +1,5 @@
 pub mod cert;
+pub mod cert_extensions;
 pub mod cipher;
 pub mod errors;
 pub mod protocol;

@@ -5,6 +5,8 @@ use sha1::Sha1;
 use sha2::{Digest, Sha256};
 use x509_parser::prelude::*;
 
+use crate::model::cert_extensions::CertExtensions;
+
 /// Convert ASN1Time to chrono::DateTime<Utc>
 fn offset_to_chrono(asn1_time: x509_parser::time::ASN1Time) -> DateTime<Utc> {
     let offset_dt = asn1_time.to_datetime();
@@ -44,6 +46,11 @@ pub struct CertificateInfo {
     /// via extension OID 1.3.6.1.4.1.11129.2.4.2. Presence only —
     /// signatures are not validated.
     pub embedded_scts: u32,
+    /// Parsed X.509 v3 extension observations. Empty in step A1 —
+    /// per-extension extractors land in A2–A5. See
+    /// [`crate::model::cert_extensions`].
+    #[serde(default)]
+    pub extensions: CertExtensions,
 }
 
 impl CertificateInfo {
@@ -89,6 +96,7 @@ impl CertificateInfo {
         let fingerprint_sha1 = hex::encode(hasher_sha1.finalize());
 
         let embedded_scts = crate::scanner::cert::count_embedded_scts(der_data);
+        let extensions = crate::scanner::cert::extract_extensions(&cert);
 
         Ok(CertificateInfo {
             subject,
@@ -110,6 +118,7 @@ impl CertificateInfo {
             fingerprint_sha256,
             fingerprint_sha1,
             embedded_scts,
+            extensions,
         })
     }
 
