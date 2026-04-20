@@ -17,6 +17,7 @@ pub mod ffdhe;
 pub mod protocol_versions;
 pub mod renegotiation;
 pub mod ske_sig;
+pub mod tickets;
 pub mod tls13_extensions;
 
 use std::sync::OnceLock;
@@ -83,6 +84,10 @@ pub struct OpensslObservations {
     /// EncryptedExtensions (target doesn't speak TLS 1.3, or the
     /// connection failed before the message arrived).
     pub tls13_extensions: Option<tls13_extensions::Tls13EncryptedExtensions>,
+    /// Session resumption observation — TLS 1.2 ticket + rotation
+    /// today, TLS 1.3 PSK + 0-RTT stubbed for a future workstream.
+    /// `None` when the probe's outer setup failed (rare).
+    pub session_resumption: Option<crate::model::scan_result::SessionResumption>,
     /// Per-probe non-fatal errors collected during the scan. Populated so
     /// every "not probed" outcome carries a reason string rather than going
     /// silent.
@@ -139,6 +144,11 @@ pub async fn run_all_probes(cfg: &ScanConfig) -> Result<OpensslObservations, Sca
     // compress_certificate). Same msg_callback pattern as client_auth.
     let ee = tls13_extensions::probe(cfg.target, &cfg.hostname, cfg.timeout, cfg.timeout).await;
     out.tls13_extensions = Some(ee);
+
+    // Phase F — session resumption (TLS 1.2 ticket issuance +
+    // rotation; TLS 1.3 stubbed for a follow-up workstream).
+    let sr = tickets::probe(cfg.target, &cfg.hostname, cfg.timeout, cfg.timeout).await;
+    out.session_resumption = Some(sr);
 
     // D8 hooks in here as that module lands live.
 

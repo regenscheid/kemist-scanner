@@ -78,7 +78,8 @@
         "sni_behavior",
         "dh_parameters",
         "server_key_exchange_signatures",
-        "renegotiation_behavior"
+        "renegotiation_behavior",
+        "session_resumption"
       ],
       "properties": {
         "versions_offered": {
@@ -259,6 +260,7 @@
           },
           "additionalProperties": false
         },
+        "session_resumption": { "$ref": "#/$defs/sessionResumption" },
         "client_auth_request": {
           "type": ["object", "null"],
           "required": ["requested", "method"],
@@ -651,6 +653,43 @@
             "issuer_name_hash_hex":{ "type": "string" },
             "issuer_key_hash_hex": { "type": "string" },
             "serial_number_hex":   { "type": "string" }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "sessionResumption": {
+      "type": "object",
+      "description": "Session resumption observations. TLS 1.2 ticket + rotation populated via a two-connection OpenSSL probe; TLS 1.3 PSK resumption and 0-RTT are stubbed as NotProbed pending a follow-up workstream.",
+      "required": ["tls1_2", "tls1_3"],
+      "properties": {
+        "tls1_2": {
+          "type": "object",
+          "required": [
+            "session_ticket_issued",
+            "session_id_issued",
+            "ticket_rotated_across_connections"
+          ],
+          "properties": {
+            "session_ticket_issued":             { "$ref": "#/$defs/observationBool" },
+            "ticket_lifetime_hint_secs":         { "type": "integer", "minimum": 0 },
+            "session_id_issued":                 { "$ref": "#/$defs/observationBool" },
+            "ticket_rotated_across_connections": { "$ref": "#/$defs/observationBool" }
+          },
+          "additionalProperties": false
+        },
+        "tls1_3": {
+          "type": "object",
+          "required": ["psk_resumption_accepted", "early_data_accepted"],
+          "properties": {
+            "new_session_ticket_count": { "type": "integer", "minimum": 0 },
+            "ticket_lifetime_secs": {
+              "type": "array",
+              "items": { "type": "integer", "minimum": 0 }
+            },
+            "psk_resumption_accepted": { "$ref": "#/$defs/observationBool" },
+            "early_data_accepted":     { "$ref": "#/$defs/observationBool" }
           },
           "additionalProperties": false
         }

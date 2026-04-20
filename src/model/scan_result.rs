@@ -82,12 +82,27 @@ pub enum Method {
 }
 
 /// Generic `{value, method, reason?}` envelope for boolean probe-derived observations.
+///
+/// [`Default`] produces the canonical "not observed yet" shape —
+/// `value: None`, `method: NotProbed`, no reason. Useful when
+/// deriving `Default` on larger structs that contain `ObservationBool`
+/// fields (e.g. [`Tls12Resumption`]).
 #[derive(Serialize, Debug, Clone)]
 pub struct ObservationBool {
     pub value: Option<bool>,
     pub method: Method,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+}
+
+impl Default for ObservationBool {
+    fn default() -> Self {
+        Self {
+            value: None,
+            method: Method::NotProbed,
+            reason: None,
+        }
+    }
 }
 
 #[allow(dead_code)] // some constructors consumed by later PRs
@@ -157,6 +172,61 @@ pub struct Tls {
     /// didn't request client auth, or the probe couldn't run).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub client_auth_request: Option<ClientAuthRequestEntry>,
+    /// Session resumption observations — ticket issuance, lifetime
+    /// hints, rotation, TLS 1.3 NewSessionTicket count, PSK resumption
+    /// acceptance, 0-RTT acceptance. See
+    /// [`crate::model::scan_result::SessionResumption`].
+    pub session_resumption: SessionResumption,
+}
+
+/// TLS 1.2 + TLS 1.3 session resumption observations.
+#[derive(Serialize, Debug, Clone, Default)]
+pub struct SessionResumption {
+    pub tls1_2: Tls12Resumption,
+    pub tls1_3: Tls13Resumption,
+}
+
+#[derive(Serialize, Debug, Clone, Default)]
+pub struct Tls12Resumption {
+    /// Did the server send a `NewSessionTicket` handshake message
+    /// during the TLS 1.2 handshake?
+    pub session_ticket_issued: ObservationBool,
+    /// RFC 5077 ticket lifetime hint in seconds, if the server sent a
+    /// ticket. Taken from `SSL_SESSION_get_timeout` (OpenSSL's closest
+    /// proxy for the server-advertised lifetime).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ticket_lifetime_hint_secs: Option<u32>,
+    /// Did the server issue a (non-empty) session ID? On ticket-using
+    /// servers this can still be true when the server echoes an ID
+    /// for compatibility, or false when the server signals ticket-only
+    /// resumption.
+    pub session_id_issued: ObservationBool,
+    /// Did the ticket bytes change between two successive handshakes
+    /// with the same target? `true` = ticket rotation (forward
+    /// secrecy friendlier); `false` = stable ticket (the server
+    /// key that wraps the ticket is a standing secret).
+    pub ticket_rotated_across_connections: ObservationBool,
+}
+
+#[derive(Serialize, Debug, Clone, Default)]
+pub struct Tls13Resumption {
+    /// Number of `NewSessionTicket` messages received after the TLS
+    /// 1.3 handshake. RFC 8446 §4.6.1 lets servers send multiple;
+    /// operators often configure 1 or 2.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub new_session_ticket_count: Option<u32>,
+    /// Per-ticket lifetime from `SSL_SESSION_get_timeout`. Empty
+    /// when no tickets were observed.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub ticket_lifetime_secs: Vec<u32>,
+    /// Did a second handshake, using the saved session from the first,
+    /// resume via PSK rather than a full handshake?
+    /// (`SSL_session_reused` on the resumed connection.)
+    pub psk_resumption_accepted: ObservationBool,
+    /// Did the server accept 0-RTT / early_data on the resumed
+    /// handshake? `NotProbed` until a future workstream wires
+    /// `SSL_write_early_data`.
+    pub early_data_accepted: ObservationBool,
 }
 
 /// Per-version `{offered, method, reason?}` envelope. Field name differs from `value` per spec.

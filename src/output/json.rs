@@ -150,6 +150,7 @@ fn build_tls(results: &ScanResults, ctx: &JsonEmitContext) -> Tls {
         dh_parameters: build_dh_parameters(results),
         server_key_exchange_signatures: build_ske_sigs(results),
         renegotiation_behavior: build_renegotiation_behavior(results),
+        session_resumption: build_session_resumption(results),
         client_auth_request: build_client_auth_request(results),
     }
 }
@@ -891,6 +892,37 @@ fn feature_disabled_reneg() -> RenegotiationBehavior {
         client_initiated_verdict: None,
         method: Method::NotProbed,
         reason: Some("feature_disabled".to_string()),
+    }
+}
+
+fn build_session_resumption(results: &ScanResults) -> crate::model::scan_result::SessionResumption {
+    use crate::model::scan_result::{
+        ObservationBool, SessionResumption, Tls12Resumption, Tls13Resumption,
+    };
+
+    #[cfg(feature = "legacy-probes")]
+    {
+        if let Some(obs) = results.openssl_observations.as_ref() {
+            if let Some(sr) = obs.session_resumption.as_ref() {
+                return sr.clone();
+            }
+        }
+    }
+    let _ = results;
+    // http-checks-only / probe didn't run → stable NotProbed shape.
+    SessionResumption {
+        tls1_2: Tls12Resumption {
+            session_ticket_issued: ObservationBool::not_probed("feature_disabled"),
+            ticket_lifetime_hint_secs: None,
+            session_id_issued: ObservationBool::not_probed("feature_disabled"),
+            ticket_rotated_across_connections: ObservationBool::not_probed("feature_disabled"),
+        },
+        tls1_3: Tls13Resumption {
+            new_session_ticket_count: None,
+            ticket_lifetime_secs: Vec::new(),
+            psk_resumption_accepted: ObservationBool::not_probed("feature_disabled"),
+            early_data_accepted: ObservationBool::not_probed("feature_disabled"),
+        },
     }
 }
 

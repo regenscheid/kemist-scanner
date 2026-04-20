@@ -447,7 +447,11 @@ fn render_legacy_probes(r: &ScanResult) {
             .renegotiation_behavior
             .client_initiated_verdict
             .is_some()
-        || has_scsv_signal;
+        || has_scsv_signal
+        || matches!(
+            tls.session_resumption.tls1_2.session_ticket_issued.method,
+            Method::Probe | Method::ConnectionState
+        );
     if !anything {
         return;
     }
@@ -457,6 +461,33 @@ fn render_legacy_probes(r: &ScanResult) {
     render_downgrade_signaling(scsv);
     render_renegotiation_behavior(&tls.renegotiation_behavior);
     render_client_auth_request(tls.client_auth_request.as_ref());
+    render_session_resumption(&tls.session_resumption);
+}
+
+fn render_session_resumption(sr: &crate::model::scan_result::SessionResumption) {
+    // Only render when at least one slot has a probed observation —
+    // keeps the text output compact when the probe is feature-
+    // disabled or the handshake never completed.
+    let tls12_has_signal = matches!(
+        sr.tls1_2.session_ticket_issued.method,
+        Method::Probe | Method::ConnectionState
+    );
+    if !tls12_has_signal {
+        return;
+    }
+    section("Session resumption");
+    print_obs_bool(
+        "tls1_2.session_ticket_issued",
+        &sr.tls1_2.session_ticket_issued,
+    );
+    if let Some(secs) = sr.tls1_2.ticket_lifetime_hint_secs {
+        kv("tls1_2.ticket_lifetime_hint_secs", &secs.to_string());
+    }
+    print_obs_bool("tls1_2.session_id_issued", &sr.tls1_2.session_id_issued);
+    print_obs_bool(
+        "tls1_2.ticket_rotated_across_connections",
+        &sr.tls1_2.ticket_rotated_across_connections,
+    );
 }
 
 fn render_dh_parameters(entries: &[DhParametersObservation]) {
