@@ -54,6 +54,12 @@ pub struct NegotiatedState {
     pub signature_scheme: Option<String>,
     pub ocsp_stapled: bool,
     pub ocsp_response_len: usize,
+    /// Raw DER bytes of the OCSP response rustls handed to
+    /// `verify_server_cert`. `None` when no staple was delivered.
+    /// Consumers (the JSON output builder) may parse these via
+    /// [`crate::model::ocsp_response::parse`] or emit them verbatim
+    /// as hex behind a CLI flag.
+    pub ocsp_response_bytes: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone)]
@@ -149,7 +155,7 @@ pub async fn characterize_connection(
         .alpn_protocol()
         .map(|b| String::from_utf8_lossy(b).into_owned());
 
-    let (sig_scheme, ocsp_len, cert_bytes) = collector.take_state();
+    let (sig_scheme, ocsp_bytes, cert_bytes) = collector.take_state();
 
     let certificates = decode_certs(&cert_bytes);
 
@@ -157,6 +163,7 @@ pub async fn characterize_connection(
     // handshake above. See probe module docs for why these are independent.
     let validation = evaluate_validation(&cert_bytes, &certificates, hostname);
 
+    let ocsp_len = ocsp_bytes.as_ref().map(|v| v.len()).unwrap_or(0);
     let negotiated = Some(NegotiatedState {
         version,
         cipher_suite_name,
@@ -167,6 +174,7 @@ pub async fn characterize_connection(
         signature_scheme: sig_scheme,
         ocsp_stapled: ocsp_len > 0,
         ocsp_response_len: ocsp_len,
+        ocsp_response_bytes: ocsp_bytes,
     });
 
     Ok(CharacterizationOutput {
@@ -345,16 +353,19 @@ fn decode_certs(raw: &[Vec<u8>]) -> Vec<CertificateInfo> {
 #[derive(Debug, Default)]
 struct StateCollector {
     certs: Mutex<Vec<Vec<u8>>>,
-    ocsp_response_len: Mutex<usize>,
+    /// Raw OCSP response bytes rustls hands us in
+    /// `verify_server_cert`. `None` when no staple was present.
+    /// Length is exposed as `.len()` on the captured bytes.
+    ocsp_response: Mutex<Option<Vec<u8>>>,
     signature_scheme: Mutex<Option<String>>,
 }
 
 impl StateCollector {
-    fn take_state(&self) -> (Option<String>, usize, Vec<Vec<u8>>) {
+    fn take_state(&self) -> (Option<String>, Option<Vec<u8>>, Vec<Vec<u8>>) {
         let sig = self.signature_scheme.lock().ok().and_then(|g| g.clone());
-        let ocsp_len = self.ocsp_response_len.lock().map(|g| *g).unwrap_or(0);
+        let ocsp = self.ocsp_response.lock().ok().and_then(|mut g| g.take());
         let certs = self.certs.lock().map(|g| g.clone()).unwrap_or_default();
-        (sig, ocsp_len, certs)
+        (sig, ocsp, certs)
     }
 
     fn record_signature(&self, s: SignatureScheme) {
@@ -379,8 +390,10 @@ impl ServerCertVerifier for StateCollector {
                 guard.push(i.to_vec());
             }
         }
-        if let Ok(mut guard) = self.ocsp_response_len.lock() {
-            *guard = ocsp_response.len();
+        if !ocsp_response.is_empty() {
+            if let Ok(mut guard) = self.ocsp_response.lock() {
+                *guard = Some(ocsp_response.to_vec());
+            }
         }
         debug!(
             "characterize verifier: captured {} cert(s), OCSP {} bytes",

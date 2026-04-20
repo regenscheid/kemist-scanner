@@ -99,6 +99,15 @@ struct Args {
     #[arg(long, value_name = "URL")]
     user_agent_info_url: Option<String>,
 
+    /// Emit the raw DER bytes of every stapled OCSP response as
+    /// lower-case hex under `tls.extensions.ocsp_stapling.raw_hex`.
+    /// Off by default — the parsed `content` sub-object usually
+    /// carries everything a rule engine needs, and raw bytes bloat
+    /// output size. Turn on when debugging or when downstream needs
+    /// to re-validate signatures.
+    #[arg(long)]
+    include_ocsp_raw: bool,
+
     /// Increase logging verbosity (-v info, -vv debug, -vvv trace).
     #[arg(short, long, action = clap::ArgAction::Count)]
     verbose: u8,
@@ -182,6 +191,7 @@ async fn run() -> Result<()> {
         config_paths: vec![],
         enable_http_checks: args.enable_http_checks,
         user_agent_info_url,
+        include_ocsp_raw: args.include_ocsp_raw,
     });
 
     let results = scanner.scan_many(targets).await;

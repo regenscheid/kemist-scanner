@@ -62,6 +62,11 @@ pub struct ScannerConfig {
     /// `kemist/<ver> (+<url>)`. Let server operators trace requests
     /// back to a kemist scan.
     pub user_agent_info_url: String,
+    /// Emit `tls.extensions.ocsp_stapling.raw_hex` (hex of the raw
+    /// OCSP response bytes) alongside the parsed `content`. Off by
+    /// default — rule engines rarely need the raw bytes, and
+    /// including them inflates per-scan JSON size noticeably.
+    pub include_ocsp_raw: bool,
 }
 
 impl Default for ScannerConfig {
@@ -80,6 +85,7 @@ impl Default for ScannerConfig {
             config_paths: Vec::new(),
             enable_http_checks: false,
             user_agent_info_url: "https://www.kemist-tls.net".to_string(),
+            include_ocsp_raw: false,
         }
     }
 }
@@ -130,6 +136,7 @@ impl Scanner {
             completed_at,
             enabled_features: self.config.enabled_features.clone(),
             config_paths: self.config.config_paths.clone(),
+            include_ocsp_raw: self.config.include_ocsp_raw,
         };
         build_scan_result(&probe_results, &ctx)
     }
@@ -290,6 +297,7 @@ impl Scanner {
             completed_at,
             enabled_features: self.config.enabled_features.clone(),
             config_paths: self.config.config_paths.clone(),
+            include_ocsp_raw: self.config.include_ocsp_raw,
         };
         build_scan_result(&probe_results, &ctx)
     }

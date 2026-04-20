@@ -159,7 +159,17 @@
                 "stapled": { "type": ["boolean", "null"] },
                 "method": { "$ref": "#/$defs/method" },
                 "reason": { "type": "string" },
-                "response_length": { "type": "integer", "minimum": 0 }
+                "response_length": { "type": "integer", "minimum": 0 },
+                "content": { "$ref": "#/$defs/ocspResponseContent" },
+                "delivery_path": {
+                  "type": "string",
+                  "enum": ["tls1_2", "tls1_3"],
+                  "description": "TLS layer the staple arrived over — CertificateStatus (tls1_2) or status_request in EncryptedExtensions (tls1_3)."
+                },
+                "raw_hex": {
+                  "type": "string",
+                  "description": "Raw DER bytes of the OCSP response, lower-case hex. Gated by `--include-ocsp-raw`."
+                }
               },
               "additionalProperties": false
             },
@@ -581,6 +591,47 @@
             },
             "additionalProperties": false
           }
+        }
+      },
+      "additionalProperties": false
+    },
+    "ocspResponseContent": {
+      "type": "object",
+      "description": "Parsed BasicOCSPResponse per RFC 6960 §4.2. Every field optional except `response_status`; parser is best-effort and tolerant of partial data.",
+      "required": ["response_status", "single_responses_count"],
+      "properties": {
+        "response_status": {
+          "type": "string",
+          "description": "RFC 6960 OCSPResponseStatus: successful, malformedRequest, internalError, tryLater, sigRequired, unauthorized, or unknown_<n>."
+        },
+        "signature_algorithm_oid": { "type": "string" },
+        "responder_id_by_name":    { "type": "string" },
+        "responder_id_by_key":     { "type": "string" },
+        "produced_at":             { "type": "string", "format": "date-time" },
+        "single_responses_count":  { "type": "integer", "minimum": 0 },
+        "cert_status": {
+          "type": "string",
+          "enum": ["good", "revoked", "unknown"]
+        },
+        "revocation_time":   { "type": "string", "format": "date-time" },
+        "revocation_reason": { "type": "string" },
+        "this_update":       { "type": "string", "format": "date-time" },
+        "next_update":       { "type": "string", "format": "date-time" },
+        "cert_id": {
+          "type": "object",
+          "required": [
+            "hash_algorithm_oid",
+            "issuer_name_hash_hex",
+            "issuer_key_hash_hex",
+            "serial_number_hex"
+          ],
+          "properties": {
+            "hash_algorithm_oid":  { "type": "string" },
+            "issuer_name_hash_hex":{ "type": "string" },
+            "issuer_key_hash_hex": { "type": "string" },
+            "serial_number_hex":   { "type": "string" }
+          },
+          "additionalProperties": false
         }
       },
       "additionalProperties": false

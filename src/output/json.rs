@@ -33,6 +33,10 @@ pub struct JsonEmitContext {
     pub completed_at: DateTime<Utc>,
     pub enabled_features: Vec<String>,
     pub config_paths: Vec<String>,
+    /// Emit raw OCSP response bytes as hex alongside the parsed
+    /// `content`. Gated by the `--include-ocsp-raw` CLI flag so most
+    /// scans produce compact output.
+    pub include_ocsp_raw: bool,
 }
 
 pub fn build_scan_result(results: &ScanResults, ctx: &JsonEmitContext) -> ScanResult {
@@ -57,7 +61,7 @@ pub fn build_scan_result(results: &ScanResults, ctx: &JsonEmitContext) -> ScanRe
             completed_at: ctx.completed_at,
             duration_ms,
         },
-        tls: build_tls(results),
+        tls: build_tls(results, ctx),
         certificates: build_certificates(&results.certificate_chain),
         validation: build_validation(results),
         http: build_http(results),
@@ -122,13 +126,13 @@ fn build_capabilities(ctx: &JsonEmitContext) -> Capabilities {
     }
 }
 
-fn build_tls(results: &ScanResults) -> Tls {
+fn build_tls(results: &ScanResults, ctx: &JsonEmitContext) -> Tls {
     Tls {
         versions_offered: build_versions_offered(&results.protocol_support),
         negotiated: build_negotiated_from_state(results),
         cipher_suites: build_cipher_suites(results),
         groups: build_groups(results),
-        extensions: build_extensions(results),
+        extensions: build_extensions(results, ctx),
         downgrade_signaling: DowngradeSignaling {
             // Deprecated-in-place for v1: always renders null with a
             // supersession reason, regardless of the (now-deleted)
@@ -411,7 +415,7 @@ fn merge_openssl_ffdhe(results: &ScanResults, out: &mut TlsGroups) {
     }
 }
 
-fn build_extensions(results: &ScanResults) -> TlsExtensions {
+fn build_extensions(results: &ScanResults, ctx: &JsonEmitContext) -> TlsExtensions {
     // The byte probe runs its own TLS 1.2 handshake independent of the
     // main characterization. If the probe negotiated TLS 1.3 (possible if
     // the server is strict-1.3), ems/etm/reneg are genuinely
@@ -470,20 +474,7 @@ fn build_extensions(results: &ScanResults) -> TlsExtensions {
         .map(|c| vec![c])
         .unwrap_or_default();
 
-    let ocsp_stapling = match &results.negotiated {
-        Some(n) => OcspStapling {
-            stapled: Some(n.ocsp_stapled),
-            method: Method::ConnectionState,
-            reason: None,
-            response_length: n.ocsp_response_len as u64,
-        },
-        None => OcspStapling {
-            stapled: None,
-            method: Method::NotProbed,
-            reason: Some("characterization_handshake_failed".to_string()),
-            response_length: 0,
-        },
-    };
+    let ocsp_stapling = build_ocsp_stapling(results, ctx);
 
     // SCT delivery paths. Embedded (cert extension) is counted in PR 6
     // via CertificateInfo.embedded_scts. ext_path comes from the hello
@@ -534,6 +525,70 @@ fn build_extensions(results: &ScanResults) -> TlsExtensions {
         max_fragment_length,
         record_size_limit,
         compress_certificate_algorithms,
+    }
+}
+
+/// Build the [`OcspStapling`] slot from the characterization
+/// handshake's captured OCSP bytes. Populates:
+///
+/// - `stapled` — whether any bytes were captured
+/// - `response_length` — byte count
+/// - `content` — parsed [`OcspResponseContent`] (RFC 6960 §4.2) via
+///   [`crate::model::ocsp_response::parse`]
+/// - `delivery_path` — `"tls1_3"` if TLS 1.3 was negotiated,
+///   `"tls1_2"` otherwise, `None` when the handshake didn't complete
+/// - `raw_hex` — hex of the bytes, only when `ctx.include_ocsp_raw`
+///   is set
+///
+/// When the handshake failed entirely we emit a `NotProbed` shape
+/// with a reason so consumers can distinguish "scanner never got a
+/// staple" from "server didn't send one."
+fn build_ocsp_stapling(results: &ScanResults, ctx: &JsonEmitContext) -> OcspStapling {
+    use crate::model::ocsp_response;
+
+    let Some(negotiated) = &results.negotiated else {
+        return OcspStapling {
+            stapled: None,
+            method: Method::NotProbed,
+            reason: Some("characterization_handshake_failed".to_string()),
+            response_length: 0,
+            content: None,
+            delivery_path: None,
+            raw_hex: None,
+        };
+    };
+
+    let delivery_path = match negotiated.version {
+        Some(crate::model::protocol::TlsVersion::Tls13) => Some("tls1_3".to_string()),
+        Some(_) => Some("tls1_2".to_string()),
+        None => None,
+    };
+
+    // Parse the captured bytes. Parse errors land in `reason` so
+    // consumers see why `content` is absent rather than silently
+    // dropping the observation.
+    let (content, parse_reason) = match negotiated.ocsp_response_bytes.as_deref() {
+        Some(bytes) if !bytes.is_empty() => match ocsp_response::parse(bytes) {
+            Ok(c) => (Some(c), None),
+            Err(e) => (None, Some(format!("ocsp_parse_failed:{e}"))),
+        },
+        _ => (None, None),
+    };
+
+    let raw_hex = if ctx.include_ocsp_raw {
+        negotiated.ocsp_response_bytes.as_ref().map(hex::encode)
+    } else {
+        None
+    };
+
+    OcspStapling {
+        stapled: Some(negotiated.ocsp_stapled),
+        method: Method::ConnectionState,
+        reason: parse_reason,
+        response_length: negotiated.ocsp_response_len as u64,
+        content,
+        delivery_path,
+        raw_hex,
     }
 }
 

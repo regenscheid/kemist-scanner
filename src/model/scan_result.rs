@@ -356,6 +356,22 @@ pub struct OcspStapling {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
     pub response_length: u64,
+    /// Parsed OCSP response content — `None` when no staple was
+    /// delivered, or when the bytes didn't parse as a well-formed
+    /// OCSPResponse. See [`crate::model::ocsp_response`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<crate::model::ocsp_response::OcspResponseContent>,
+    /// TLS version the staple was delivered over — `"tls1_2"` (via
+    /// CertificateStatus) or `"tls1_3"` (via status_request in
+    /// EncryptedExtensions). Absent when no staple or version
+    /// indeterminate.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delivery_path: Option<String>,
+    /// Raw OCSP response bytes, lower-case hex. Gated behind the
+    /// `--include-ocsp-raw` CLI flag — most scans don't need the
+    /// bytes in output.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub raw_hex: Option<String>,
 }
 
 #[derive(Serialize, Debug, Clone)]

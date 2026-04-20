@@ -79,6 +79,7 @@ fn fixture_ctx() -> JsonEmitContext {
         completed_at: Utc.with_ymd_and_hms(2026, 4, 17, 14, 0, 8).unwrap(),
         enabled_features: vec![],
         config_paths: vec![],
+        include_ocsp_raw: false,
     }
 }
 

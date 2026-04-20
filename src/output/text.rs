@@ -339,12 +339,42 @@ fn render_extensions(r: &ScanResult) {
     // ocsp_stapling is a struct, not Observation<bool> — render inline.
     let ocsp = &ext.ocsp_stapling;
     match (ocsp.stapled, &ocsp.method) {
-        (Some(true), _) => println!(
-            "  {:<22} {} ({} bytes)",
-            "ocsp_stapling:",
-            "true".green(),
-            ocsp.response_length
-        ),
+        (Some(true), _) => {
+            let delivery = ocsp.delivery_path.as_deref().unwrap_or("?");
+            println!(
+                "  {:<22} {} ({} bytes, {})",
+                "ocsp_stapling:",
+                "true".green(),
+                ocsp.response_length,
+                delivery
+            );
+            if let Some(c) = &ocsp.content {
+                let status = c.cert_status.as_deref().unwrap_or("?");
+                let status_colored = match status {
+                    "good" => "good".green().to_string(),
+                    "revoked" => "revoked".red().bold().to_string(),
+                    "unknown" => "unknown".yellow().to_string(),
+                    other => other.to_string(),
+                };
+                println!(
+                    "  {:<22} {} / cert_status={}",
+                    "", c.response_status, status_colored
+                );
+                if let (Some(this), Some(next)) = (&c.this_update, &c.next_update) {
+                    println!(
+                        "  {:<22} thisUpdate={} nextUpdate={}",
+                        "",
+                        this.format("%Y-%m-%d %H:%M"),
+                        next.format("%Y-%m-%d %H:%M")
+                    );
+                }
+                if let Some(reason) = &c.revocation_reason {
+                    println!("  {:<22} revocation_reason={}", "", reason.red());
+                }
+            } else if let Some(reason) = &ocsp.reason {
+                println!("  {:<22} ({})", "", reason.yellow());
+            }
+        }
         (Some(false), _) => println!("  {:<22} {}", "ocsp_stapling:", "false".dimmed()),
         (None, m) => println!(
             "  {:<22} {} [{}]",
