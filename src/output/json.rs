@@ -225,6 +225,7 @@ fn build_cipher_suites(results: &ScanResults) -> TlsCipherSuites {
                 ProbeOutcome::Error(e) => (None, Method::Error, Some(e.clone())),
             };
             let entry = CipherSuiteEntry {
+                classification: crate::model::cipher_classification::classify(&r.name),
                 name: r.name.clone(),
                 iana_code: format!("0x{:04X}", r.iana_code),
                 supported,
@@ -285,6 +286,7 @@ fn merge_openssl_cipher_probes(
                 LegacyProbeOutcome::Error(e) => (None, Method::Error, Some(e.clone())),
             };
             let entry = CipherSuiteEntry {
+                classification: crate::model::cipher_classification::classify(&r.name),
                 name: r.name.clone(),
                 iana_code: format!("0x{:04X}", r.iana_code),
                 supported,

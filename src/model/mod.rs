@@ -1,6 +1,7 @@
 pub mod cert;
 pub mod cert_extensions;
 pub mod cipher;
+pub mod cipher_classification;
 pub mod errors;
 pub mod ocsp_response;
 pub mod protocol;

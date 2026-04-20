@@ -239,6 +239,10 @@ pub struct CipherSuiteEntry {
     /// OpenSSL legacy/misconfig path.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
+    /// Classification family (kx + privacy posture) per
+    /// [`crate::model::cipher_classification::classify`]. Always
+    /// present — the classifier is total.
+    pub classification: crate::model::cipher_classification::CipherClassification,
 }
 
 #[derive(Serialize, Debug, Clone)]

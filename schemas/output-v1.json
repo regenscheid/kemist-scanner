@@ -400,7 +400,7 @@
     },
     "cipherSuiteEntry": {
       "type": "object",
-      "required": ["name", "iana_code", "supported", "method"],
+      "required": ["name", "iana_code", "supported", "method", "classification"],
       "properties": {
         "name": { "type": "string" },
         "iana_code": { "type": "string", "pattern": "^0x[0-9A-Fa-f]{4}$" },
@@ -408,7 +408,28 @@
         "method": { "$ref": "#/$defs/method" },
         "reason": { "type": "string" },
         "openssl_name": { "type": "string" },
-        "provider": { "type": "string", "enum": ["aws_lc_rs", "openssl"] }
+        "provider": { "type": "string", "enum": ["aws_lc_rs", "openssl"] },
+        "classification": {
+          "type": "string",
+          "description": "Kx + privacy family per src/model/cipher_classification.rs. Values are stable within schema v1.x; new values may be added.",
+          "enum": [
+            "rsa_kex",
+            "dhe_aead",
+            "dhe_cbc",
+            "ecdhe_aead",
+            "ecdhe_cbc",
+            "anon",
+            "export",
+            "static_dh",
+            "static_ecdh",
+            "psk",
+            "dhe_psk",
+            "ecdhe_psk",
+            "rsa_psk",
+            "null_cipher",
+            "other"
+          ]
+        }
       },
       "additionalProperties": false,
       "allOf": [
