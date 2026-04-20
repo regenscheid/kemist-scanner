@@ -38,7 +38,7 @@
 //!   record the alert as the reason.
 //! - TCP/timeout → `not_probed` with the failure reason.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::time::Duration;
 
@@ -50,11 +50,20 @@ use tracing::debug;
 use crate::model::errors::ScannerError;
 
 /// Extensions we look for in ServerHello. Not all servers echo every one.
+const EXT_TRUNCATED_HMAC: u16 = 4; // RFC 6066 §7 — deprecated but still observed.
+const EXT_SUPPORTED_POINT_FORMATS: u16 = 11; // RFC 4492 / 8422 §5.1.2.
 const EXT_HEARTBEAT: u16 = 15;
 const EXT_SIGNED_CERT_TIMESTAMP: u16 = 18;
 const EXT_ENCRYPT_THEN_MAC: u16 = 22;
 const EXT_EXTENDED_MASTER_SECRET: u16 = 23;
+const EXT_NPN: u16 = 13172; // Google's pre-ALPN protocol negotiation.
 const EXT_RENEGOTIATION_INFO: u16 = 0xff01;
+
+/// RFC 8446 §4.1.3 downgrade-protection sentinel bytes. Placed in the
+/// last 8 bytes of ServerRandom by a TLS 1.3-capable server that
+/// negotiated a lower version.
+const SENTINEL_TLS12: &[u8; 8] = b"DOWNGRD\x01"; // 44 4F 57 4E 47 52 44 01
+const SENTINEL_LTE_TLS11: &[u8; 8] = b"DOWNGRD\x00"; // 44 4F 57 4E 47 52 44 00
 
 /// Result of the byte-level ServerHello probe.
 #[derive(Debug, Clone, Default)]
@@ -79,6 +88,23 @@ pub struct HelloExtensionsObserved {
     pub compression_selected: Option<String>,
     /// Whether the server sent SCTs via TLS extension 18 (RFC 6962 §3.3).
     pub sct_via_tls_extension: bool,
+    /// Server echoed the truncated_hmac extension (RFC 6066 §7). Rare on
+    /// modern deployments; presence signals an older / less-hardened stack.
+    pub truncated_hmac: Option<bool>,
+    /// Server advertised Next Protocol Negotiation (Google pre-standard,
+    /// superseded by ALPN). Observed via presence only.
+    pub npn: Option<bool>,
+    /// Canonical names of EC point formats echoed by the server (RFC 4492
+    /// §5.1.2 / RFC 8422). Typical values: `"uncompressed"`,
+    /// `"ansiX962_compressed_prime"`, `"ansiX962_compressed_char2"`.
+    /// Empty when the server didn't echo the extension.
+    pub supported_point_formats_echoed: Vec<String>,
+    /// RFC 8446 §4.1.3 downgrade-protection sentinel observed in the last
+    /// 8 bytes of ServerRandom. One of `"tls12"` (server is TLS
+    /// 1.3-capable but negotiated TLS 1.2), `"lte_tls11"` (server
+    /// negotiated TLS 1.1 or lower), or `"none"` (no sentinel match).
+    /// `None` when we never got a parseable ServerHello.
+    pub tls13_downgrade_sentinel: Option<String>,
     /// Human-readable failure reason when `server_hello_parsed` is false.
     pub error: Option<String>,
 }
@@ -246,6 +272,9 @@ fn parse_server_hello(bytes: &[u8], out: &mut HelloExtensionsObserved) {
     }
     let version = u16::from_be_bytes([hs_body[p], hs_body[p + 1]]);
     out.server_negotiated_version = Some(version);
+    // Capture the downgrade-protection sentinel (RFC 8446 §4.1.3) from
+    // the trailing 8 bytes of ServerRandom BEFORE advancing past it.
+    out.tls13_downgrade_sentinel = Some(classify_downgrade_sentinel(&hs_body[2 + 24..2 + 32]));
     p += 2 + 32; // version + random
 
     let sid_len = hs_body[p] as usize;
@@ -274,6 +303,8 @@ fn parse_server_hello(bytes: &[u8], out: &mut HelloExtensionsObserved) {
         out.encrypt_then_mac = Some(false);
         out.heartbeat_present = Some(false);
         out.secure_renegotiation = Some(false);
+        out.truncated_hmac = Some(false);
+        out.npn = Some(false);
         return;
     }
 
@@ -290,27 +321,80 @@ fn parse_server_hello(bytes: &[u8], out: &mut HelloExtensionsObserved) {
 
     let seen = walk_extensions(ext_bytes);
 
-    out.ems = Some(seen.contains(&EXT_EXTENDED_MASTER_SECRET));
-    out.encrypt_then_mac = Some(seen.contains(&EXT_ENCRYPT_THEN_MAC));
-    out.heartbeat_present = Some(seen.contains(&EXT_HEARTBEAT));
-    out.secure_renegotiation = Some(seen.contains(&EXT_RENEGOTIATION_INFO));
-    out.sct_via_tls_extension = seen.contains(&EXT_SIGNED_CERT_TIMESTAMP);
+    out.ems = Some(seen.contains_key(&EXT_EXTENDED_MASTER_SECRET));
+    out.encrypt_then_mac = Some(seen.contains_key(&EXT_ENCRYPT_THEN_MAC));
+    out.heartbeat_present = Some(seen.contains_key(&EXT_HEARTBEAT));
+    out.secure_renegotiation = Some(seen.contains_key(&EXT_RENEGOTIATION_INFO));
+    out.sct_via_tls_extension = seen.contains_key(&EXT_SIGNED_CERT_TIMESTAMP);
+    out.truncated_hmac = Some(seen.contains_key(&EXT_TRUNCATED_HMAC));
+    out.npn = Some(seen.contains_key(&EXT_NPN));
+
+    if let Some(body) = seen.get(&EXT_SUPPORTED_POINT_FORMATS) {
+        out.supported_point_formats_echoed = parse_point_formats(body);
+    }
 }
 
-fn walk_extensions(bytes: &[u8]) -> HashSet<u16> {
-    let mut seen = HashSet::new();
+/// Walk a flat TLS extensions block into `{type → body bytes}`.
+///
+/// Replaces an older `HashSet<u16>` presence-only variant — Phase B
+/// needs access to extension contents (supported_point_formats) for a
+/// few observations, and storing the bodies is cheap since the
+/// ServerHello extension block is at most a few hundred bytes.
+fn walk_extensions(bytes: &[u8]) -> HashMap<u16, &[u8]> {
+    let mut seen = HashMap::new();
     let mut i = 0;
     while i + 4 <= bytes.len() {
         let ty = u16::from_be_bytes([bytes[i], bytes[i + 1]]);
         let len = u16::from_be_bytes([bytes[i + 2], bytes[i + 3]]) as usize;
-        if i + 4 + len > bytes.len() {
+        let body_end = i + 4 + len;
+        if body_end > bytes.len() {
             debug!("extension {} claims length overruns buffer", ty);
             break;
         }
-        seen.insert(ty);
-        i += 4 + len;
+        seen.insert(ty, &bytes[i + 4..body_end]);
+        i = body_end;
     }
     seen
+}
+
+/// Parse a `supported_point_formats` extension body (RFC 4492 §5.1.2).
+///
+/// Structure: `length(1) | point_format(1) *`. We render canonical
+/// names for the IANA-allocated values; unknown bytes render as
+/// `0xNN` for downstream visibility.
+fn parse_point_formats(body: &[u8]) -> Vec<String> {
+    let Some((&len, rest)) = body.split_first() else {
+        return Vec::new();
+    };
+    let len = len as usize;
+    let entries = rest.get(..len).unwrap_or(rest);
+    entries
+        .iter()
+        .map(|b| match b {
+            0 => "uncompressed".to_string(),
+            1 => "ansiX962_compressed_prime".to_string(),
+            2 => "ansiX962_compressed_char2".to_string(),
+            other => format!("0x{:02X}", other),
+        })
+        .collect()
+}
+
+/// Classify the trailing 8 bytes of ServerRandom against the RFC 8446
+/// §4.1.3 downgrade-protection sentinels.
+///
+/// A TLS 1.3-capable server that negotiates a lower version MUST set
+/// these bytes so a fully-TLS-1.3 client can detect the downgrade.
+/// Because kemist's byte probe always offers TLS 1.2, the sentinel
+/// doubles as a signal that "this server has TLS 1.3 support even
+/// though we landed on 1.2."
+fn classify_downgrade_sentinel(last_eight: &[u8]) -> String {
+    if last_eight == SENTINEL_TLS12 {
+        "tls12".to_string()
+    } else if last_eight == SENTINEL_LTE_TLS11 {
+        "lte_tls11".to_string()
+    } else {
+        "none".to_string()
+    }
 }
 
 fn compression_name(id: u8) -> String {
@@ -375,6 +459,12 @@ fn build_tls12_client_hello(sni: &str) -> Vec<u8> {
     append_extension(&mut exts, EXT_EXTENDED_MASTER_SECRET, &[]);
     append_extension(&mut exts, EXT_SIGNED_CERT_TIMESTAMP, &[]);
     append_extension(&mut exts, EXT_RENEGOTIATION_INFO, &[0x00]); // empty
+                                                                  // Observability-only offers — we don't negotiate truncated_hmac
+                                                                  // (deprecated, RFC 6066 §7) or NPN (deprecated by ALPN), but
+                                                                  // offering lets us record whether the server still implements
+                                                                  // them. Servers that ignore unknown extensions silently drop these.
+    append_extension(&mut exts, EXT_TRUNCATED_HMAC, &[]);
+    append_extension(&mut exts, EXT_NPN, &[]);
 
     ch.extend_from_slice(&(exts.len() as u16).to_be_bytes());
     ch.extend_from_slice(&exts);
@@ -479,12 +569,13 @@ mod tests {
         let mut buf = Vec::new();
         append_extension(&mut buf, 22, &[]);
         append_extension(&mut buf, 23, &[]);
-        append_extension(&mut buf, 0xff01, &[0x00]);
+        append_extension(&mut buf, 0xff01, &[0x00, 0x11, 0x22]);
         let seen = walk_extensions(&buf);
-        assert!(seen.contains(&22));
-        assert!(seen.contains(&23));
-        assert!(seen.contains(&0xff01));
-        assert!(!seen.contains(&15));
+        assert!(seen.contains_key(&22));
+        assert!(seen.contains_key(&23));
+        // Body bytes of ext 0xff01 round-trip intact.
+        assert_eq!(seen.get(&0xff01), Some(&&[0x00, 0x11, 0x22][..]));
+        assert!(!seen.contains_key(&15));
     }
 
     #[test]
@@ -500,5 +591,25 @@ mod tests {
         assert_eq!(compression_name(0), "null");
         assert_eq!(compression_name(1), "deflate");
         assert_eq!(compression_name(64), "0x40");
+    }
+
+    #[test]
+    fn parse_point_formats_decodes_iana_values() {
+        // length=3, then uncompressed(0), compressed_prime(1), unknown(0x0A).
+        let body = vec![0x03, 0x00, 0x01, 0x0A];
+        let names = parse_point_formats(&body);
+        assert_eq!(
+            names,
+            vec!["uncompressed", "ansiX962_compressed_prime", "0x0A"]
+        );
+    }
+
+    #[test]
+    fn downgrade_sentinel_classifies_tls12_and_lte_tls11() {
+        assert_eq!(classify_downgrade_sentinel(b"DOWNGRD\x01"), "tls12");
+        assert_eq!(classify_downgrade_sentinel(b"DOWNGRD\x00"), "lte_tls11");
+        assert_eq!(classify_downgrade_sentinel(&[0; 8]), "none");
+        // Wrong length can't match either sentinel; classifier treats as none.
+        assert_eq!(classify_downgrade_sentinel(&[0x44, 0x4F]), "none");
     }
 }

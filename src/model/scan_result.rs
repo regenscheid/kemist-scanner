@@ -316,6 +316,17 @@ pub struct TlsExtensions {
     pub heartbeat_present: ObservationBool,
     pub heartbeat_echoes_oversized_payload: ObservationBool,
     pub compression_offered: Vec<String>,
+    /// RFC 6066 §7 — truncated_hmac extension. Server echo observed
+    /// during the byte-level TLS 1.2 ServerHello probe.
+    pub truncated_hmac: ObservationBool,
+    /// Google NPN (ext 13172) — advertised by the server. Observability
+    /// only; kemist never completes NPN negotiation.
+    pub npn: ObservationBool,
+    /// EC point formats the server echoed back (RFC 4492 §5.1.2).
+    /// Canonical names: `"uncompressed"`, `"ansiX962_compressed_prime"`,
+    /// `"ansiX962_compressed_char2"`. Empty when the server did not
+    /// echo the extension.
+    pub supported_point_formats_echoed: Vec<String>,
 }
 
 #[derive(Serialize, Debug, Clone)]
@@ -347,6 +358,14 @@ pub struct DowngradeSignaling {
     /// downgraded handshake; `{value: null}` with reason string when
     /// inconclusive.
     pub fallback_scsv_enforced: ObservationBool,
+    /// RFC 8446 §4.1.3 — trailing-8-bytes ServerRandom sentinel observed
+    /// during the byte-level TLS 1.2 ServerHello probe. Values:
+    /// `"tls12"` (server is TLS 1.3-capable but negotiated TLS 1.2),
+    /// `"lte_tls11"` (server negotiated TLS 1.1 or lower from a
+    /// TLS 1.3 capable stack), `"none"` (no sentinel match — either
+    /// a pure TLS 1.2/earlier server or a non-compliant TLS 1.3 stack).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tls13_downgrade_sentinel: Option<String>,
 }
 
 #[derive(Serialize, Debug, Clone)]

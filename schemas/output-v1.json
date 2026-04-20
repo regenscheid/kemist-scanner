@@ -144,7 +144,10 @@
             "encrypt_then_mac",
             "heartbeat_present",
             "heartbeat_echoes_oversized_payload",
-            "compression_offered"
+            "compression_offered",
+            "truncated_hmac",
+            "npn",
+            "supported_point_formats_echoed"
           ],
           "properties": {
             "ems": { "$ref": "#/$defs/observationBool" },
@@ -173,7 +176,13 @@
             "encrypt_then_mac": { "$ref": "#/$defs/observationBool" },
             "heartbeat_present": { "$ref": "#/$defs/observationBool" },
             "heartbeat_echoes_oversized_payload": { "$ref": "#/$defs/observationBool" },
-            "compression_offered": { "type": "array", "items": { "type": "string" } }
+            "compression_offered": { "type": "array", "items": { "type": "string" } },
+            "truncated_hmac": { "$ref": "#/$defs/observationBool" },
+            "npn": { "$ref": "#/$defs/observationBool" },
+            "supported_point_formats_echoed": {
+              "type": "array",
+              "items": { "type": "string" }
+            }
           },
           "additionalProperties": false
         },
@@ -182,7 +191,12 @@
           "required": ["fallback_scsv_accepted", "fallback_scsv_enforced"],
           "properties": {
             "fallback_scsv_accepted": { "$ref": "#/$defs/observationBool" },
-            "fallback_scsv_enforced": { "$ref": "#/$defs/observationBool" }
+            "fallback_scsv_enforced": { "$ref": "#/$defs/observationBool" },
+            "tls13_downgrade_sentinel": {
+              "type": "string",
+              "description": "RFC 8446 §4.1.3 sentinel observed in the last 8 bytes of ServerRandom. Optional — absent when the hello probe never produced a ServerHello.",
+              "enum": ["tls12", "lte_tls11", "none"]
+            }
           },
           "additionalProperties": false
         },

@@ -137,6 +137,10 @@ fn build_tls(results: &ScanResults) -> Tls {
                 "superseded_by_fallback_scsv_enforced",
             ),
             fallback_scsv_enforced: build_fallback_scsv_enforced(results),
+            tls13_downgrade_sentinel: results
+                .hello_observed
+                .as_ref()
+                .and_then(|h| h.tls13_downgrade_sentinel.clone()),
         },
         sni_behavior: build_sni_behavior(results),
         dh_parameters: build_dh_parameters(results),
@@ -497,6 +501,15 @@ fn build_extensions(results: &ScanResults) -> TlsExtensions {
         delivery_paths.push("tls_extension".to_string());
     }
 
+    let truncated_hmac = tls12_ext(
+        hello.and_then(|h| h.truncated_hmac),
+        "truncated_hmac_extension",
+    );
+    let npn = tls12_ext(hello.and_then(|h| h.npn), "npn_extension");
+    let supported_point_formats_echoed = hello
+        .map(|h| h.supported_point_formats_echoed.clone())
+        .unwrap_or_default();
+
     TlsExtensions {
         ems,
         secure_renegotiation,
@@ -513,6 +526,9 @@ fn build_extensions(results: &ScanResults) -> TlsExtensions {
             None => ObservationBool::not_probed("heartbeat_probe_inconclusive"),
         },
         compression_offered,
+        truncated_hmac,
+        npn,
+        supported_point_formats_echoed,
     }
 }
 

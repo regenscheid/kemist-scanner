@@ -369,6 +369,22 @@ fn render_extensions(r: &ScanResult) {
             ),
         );
     }
+    print_obs_bool("truncated_hmac", &ext.truncated_hmac);
+    print_obs_bool("npn", &ext.npn);
+    if !ext.supported_point_formats_echoed.is_empty() {
+        kv(
+            "supported_point_formats_echoed",
+            &ext.supported_point_formats_echoed.join(", "),
+        );
+    }
+    if let Some(s) = &r.tls.downgrade_signaling.tls13_downgrade_sentinel {
+        let colored = match s.as_str() {
+            "tls12" => "tls12".yellow().to_string(),
+            "lte_tls11" => "lte_tls11".red().to_string(),
+            _ => s.dimmed().to_string(),
+        };
+        println!("  {:<22} {}", "tls13_downgrade_sentinel:", colored);
+    }
 }
 
 /// Render the OpenSSL-backed probe sections that don't fold into
