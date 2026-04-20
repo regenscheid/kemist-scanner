@@ -168,6 +168,130 @@ const TARGETS: &[Target] = &[
         iana_code: 0x0067,
         version: TlsVersion::Tls12,
     },
+    // --- PSK family (E1) ---
+    // Without a pre-shared secret the scanner can't complete a PSK
+    // handshake. On most servers these probes alert
+    // unknown_psk_identity or handshake_failure, classified as
+    // `supported: false`. Real `supported: true` is rare outside
+    // closed ecosystems. The observation still has signal: an alert
+    // specifically tied to PSK means the server parsed the PSK cipher
+    // offer, even if it couldn't authenticate it.
+    Target {
+        iana_name: "TLS_PSK_WITH_AES_128_CBC_SHA",
+        openssl_name: "PSK-AES128-CBC-SHA",
+        iana_code: 0x008C,
+        version: TlsVersion::Tls12,
+    },
+    Target {
+        iana_name: "TLS_PSK_WITH_AES_128_GCM_SHA256",
+        openssl_name: "PSK-AES128-GCM-SHA256",
+        iana_code: 0x00A8,
+        version: TlsVersion::Tls12,
+    },
+    Target {
+        iana_name: "TLS_DHE_PSK_WITH_AES_128_GCM_SHA256",
+        openssl_name: "DHE-PSK-AES128-GCM-SHA256",
+        iana_code: 0x00AA,
+        version: TlsVersion::Tls12,
+    },
+    Target {
+        iana_name: "TLS_ECDHE_PSK_WITH_AES_128_CBC_SHA",
+        openssl_name: "ECDHE-PSK-AES128-CBC-SHA",
+        iana_code: 0xC035,
+        version: TlsVersion::Tls12,
+    },
+    // --- Camellia (E2) ---
+    Target {
+        iana_name: "TLS_RSA_WITH_CAMELLIA_128_CBC_SHA",
+        openssl_name: "CAMELLIA128-SHA",
+        iana_code: 0x0041,
+        version: TlsVersion::Tls12,
+    },
+    Target {
+        iana_name: "TLS_RSA_WITH_CAMELLIA_256_CBC_SHA",
+        openssl_name: "CAMELLIA256-SHA",
+        iana_code: 0x0084,
+        version: TlsVersion::Tls12,
+    },
+    Target {
+        iana_name: "TLS_DHE_RSA_WITH_CAMELLIA_128_CBC_SHA",
+        openssl_name: "DHE-RSA-CAMELLIA128-SHA",
+        iana_code: 0x0045,
+        version: TlsVersion::Tls12,
+    },
+    Target {
+        iana_name: "TLS_ECDHE_RSA_WITH_CAMELLIA_128_CBC_SHA256",
+        openssl_name: "ECDHE-RSA-CAMELLIA128-SHA256",
+        iana_code: 0xC076,
+        version: TlsVersion::Tls12,
+    },
+    // --- SEED (E2) ---
+    Target {
+        iana_name: "TLS_RSA_WITH_SEED_CBC_SHA",
+        openssl_name: "SEED-SHA",
+        iana_code: 0x0096,
+        version: TlsVersion::Tls12,
+    },
+    Target {
+        iana_name: "TLS_DHE_RSA_WITH_SEED_CBC_SHA",
+        openssl_name: "DHE-RSA-SEED-SHA",
+        iana_code: 0x009A,
+        version: TlsVersion::Tls12,
+    },
+    // --- ARIA (E2) ---
+    Target {
+        iana_name: "TLS_RSA_WITH_ARIA_128_GCM_SHA256",
+        openssl_name: "ARIA128-GCM-SHA256",
+        iana_code: 0xC050,
+        version: TlsVersion::Tls12,
+    },
+    Target {
+        iana_name: "TLS_RSA_WITH_ARIA_256_GCM_SHA384",
+        openssl_name: "ARIA256-GCM-SHA384",
+        iana_code: 0xC051,
+        version: TlsVersion::Tls12,
+    },
+    Target {
+        iana_name: "TLS_DHE_RSA_WITH_ARIA_128_GCM_SHA256",
+        openssl_name: "DHE-RSA-ARIA128-GCM-SHA256",
+        iana_code: 0xC052,
+        version: TlsVersion::Tls12,
+    },
+    Target {
+        iana_name: "TLS_ECDHE_RSA_WITH_ARIA_128_GCM_SHA256",
+        openssl_name: "ECDHE-RSA-ARIA128-GCM-SHA256",
+        iana_code: 0xC060,
+        version: TlsVersion::Tls12,
+    },
+    // --- Static DH / static ECDH (E3) ---
+    // Require the server's CERTIFICATE to embed a DH/ECDH public key
+    // (not the common ephemeral-DH + signed-cert pattern). Modern CAs
+    // don't issue those certs, so real-world `supported: true` is
+    // effectively zero. Probes exist for completeness.
+    Target {
+        iana_name: "TLS_DH_RSA_WITH_AES_128_CBC_SHA",
+        openssl_name: "DH-RSA-AES128-SHA",
+        iana_code: 0x0031,
+        version: TlsVersion::Tls12,
+    },
+    Target {
+        iana_name: "TLS_DH_DSS_WITH_AES_128_CBC_SHA",
+        openssl_name: "DH-DSS-AES128-SHA",
+        iana_code: 0x0030,
+        version: TlsVersion::Tls12,
+    },
+    Target {
+        iana_name: "TLS_ECDH_RSA_WITH_AES_128_CBC_SHA",
+        openssl_name: "ECDH-RSA-AES128-SHA",
+        iana_code: 0xC00E,
+        version: TlsVersion::Tls12,
+    },
+    Target {
+        iana_name: "TLS_ECDH_ECDSA_WITH_AES_128_CBC_SHA",
+        openssl_name: "ECDH-ECDSA-AES128-SHA",
+        iana_code: 0xC004,
+        version: TlsVersion::Tls12,
+    },
     // --- TLS 1.1 ---
     Target {
         iana_name: "TLS_RSA_WITH_AES_128_CBC_SHA",
