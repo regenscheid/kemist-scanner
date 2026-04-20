@@ -509,6 +509,8 @@ fn build_extensions(results: &ScanResults) -> TlsExtensions {
     let supported_point_formats_echoed = hello
         .map(|h| h.supported_point_formats_echoed.clone())
         .unwrap_or_default();
+    let max_fragment_length = hello.and_then(|h| h.max_fragment_length.clone());
+    let (record_size_limit, compress_certificate_algorithms) = build_tls13_ee_observations(results);
 
     TlsExtensions {
         ems,
@@ -529,6 +531,37 @@ fn build_extensions(results: &ScanResults) -> TlsExtensions {
         truncated_hmac,
         npn,
         supported_point_formats_echoed,
+        max_fragment_length,
+        record_size_limit,
+        compress_certificate_algorithms,
+    }
+}
+
+/// Pull TLS 1.3 EncryptedExtensions observations from the OpenSSL probe
+/// subsystem. Returns `(None, [])` when `legacy-probes` is disabled or
+/// the probe didn't produce a parseable message — the fields are
+/// optional in the schema, so "absent" correctly means "not observed."
+fn build_tls13_ee_observations(results: &ScanResults) -> (Option<u16>, Vec<String>) {
+    #[cfg(feature = "legacy-probes")]
+    {
+        let Some(obs) = results.openssl_observations.as_ref() else {
+            return (None, Vec::new());
+        };
+        let Some(ee) = obs.tls13_extensions.as_ref() else {
+            return (None, Vec::new());
+        };
+        if !ee.parsed {
+            return (None, Vec::new());
+        }
+        (
+            ee.record_size_limit,
+            ee.compress_certificate_algorithms.clone(),
+        )
+    }
+    #[cfg(not(feature = "legacy-probes"))]
+    {
+        let _ = results;
+        (None, Vec::new())
     }
 }
 

@@ -50,6 +50,7 @@ use tracing::debug;
 use crate::model::errors::ScannerError;
 
 /// Extensions we look for in ServerHello. Not all servers echo every one.
+const EXT_MAX_FRAGMENT_LENGTH: u16 = 1; // RFC 6066 §4.
 const EXT_TRUNCATED_HMAC: u16 = 4; // RFC 6066 §7 — deprecated but still observed.
 const EXT_SUPPORTED_POINT_FORMATS: u16 = 11; // RFC 4492 / 8422 §5.1.2.
 const EXT_HEARTBEAT: u16 = 15;
@@ -58,6 +59,12 @@ const EXT_ENCRYPT_THEN_MAC: u16 = 22;
 const EXT_EXTENDED_MASTER_SECRET: u16 = 23;
 const EXT_NPN: u16 = 13172; // Google's pre-ALPN protocol negotiation.
 const EXT_RENEGOTIATION_INFO: u16 = 0xff01;
+
+/// `max_fragment_length` code we advertise — 4 == 2^12 (4096 bytes), the
+/// largest legal value. We don't actually negotiate a smaller record; we
+/// bail after ServerHello. Offering this lets us record whether the
+/// server will accept it.
+const MAX_FRAGMENT_LENGTH_OFFER: u8 = 4;
 
 /// RFC 8446 §4.1.3 downgrade-protection sentinel bytes. Placed in the
 /// last 8 bytes of ServerRandom by a TLS 1.3-capable server that
@@ -99,6 +106,10 @@ pub struct HelloExtensionsObserved {
     /// `"ansiX962_compressed_prime"`, `"ansiX962_compressed_char2"`.
     /// Empty when the server didn't echo the extension.
     pub supported_point_formats_echoed: Vec<String>,
+    /// RFC 6066 §4 — server-echoed max_fragment_length value. `Some("2^9")`
+    /// through `Some("2^12")` (RFC values 1-4); `Some("0xNN")` for
+    /// unknown bytes. `None` when the server did not echo the extension.
+    pub max_fragment_length: Option<String>,
     /// RFC 8446 §4.1.3 downgrade-protection sentinel observed in the last
     /// 8 bytes of ServerRandom. One of `"tls12"` (server is TLS
     /// 1.3-capable but negotiated TLS 1.2), `"lte_tls11"` (server
@@ -332,6 +343,24 @@ fn parse_server_hello(bytes: &[u8], out: &mut HelloExtensionsObserved) {
     if let Some(body) = seen.get(&EXT_SUPPORTED_POINT_FORMATS) {
         out.supported_point_formats_echoed = parse_point_formats(body);
     }
+    if let Some(body) = seen.get(&EXT_MAX_FRAGMENT_LENGTH) {
+        if let Some(&code) = body.first() {
+            out.max_fragment_length = Some(max_fragment_length_name(code));
+        }
+    }
+}
+
+/// Map the `max_fragment_length` single-byte value to its RFC 6066 §4
+/// meaning. Returns `"2^9"`..`"2^12"` for values 1-4, `"0xNN"` for
+/// any other byte so unexpected values survive into the output.
+fn max_fragment_length_name(code: u8) -> String {
+    match code {
+        1 => "2^9".to_string(),
+        2 => "2^10".to_string(),
+        3 => "2^11".to_string(),
+        4 => "2^12".to_string(),
+        other => format!("0x{:02X}", other),
+    }
 }
 
 /// Walk a flat TLS extensions block into `{type → body bytes}`.
@@ -465,6 +494,15 @@ fn build_tls12_client_hello(sni: &str) -> Vec<u8> {
                                                                   // them. Servers that ignore unknown extensions silently drop these.
     append_extension(&mut exts, EXT_TRUNCATED_HMAC, &[]);
     append_extension(&mut exts, EXT_NPN, &[]);
+    // RFC 6066 §4 — offer max_fragment_length = 2^12. We advertise the
+    // largest legal value so servers that support smaller limits still
+    // echo. We never actually honor the negotiated limit (probe bails
+    // after ServerHello).
+    append_extension(
+        &mut exts,
+        EXT_MAX_FRAGMENT_LENGTH,
+        &[MAX_FRAGMENT_LENGTH_OFFER],
+    );
 
     ch.extend_from_slice(&(exts.len() as u16).to_be_bytes());
     ch.extend_from_slice(&exts);

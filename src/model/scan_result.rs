@@ -327,6 +327,26 @@ pub struct TlsExtensions {
     /// `"ansiX962_compressed_char2"`. Empty when the server did not
     /// echo the extension.
     pub supported_point_formats_echoed: Vec<String>,
+    /// RFC 6066 §4 — server-echoed max_fragment_length code. Rendered
+    /// as `"2^9"` through `"2^12"` for RFC values 1-4, `"0xNN"` for
+    /// unknown bytes. Absent when the server did not echo the
+    /// extension.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_fragment_length: Option<String>,
+    /// RFC 8449 — TLS 1.3 `record_size_limit` value observed in
+    /// EncryptedExtensions. Populated by the OpenSSL-backed
+    /// EncryptedExtensions probe (feature `legacy-probes`); absent
+    /// under other build configs or when the server did not send
+    /// the extension.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub record_size_limit: Option<u16>,
+    /// RFC 8879 — algorithms listed in the server's
+    /// `compress_certificate` extension. Canonical names: `"zlib"`,
+    /// `"brotli"`, `"zstd"`; `"0xNNNN"` for unknown codepoints.
+    /// Populated by the OpenSSL-backed EncryptedExtensions probe;
+    /// empty otherwise.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub compress_certificate_algorithms: Vec<String>,
 }
 
 #[derive(Serialize, Debug, Clone)]

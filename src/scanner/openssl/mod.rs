@@ -17,6 +17,7 @@ pub mod ffdhe;
 pub mod protocol_versions;
 pub mod renegotiation;
 pub mod ske_sig;
+pub mod tls13_extensions;
 
 use std::sync::OnceLock;
 
@@ -77,6 +78,11 @@ pub struct OpensslObservations {
     /// probe's outer setup failed; `Some(req)` with `req.requested: false`
     /// when the server did not request a client certificate.
     pub client_auth: Option<client_auth::ClientAuthRequest>,
+    /// TLS 1.3 EncryptedExtensions observation — `record_size_limit` +
+    /// `compress_certificate`. `None` when the handshake didn't reach
+    /// EncryptedExtensions (target doesn't speak TLS 1.3, or the
+    /// connection failed before the message arrived).
+    pub tls13_extensions: Option<tls13_extensions::Tls13EncryptedExtensions>,
     /// Per-probe non-fatal errors collected during the scan. Populated so
     /// every "not probed" outcome carries a reason string rather than going
     /// silent.
@@ -128,6 +134,11 @@ pub async fn run_all_probes(cfg: &ScanConfig) -> Result<OpensslObservations, Sca
     // D7 — CertificateRequest capture via msg_callback.
     let ca = client_auth::probe(cfg.target, &cfg.hostname, cfg.timeout, cfg.timeout).await;
     out.client_auth = ca;
+
+    // B3 — TLS 1.3 EncryptedExtensions capture (record_size_limit,
+    // compress_certificate). Same msg_callback pattern as client_auth.
+    let ee = tls13_extensions::probe(cfg.target, &cfg.hostname, cfg.timeout, cfg.timeout).await;
+    out.tls13_extensions = Some(ee);
 
     // D8 hooks in here as that module lands live.
 

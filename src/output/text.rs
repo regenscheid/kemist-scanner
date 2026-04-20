@@ -377,6 +377,18 @@ fn render_extensions(r: &ScanResult) {
             &ext.supported_point_formats_echoed.join(", "),
         );
     }
+    if let Some(v) = &ext.max_fragment_length {
+        kv("max_fragment_length", v);
+    }
+    if let Some(v) = ext.record_size_limit {
+        kv("record_size_limit", &v.to_string());
+    }
+    if !ext.compress_certificate_algorithms.is_empty() {
+        kv(
+            "compress_certificate",
+            &ext.compress_certificate_algorithms.join(", "),
+        );
+    }
     if let Some(s) = &r.tls.downgrade_signaling.tls13_downgrade_sentinel {
         let colored = match s.as_str() {
             "tls12" => "tls12".yellow().to_string(),
