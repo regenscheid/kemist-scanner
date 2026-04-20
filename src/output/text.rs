@@ -250,6 +250,71 @@ fn render_certificates(r: &ScanResult) {
     );
     kv("chain_length", &r.certificates.chain_length.to_string());
     kv("embedded_scts", &leaf.embedded_scts.to_string());
+    render_cert_extensions(&leaf.extensions);
+}
+
+fn render_cert_extensions(ext: &crate::model::cert_extensions::CertExtensions) {
+    if let Some(bc) = &ext.basic_constraints {
+        let line = match bc.path_len_constraint {
+            Some(n) => format!("ca={} path_len={}", bc.ca, n),
+            None => format!("ca={}", bc.ca),
+        };
+        kv("basic_constraints", &line);
+    }
+    if let Some(ku) = &ext.key_usage {
+        if !ku.bits.is_empty() {
+            kv("key_usage", &ku.bits.join(", "));
+        }
+    }
+    if let Some(eku) = &ext.extended_key_usage {
+        if !eku.oids.is_empty() {
+            kv("extended_key_usage", &eku.oids.join(", "));
+        }
+    }
+    if let Some(ski) = &ext.subject_key_identifier {
+        kv("subject_key_identifier", ski);
+    }
+    if let Some(aki) = &ext.authority_key_identifier {
+        kv("authority_key_identifier", aki);
+    }
+    if let Some(aia) = &ext.authority_information_access {
+        if !aia.ocsp.is_empty() {
+            kv("aia_ocsp", &aia.ocsp.join(", "));
+        }
+        if !aia.ca_issuers.is_empty() {
+            kv("aia_ca_issuers", &aia.ca_issuers.join(", "));
+        }
+    }
+    if let Some(crl) = &ext.crl_distribution_points {
+        if !crl.urls.is_empty() {
+            kv("crl_distribution_points", &crl.urls.join(", "));
+        }
+    }
+    if let Some(nc) = &ext.name_constraints {
+        if !nc.permitted_subtrees.is_empty() {
+            kv(
+                "name_constraints_permitted",
+                &nc.permitted_subtrees.join(", "),
+            );
+        }
+        if !nc.excluded_subtrees.is_empty() {
+            kv(
+                "name_constraints_excluded",
+                &nc.excluded_subtrees.join(", "),
+            );
+        }
+    }
+    if let Some(cp) = &ext.certificate_policies {
+        if !cp.oids.is_empty() {
+            kv("certificate_policies", &cp.oids.join(", "));
+        }
+    }
+    if let Some(ms) = ext.must_staple {
+        kv("must_staple", &ms.to_string());
+    }
+    if !ext.scts.is_empty() {
+        kv("scts", &format!("{} entries", ext.scts.len()));
+    }
 }
 
 fn render_validation(r: &ScanResult) {

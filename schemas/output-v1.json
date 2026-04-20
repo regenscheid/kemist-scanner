@@ -462,19 +462,97 @@
     },
     "certExtensions": {
       "type": "object",
-      "description": "X.509 v3 extension observations. Sub-fields populated by steps A2–A5; A1 emits `{}` on every cert.",
+      "description": "X.509 v3 extension observations per RFC 5280 + RFC 7633 + RFC 6962. Every sub-field optional; absent means the extension was not present on the cert (or kemist could not parse it).",
       "properties": {
-        "basic_constraints":            { "type": "object" },
-        "key_usage":                    { "type": "object" },
-        "extended_key_usage":           { "type": "object" },
-        "authority_key_identifier":     { "type": "string" },
-        "subject_key_identifier":       { "type": "string" },
-        "authority_information_access": { "type": "object" },
-        "crl_distribution_points":      { "type": "object" },
-        "name_constraints":             { "type": "object" },
-        "certificate_policies":         { "type": "object" },
-        "must_staple":                  { "type": "boolean" },
-        "scts":                         { "type": "array" }
+        "basic_constraints": {
+          "type": "object",
+          "required": ["ca"],
+          "properties": {
+            "ca": { "type": "boolean" },
+            "path_len_constraint": { "type": "integer", "minimum": 0 }
+          },
+          "additionalProperties": false
+        },
+        "key_usage": {
+          "type": "object",
+          "required": ["bits"],
+          "properties": {
+            "bits": {
+              "type": "array",
+              "items": { "type": "string" }
+            }
+          },
+          "additionalProperties": false
+        },
+        "extended_key_usage": {
+          "type": "object",
+          "required": ["oids"],
+          "properties": {
+            "oids": {
+              "type": "array",
+              "items": { "type": "string" }
+            }
+          },
+          "additionalProperties": false
+        },
+        "authority_key_identifier": { "type": "string" },
+        "subject_key_identifier":   { "type": "string" },
+        "authority_information_access": {
+          "type": "object",
+          "required": ["ocsp", "ca_issuers"],
+          "properties": {
+            "ocsp":       { "type": "array", "items": { "type": "string" } },
+            "ca_issuers": { "type": "array", "items": { "type": "string" } }
+          },
+          "additionalProperties": false
+        },
+        "crl_distribution_points": {
+          "type": "object",
+          "required": ["urls"],
+          "properties": {
+            "urls": { "type": "array", "items": { "type": "string" } }
+          },
+          "additionalProperties": false
+        },
+        "name_constraints": {
+          "type": "object",
+          "required": ["permitted_subtrees", "excluded_subtrees"],
+          "properties": {
+            "permitted_subtrees": { "type": "array", "items": { "type": "string" } },
+            "excluded_subtrees":  { "type": "array", "items": { "type": "string" } }
+          },
+          "additionalProperties": false
+        },
+        "certificate_policies": {
+          "type": "object",
+          "required": ["oids"],
+          "properties": {
+            "oids": { "type": "array", "items": { "type": "string" } }
+          },
+          "additionalProperties": false
+        },
+        "must_staple": { "type": "boolean" },
+        "scts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "log_id",
+              "timestamp",
+              "signature_hash_algorithm",
+              "signature_algorithm",
+              "signature_hex"
+            ],
+            "properties": {
+              "log_id":                   { "type": "string" },
+              "timestamp":                { "type": "string", "format": "date-time" },
+              "signature_hash_algorithm": { "type": "string" },
+              "signature_algorithm":      { "type": "string" },
+              "signature_hex":            { "type": "string" }
+            },
+            "additionalProperties": false
+          }
+        }
       },
       "additionalProperties": false
     }

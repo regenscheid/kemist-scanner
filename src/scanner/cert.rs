@@ -6,24 +6,350 @@
 //! (pure data types) so parsing logic stays testable without requiring a
 //! full `CertificateInfo`.
 
+use chrono::{DateTime, Utc};
 use der_parser::oid::Oid;
 use std::collections::HashMap;
 use std::sync::OnceLock;
+use x509_parser::extensions::{
+    DistributionPointName, GeneralName, ParsedExtension, SignedCertificateTimestamp,
+};
 use x509_parser::prelude::*;
 
-use crate::model::cert_extensions::CertExtensions;
+use crate::model::cert_extensions::{
+    AuthorityInformationAccess, BasicConstraints, CertExtensions, CertificatePolicies,
+    CrlDistributionPoints, ExtendedKeyUsage, KeyUsage, NameConstraints, SctDetail,
+};
 
 /// RFC 6962 embedded Signed Certificate Timestamp extension OID.
 const SCT_EXTENSION_OID: &str = "1.3.6.1.4.1.11129.2.4.2";
 
+/// AIA accessMethod OIDs.
+const AIA_OCSP: &str = "1.3.6.1.5.5.7.48.1";
+const AIA_CA_ISSUERS: &str = "1.3.6.1.5.5.7.48.2";
+
 /// Extract X.509 v3 extension fields into [`CertExtensions`].
 ///
-/// Step A1 placeholder: returns [`CertExtensions::default()`] — every
-/// sub-field stays `None` / empty so the serialized form is `{}`.
-/// Per-extension parsers land in steps A2–A5; this function's
-/// signature stays stable across those steps.
-pub fn extract_extensions(_cert: &X509Certificate) -> CertExtensions {
-    CertExtensions::default()
+/// Walks the cert's extensions list and dispatches on OID. For
+/// extensions x509-parser has a `ParsedExtension` variant for, we
+/// use the structured form; for the RFC 7633 TLS Feature extension
+/// (no dedicated variant), we parse the raw DER value ourselves.
+///
+/// Unknown / unparseable extensions are silently skipped — the
+/// absence of a field in the output means "not present on this
+/// cert," same as "scanner couldn't make sense of it," which is
+/// acceptable because rule engines key off presence/value, not
+/// existence. If a future compliance rule needs to distinguish
+/// unparseable from absent, the helper can grow an error
+/// sub-field.
+pub fn extract_extensions(cert: &X509Certificate) -> CertExtensions {
+    let mut out = CertExtensions::default();
+
+    for ext in cert.extensions() {
+        match ext.oid.to_id_string().as_str() {
+            // Basic Constraints — RFC 5280 §4.2.1.9
+            "2.5.29.19" => {
+                if let ParsedExtension::BasicConstraints(bc) = ext.parsed_extension() {
+                    out.basic_constraints = Some(BasicConstraints {
+                        ca: bc.ca,
+                        path_len_constraint: bc.path_len_constraint,
+                    });
+                }
+            }
+            // Key Usage — RFC 5280 §4.2.1.3
+            "2.5.29.15" => {
+                if let ParsedExtension::KeyUsage(ku) = ext.parsed_extension() {
+                    let mut bits = Vec::new();
+                    if ku.digital_signature() {
+                        bits.push("digital_signature".into());
+                    }
+                    if ku.non_repudiation() {
+                        bits.push("content_commitment".into());
+                    }
+                    if ku.key_encipherment() {
+                        bits.push("key_encipherment".into());
+                    }
+                    if ku.data_encipherment() {
+                        bits.push("data_encipherment".into());
+                    }
+                    if ku.key_agreement() {
+                        bits.push("key_agreement".into());
+                    }
+                    if ku.key_cert_sign() {
+                        bits.push("key_cert_sign".into());
+                    }
+                    if ku.crl_sign() {
+                        bits.push("crl_sign".into());
+                    }
+                    if ku.encipher_only() {
+                        bits.push("encipher_only".into());
+                    }
+                    if ku.decipher_only() {
+                        bits.push("decipher_only".into());
+                    }
+                    out.key_usage = Some(KeyUsage { bits });
+                }
+            }
+            // Extended Key Usage — RFC 5280 §4.2.1.12
+            "2.5.29.37" => {
+                if let ParsedExtension::ExtendedKeyUsage(eku) = ext.parsed_extension() {
+                    let mut oids = Vec::new();
+                    if eku.any {
+                        oids.push("any".into());
+                    }
+                    if eku.server_auth {
+                        oids.push("server_auth".into());
+                    }
+                    if eku.client_auth {
+                        oids.push("client_auth".into());
+                    }
+                    if eku.code_signing {
+                        oids.push("code_signing".into());
+                    }
+                    if eku.email_protection {
+                        oids.push("email_protection".into());
+                    }
+                    if eku.time_stamping {
+                        oids.push("time_stamping".into());
+                    }
+                    for o in &eku.other {
+                        oids.push(resolve_eku_oid(&o.to_id_string()));
+                    }
+                    out.extended_key_usage = Some(ExtendedKeyUsage { oids });
+                }
+            }
+            // Authority Key Identifier — RFC 5280 §4.2.1.1
+            "2.5.29.35" => {
+                if let ParsedExtension::AuthorityKeyIdentifier(aki) = ext.parsed_extension() {
+                    if let Some(kid) = &aki.key_identifier {
+                        out.authority_key_identifier = Some(hex::encode(kid.0));
+                    }
+                }
+            }
+            // Subject Key Identifier — RFC 5280 §4.2.1.2
+            "2.5.29.14" => {
+                if let ParsedExtension::SubjectKeyIdentifier(kid) = ext.parsed_extension() {
+                    out.subject_key_identifier = Some(hex::encode(kid.0));
+                }
+            }
+            // Authority Information Access — RFC 5280 §4.2.2.1
+            "1.3.6.1.5.5.7.1.1" => {
+                if let ParsedExtension::AuthorityInfoAccess(aia) = ext.parsed_extension() {
+                    let mut ocsp = Vec::new();
+                    let mut ca_issuers = Vec::new();
+                    for desc in &aia.accessdescs {
+                        let url = general_name_to_string(&desc.access_location);
+                        match desc.access_method.to_id_string().as_str() {
+                            AIA_OCSP => ocsp.push(url),
+                            AIA_CA_ISSUERS => ca_issuers.push(url),
+                            _ => {}
+                        }
+                    }
+                    out.authority_information_access =
+                        Some(AuthorityInformationAccess { ocsp, ca_issuers });
+                }
+            }
+            // CRL Distribution Points — RFC 5280 §4.2.1.13
+            "2.5.29.31" => {
+                if let ParsedExtension::CRLDistributionPoints(crl) = ext.parsed_extension() {
+                    let mut urls = Vec::new();
+                    for point in crl.iter() {
+                        if let Some(DistributionPointName::FullName(names)) =
+                            &point.distribution_point
+                        {
+                            for n in names {
+                                urls.push(general_name_to_string(n));
+                            }
+                        }
+                    }
+                    out.crl_distribution_points = Some(CrlDistributionPoints { urls });
+                }
+            }
+            // Name Constraints — RFC 5280 §4.2.1.10
+            "2.5.29.30" => {
+                if let ParsedExtension::NameConstraints(nc) = ext.parsed_extension() {
+                    let permitted_subtrees = nc
+                        .permitted_subtrees
+                        .as_ref()
+                        .map(|v| {
+                            v.iter()
+                                .map(|s| general_name_to_string(&s.base))
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default();
+                    let excluded_subtrees = nc
+                        .excluded_subtrees
+                        .as_ref()
+                        .map(|v| {
+                            v.iter()
+                                .map(|s| general_name_to_string(&s.base))
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default();
+                    out.name_constraints = Some(NameConstraints {
+                        permitted_subtrees,
+                        excluded_subtrees,
+                    });
+                }
+            }
+            // Certificate Policies — RFC 5280 §4.2.1.4
+            "2.5.29.32" => {
+                if let ParsedExtension::CertificatePolicies(cp) = ext.parsed_extension() {
+                    let oids = cp.iter().map(|p| p.policy_id.to_id_string()).collect();
+                    out.certificate_policies = Some(CertificatePolicies { oids });
+                }
+            }
+            // TLS Feature / Must-Staple — RFC 7633
+            // x509-parser has no dedicated variant; parse raw bytes.
+            "1.3.6.1.5.5.7.1.24" => {
+                out.must_staple = Some(parse_tls_feature_must_staple(ext.value));
+            }
+            // Embedded SCTs — RFC 6962 §3.3
+            SCT_EXTENSION_OID => {
+                if let ParsedExtension::SCT(list) = ext.parsed_extension() {
+                    out.scts = list.iter().map(sct_to_detail).collect();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    out
+}
+
+/// Render a `GeneralName` to a single human-readable string. Used
+/// for CRL DP, AIA accessLocation, and Name Constraints subtree
+/// names. Returns a best-effort representation — IP addresses get
+/// `ip:<hex>`, registered IDs return the dotted OID, unknown
+/// variants return an opaque `"unknown"` marker.
+fn general_name_to_string(gn: &GeneralName) -> String {
+    match gn {
+        GeneralName::DNSName(s) => s.to_string(),
+        GeneralName::URI(s) => s.to_string(),
+        GeneralName::RFC822Name(s) => s.to_string(),
+        GeneralName::IPAddress(ip) => format!("ip:{}", hex::encode(ip)),
+        GeneralName::DirectoryName(dn) => format!("dn:{}", dn),
+        GeneralName::RegisteredID(oid) => oid.to_id_string(),
+        _ => "unknown".to_string(),
+    }
+}
+
+/// Resolve common Extended Key Usage OIDs not directly exposed by
+/// x509-parser's boolean flags. Falls back to the dotted OID string
+/// for unknowns.
+fn resolve_eku_oid(oid: &str) -> String {
+    match oid {
+        "1.3.6.1.5.5.7.3.9" => "ocsp_signing".into(),
+        "1.3.6.1.5.5.7.3.5" => "ipsec_end_system".into(),
+        "1.3.6.1.5.5.7.3.6" => "ipsec_tunnel".into(),
+        "1.3.6.1.5.5.7.3.7" => "ipsec_user".into(),
+        // Microsoft EKUs seen on some Web PKI certs.
+        "1.3.6.1.4.1.311.10.3.3" => "ms_sgc".into(),
+        "1.3.6.1.4.1.311.20.2.2" => "ms_smartcard_logon".into(),
+        other => other.to_string(),
+    }
+}
+
+/// Parse the TLS Feature extension value (RFC 7633) and return
+/// `true` iff feature integer 5 (status_request) is listed — the
+/// Must-Staple marker.
+///
+/// Structure: `SEQUENCE OF INTEGER`. Parsed at the byte level rather
+/// than via a helper crate because (a) the structure is trivially
+/// simple and (b) it avoids pulling in another ASN.1 dependency.
+/// Tolerant of short-form and long-form length encodings.
+fn parse_tls_feature_must_staple(value: &[u8]) -> bool {
+    // DER SEQUENCE tag.
+    if value.first() != Some(&0x30) {
+        return false;
+    }
+    // Decode the SEQUENCE's contents slice, skipping the tag+length
+    // prefix.
+    let contents: &[u8] = match value.get(1).copied() {
+        Some(l) if l < 0x80 => {
+            let end = 2usize.saturating_add(l as usize);
+            match value.get(2..end) {
+                Some(s) => s,
+                None => return false,
+            }
+        }
+        Some(0x81) => {
+            let Some(&l) = value.get(2) else { return false };
+            let end = 3usize.saturating_add(l as usize);
+            match value.get(3..end) {
+                Some(s) => s,
+                None => return false,
+            }
+        }
+        Some(0x82) => {
+            let (Some(&h), Some(&l)) = (value.get(2), value.get(3)) else {
+                return false;
+            };
+            let length = (u16::from(h) << 8 | u16::from(l)) as usize;
+            let end = 4usize.saturating_add(length);
+            match value.get(4..end) {
+                Some(s) => s,
+                None => return false,
+            }
+        }
+        _ => return false,
+    };
+
+    // Iterate INTEGER entries. Short-form lengths only — feature
+    // integers are single bytes in practice.
+    let mut i = 0;
+    while i + 2 <= contents.len() {
+        if contents[i] != 0x02 {
+            // Unexpected tag inside SEQUENCE OF INTEGER — bail.
+            return false;
+        }
+        let int_len = contents[i + 1] as usize;
+        if i + 2 + int_len > contents.len() {
+            return false;
+        }
+        let int_bytes = &contents[i + 2..i + 2 + int_len];
+        // Must-Staple = feature 5 (status_request).
+        if int_bytes == [0x05] {
+            return true;
+        }
+        i += 2 + int_len;
+    }
+    false
+}
+
+/// Convert an RFC 6962 SCT to our serializable `SctDetail`. Hash and
+/// signature algorithm IDs map to the TLS 1.2 HashAlgorithm /
+/// SignatureAlgorithm enums (RFC 5246 §7.4.1.4.1).
+fn sct_to_detail(sct: &SignedCertificateTimestamp) -> SctDetail {
+    // RFC 6962 §3.2 — timestamp is milliseconds since the Unix epoch.
+    let ts_secs = (sct.timestamp / 1000) as i64;
+    let ts_nsecs = ((sct.timestamp % 1000) * 1_000_000) as u32;
+    let timestamp = DateTime::from_timestamp(ts_secs, ts_nsecs).unwrap_or(DateTime::<Utc>::MIN_UTC);
+
+    let hash_alg = match sct.signature.hash_alg_id {
+        0 => "none",
+        1 => "md5",
+        2 => "sha1",
+        3 => "sha224",
+        4 => "sha256",
+        5 => "sha384",
+        6 => "sha512",
+        _ => "unknown",
+    };
+    let sig_alg = match sct.signature.sign_alg_id {
+        0 => "anonymous",
+        1 => "rsa",
+        2 => "dsa",
+        3 => "ecdsa",
+        _ => "unknown",
+    };
+
+    SctDetail {
+        log_id: hex::encode(sct.id.key_id),
+        timestamp,
+        signature_hash_algorithm: hash_alg.to_string(),
+        signature_algorithm: sig_alg.to_string(),
+        signature_hex: hex::encode(sct.signature.data),
+    }
 }
 
 /// Canonical PQC signature OIDs per the kemist spec (NIST + IETF drafts).
