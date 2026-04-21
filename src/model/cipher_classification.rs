@@ -342,78 +342,8 @@ mod tests {
         assert_eq!(classify(""), CipherClassification::Other);
     }
 
-    /// Exhaustive classification coverage: every cipher suite in the
-    /// probe inventory (both aws-lc-rs and OpenSSL backends) must
-    /// classify to a non-`Other` variant. If this test fails, the new
-    /// codepoint is printed so the enum + classify() can grow
-    /// intentionally — never via a silent `Other` entry reaching
-    /// production output.
-    #[test]
-    fn every_probe_suite_classifies_to_known_variant() {
-        // Full list maintained by hand — matches what the scanner's
-        // cipher-probe drivers advertise. If you add a suite to
-        // src/scanner/ciphers.rs or src/scanner/openssl/ciphers.rs,
-        // add it here too.
-        let suites = &[
-            // TLS 1.3 (aws-lc-rs)
-            "TLS13_AES_128_GCM_SHA256",
-            "TLS13_AES_256_GCM_SHA384",
-            "TLS13_CHACHA20_POLY1305_SHA256",
-            // TLS 1.2 ECDHE (aws-lc-rs)
-            "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256",
-            "TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384",
-            "TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256",
-            "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256",
-            "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384",
-            "TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256",
-            // TLS 1.0/1.1/1.2 legacy (OpenSSL)
-            "TLS_RSA_WITH_AES_128_CBC_SHA",
-            "TLS_RSA_WITH_AES_256_CBC_SHA",
-            "TLS_RSA_WITH_AES_128_CBC_SHA256",
-            "TLS_RSA_WITH_AES_256_CBC_SHA256",
-            "TLS_RSA_WITH_3DES_EDE_CBC_SHA",
-            "TLS_RSA_WITH_RC4_128_SHA",
-            "TLS_RSA_WITH_RC4_128_MD5",
-            "TLS_RSA_WITH_NULL_SHA",
-            "TLS_RSA_WITH_NULL_MD5",
-            "TLS_DH_anon_WITH_AES_128_CBC_SHA",
-            "TLS_DHE_RSA_WITH_AES_128_CBC_SHA",
-            "TLS_DHE_RSA_WITH_AES_256_CBC_SHA",
-            "TLS_DHE_RSA_WITH_AES_128_CBC_SHA256",
-            // PSK family
-            "TLS_PSK_WITH_AES_128_CBC_SHA",
-            "TLS_PSK_WITH_AES_128_GCM_SHA256",
-            "TLS_DHE_PSK_WITH_AES_128_GCM_SHA256",
-            "TLS_ECDHE_PSK_WITH_AES_128_CBC_SHA",
-            // Camellia
-            "TLS_RSA_WITH_CAMELLIA_128_CBC_SHA",
-            "TLS_RSA_WITH_CAMELLIA_256_CBC_SHA",
-            "TLS_DHE_RSA_WITH_CAMELLIA_128_CBC_SHA",
-            "TLS_ECDHE_RSA_WITH_CAMELLIA_128_CBC_SHA256",
-            // SEED
-            "TLS_RSA_WITH_SEED_CBC_SHA",
-            "TLS_DHE_RSA_WITH_SEED_CBC_SHA",
-            // ARIA
-            "TLS_RSA_WITH_ARIA_128_GCM_SHA256",
-            "TLS_RSA_WITH_ARIA_256_GCM_SHA384",
-            "TLS_DHE_RSA_WITH_ARIA_128_GCM_SHA256",
-            "TLS_ECDHE_RSA_WITH_ARIA_128_GCM_SHA256",
-            // Static DH / static ECDH
-            "TLS_DH_RSA_WITH_AES_128_CBC_SHA",
-            "TLS_DH_DSS_WITH_AES_128_CBC_SHA",
-            "TLS_ECDH_RSA_WITH_AES_128_CBC_SHA",
-            "TLS_ECDH_ECDSA_WITH_AES_128_CBC_SHA",
-        ];
-        let mut unmapped = Vec::new();
-        for s in suites {
-            if classify(s) == CipherClassification::Other {
-                unmapped.push(*s);
-            }
-        }
-        assert!(
-            unmapped.is_empty(),
-            "cipher suites classify to Other — extend CipherClassification or classify(): {:?}",
-            unmapped
-        );
-    }
+    // Exhaustive inventory-driven classification coverage lives in
+    // tests/inventory_classification.rs. That integration test pulls
+    // the suite list directly from `scanner::backends::BackendInventory`
+    // so there's no hand-maintained parallel list to drift.
 }

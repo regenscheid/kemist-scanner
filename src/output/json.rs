@@ -104,15 +104,12 @@ fn build_capabilities(ctx: &JsonEmitContext) -> Capabilities {
 
     // Provider-exposed cipher suites + kx groups — what aws-lc-rs ships at
     // build time. Downstream consumers combine this with per-suite/per-group
-    // `not_probed` reasons to know what was actually in scope.
-    let provider_cipher_suites: Vec<String> = rustls::crypto::aws_lc_rs::ALL_CIPHER_SUITES
-        .iter()
-        .map(|s| format!("{:?}", s.suite()))
-        .collect();
-    let provider_kx_groups: Vec<String> = rustls::crypto::aws_lc_rs::ALL_KX_GROUPS
-        .iter()
-        .map(|g| format!("{:?}", g.name()))
-        .collect();
+    // `not_probed` reasons to know what was actually in scope. Sourced from
+    // the rustls `BackendInventory` so the inventory remains the single
+    // source of truth for "what can this backend see."
+    let rustls_inv = crate::scanner::backends::rustls_inventory();
+    let provider_cipher_suites = rustls_inv.cipher_names.clone();
+    let provider_kx_groups = rustls_inv.group_names.clone();
 
     Capabilities {
         enabled_features: ctx.enabled_features.clone(),

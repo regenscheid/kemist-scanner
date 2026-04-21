@@ -332,6 +332,17 @@ const TARGETS: &[Target] = &[
     },
 ];
 
+/// Emit this backend's cipher inventory as `(iana_code, iana_name, version)`
+/// rows. Used by `scanner::backends::openssl_inventory` so the single
+/// source of truth for "what does the OpenSSL backend probe" is
+/// this `TARGETS` table rather than a parallel hand-maintained list.
+pub fn inventory_entries() -> Vec<(u16, &'static str, TlsVersion)> {
+    TARGETS
+        .iter()
+        .map(|t| (t.iana_code, t.iana_name, t.version))
+        .collect()
+}
+
 /// Probe every suite in [`TARGETS`]. Each probe runs in `spawn_blocking` so
 /// the blocking OpenSSL handshake doesn't park a tokio worker thread.
 /// Honors `per_probe_delay` between consecutive probes.

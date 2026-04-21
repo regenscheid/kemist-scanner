@@ -160,6 +160,17 @@ const TARGETS: &[KxGroupTarget] = &[
     },
 ];
 
+/// Emit this backend's group inventory as `(iana_code, display_name)`
+/// rows. Used by `scanner::backends::openssl_inventory` so the single
+/// source of truth for "what named groups does the OpenSSL backend
+/// probe" is this `TARGETS` table rather than a parallel list.
+pub fn inventory_entries() -> Vec<(u16, &'static str)> {
+    TARGETS
+        .iter()
+        .map(|t| (t.iana_code, t.display_name))
+        .collect()
+}
+
 /// Probe every target group at TLS 1.2 (FFDHE only) and TLS 1.3. Each
 /// attempt runs in `spawn_blocking` so the blocking OpenSSL handshake
 /// cooperates with the tokio runtime. Honors `per_probe_delay` between
