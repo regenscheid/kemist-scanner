@@ -196,10 +196,12 @@ GroupObservation = {
 ```
 
 `tls1_3` holds the aws-lc-rs modern groups (classical, PQC hybrids,
-standalone ML-KEM, Kyber768Draft00) *plus* the TLS 1.3 outcomes for
-RFC 7919 FFDHE codepoints. `tls1_2` holds only FFDHE outcomes — the
-aws-lc-rs groups are TLS 1.3-only by design. Entries aws-lc-rs doesn't
-ship emit `not_probed` with a specific reason.
+standalone ML-KEM) *plus* the TLS 1.3 outcomes for RFC 7919 FFDHE
+codepoints *plus* TLS 1.3 groups OpenSSL fills when aws-lc-rs doesn't
+ship them (`X448`, `secp521r1`, `MLKEM512`, `MLKEM1024`,
+`secp384r1MLKEM1024`). `tls1_2` holds only FFDHE outcomes — the other
+groups are TLS 1.3-only by design. `provider` distinguishes which
+backend produced the observation (`aws_lc_rs` vs `openssl`).
 
 **FFDHE cross-check.** A TLS 1.2 FFDHE entry with
 `{supported: false, reason: "server_ignored_group_offer_returned_custom_prime"}`

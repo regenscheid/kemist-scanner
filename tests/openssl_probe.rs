@@ -32,7 +32,7 @@ use kemist::model::protocol::TlsVersion;
 use kemist::scanner::openssl::{
     ciphers::{probe_legacy_suites, LegacyProbeOutcome},
     fallback_scsv,
-    ffdhe::{probe_ffdhe_groups, FfdheOutcome},
+    kx_groups::{probe_kx_groups, KxGroupOutcome},
     protocol_versions,
     renegotiation::{self, RenegotiationVerdict},
 };
@@ -111,30 +111,31 @@ async fn legacy_cipher_probe_observes_weak_suites_on_fixture() {
 
 #[tokio::test]
 #[ignore]
-async fn ffdhe_probe_records_per_version_outcomes_on_fixture() {
+async fn kx_group_probe_records_per_version_outcomes_on_fixture() {
     let (addr, hostname) = fixture();
-    let out = probe_ffdhe_groups(addr, &hostname, timeout(), timeout(), Duration::ZERO).await;
+    let out = probe_kx_groups(addr, &hostname, timeout(), timeout(), Duration::ZERO).await;
 
-    // All five RFC 7919 codepoints are in the table.
-    assert_eq!(out.results.len(), 5);
+    // Five FFDHE + five non-FFDHE (X448, secp521r1, MLKEM512/1024,
+    // secp384r1MLKEM1024) target entries.
+    assert_eq!(out.results.len(), 10);
 
     // Every TLS 1.2 / TLS 1.3 cell is populated with some outcome.
     for r in &out.results {
         assert!(matches!(
             r.tls12_outcome,
-            FfdheOutcome::Supported
-                | FfdheOutcome::NotSupported
-                | FfdheOutcome::IgnoredGroupReturnedCustomPrime
-                | FfdheOutcome::Error(_)
-                | FfdheOutcome::NotProbed(_)
+            KxGroupOutcome::Supported
+                | KxGroupOutcome::NotSupported
+                | KxGroupOutcome::IgnoredGroupReturnedCustomPrime
+                | KxGroupOutcome::Error(_)
+                | KxGroupOutcome::NotProbed(_)
         ));
         assert!(matches!(
             r.tls13_outcome,
-            FfdheOutcome::Supported
-                | FfdheOutcome::NotSupported
-                | FfdheOutcome::IgnoredGroupReturnedCustomPrime
-                | FfdheOutcome::Error(_)
-                | FfdheOutcome::NotProbed(_)
+            KxGroupOutcome::Supported
+                | KxGroupOutcome::NotSupported
+                | KxGroupOutcome::IgnoredGroupReturnedCustomPrime
+                | KxGroupOutcome::Error(_)
+                | KxGroupOutcome::NotProbed(_)
         ));
     }
 }

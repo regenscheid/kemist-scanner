@@ -194,7 +194,7 @@ fn fully_populated_openssl_observations_match_schema_v1() {
         client_auth::{CaDnEntry, ClientAuthRequest, OidFilter},
         dh_params::{DhClassification, DhSnapshot},
         fallback_scsv::FallbackScsvResult,
-        ffdhe::{FfdheOutcome, FfdheProbeOutput, FfdheProbeResult},
+        kx_groups::{KxGroupOutcome, KxGroupProbeOutput, KxGroupProbeResult},
         renegotiation::{RenegotiationObservation, RenegotiationVerdict},
         tls13_extensions::Tls13EncryptedExtensions,
         OpensslObservations,
@@ -256,27 +256,34 @@ fn fully_populated_openssl_observations_match_schema_v1() {
         ],
     };
 
-    // FFDHE probe: one Supported, one NotSupported, one
-    // IgnoredGroupReturnedCustomPrime to exercise the cross-check reason.
-    let ffdhe_probes = FfdheProbeOutput {
+    // Named-group probe: FFDHE rows exercising Supported / NotSupported /
+    // IgnoredGroupReturnedCustomPrime, plus a non-FFDHE row demonstrating
+    // an OpenSSL override of an aws-lc-rs `not_probed` slot.
+    let kx_group_probes = KxGroupProbeOutput {
         results: vec![
-            FfdheProbeResult {
+            KxGroupProbeResult {
                 group_name: "ffdhe2048".to_string(),
                 iana_code: 0x0100,
-                tls12_outcome: FfdheOutcome::Supported,
-                tls13_outcome: FfdheOutcome::NotSupported,
+                tls12_outcome: KxGroupOutcome::Supported,
+                tls13_outcome: KxGroupOutcome::NotSupported,
             },
-            FfdheProbeResult {
+            KxGroupProbeResult {
                 group_name: "ffdhe3072".to_string(),
                 iana_code: 0x0101,
-                tls12_outcome: FfdheOutcome::IgnoredGroupReturnedCustomPrime,
-                tls13_outcome: FfdheOutcome::NotProbed("provider_limit".to_string()),
+                tls12_outcome: KxGroupOutcome::IgnoredGroupReturnedCustomPrime,
+                tls13_outcome: KxGroupOutcome::NotProbed("provider_limit".to_string()),
             },
-            FfdheProbeResult {
+            KxGroupProbeResult {
                 group_name: "ffdhe4096".to_string(),
                 iana_code: 0x0102,
-                tls12_outcome: FfdheOutcome::Error("tls_alert_protocol_version".to_string()),
-                tls13_outcome: FfdheOutcome::NotSupported,
+                tls12_outcome: KxGroupOutcome::Error("tls_alert_protocol_version".to_string()),
+                tls13_outcome: KxGroupOutcome::NotSupported,
+            },
+            KxGroupProbeResult {
+                group_name: "secp521r1".to_string(),
+                iana_code: 0x0019,
+                tls12_outcome: KxGroupOutcome::NotProbed("tls12_not_applicable".to_string()),
+                tls13_outcome: KxGroupOutcome::NotSupported,
             },
         ],
     };
@@ -366,7 +373,7 @@ fn fully_populated_openssl_observations_match_schema_v1() {
     let mut results = fixture_results();
     results.openssl_observations = Some(OpensslObservations {
         cipher_probes: Some(cipher_probes),
-        ffdhe_probes: Some(ffdhe_probes),
+        kx_group_probes: Some(kx_group_probes),
         fallback_scsv: Some(fallback_scsv),
         renegotiation: Some(renegotiation),
         client_auth: Some(client_auth),
@@ -421,7 +428,17 @@ fn fully_populated_openssl_observations_match_schema_v1() {
     let groups = tls.get("groups").unwrap();
     // Three FFDHE probe rows produce three tls1_2 + three tls1_3 entries.
     assert_eq!(groups.get("tls1_2").unwrap().as_object().unwrap().len(), 3);
-    assert_eq!(groups.get("tls1_3").unwrap().as_object().unwrap().len(), 3);
+    assert_eq!(groups.get("tls1_3").unwrap().as_object().unwrap().len(), 4);
+    // Override discipline: the secp521r1 row has no prior aws-lc-rs
+    // observation in this fixture, so the OpenSSL-path observation
+    // lands directly with provider=openssl.
+    let s521 = groups
+        .get("tls1_3")
+        .unwrap()
+        .get("secp521r1")
+        .expect("secp521r1 override lands in tls1_3");
+    assert_eq!(s521.get("supported").unwrap().as_bool(), Some(false));
+    assert_eq!(s521.get("provider").unwrap().as_str(), Some("openssl"));
     assert_eq!(
         tls.get("server_key_exchange_signatures")
             .unwrap()
@@ -566,19 +583,19 @@ fn fully_populated_openssl_observations_match_schema_v1() {
 #[test]
 fn ffdhe_cross_check_reason_surfaces_in_output() {
     use kemist::scanner::openssl::{
-        ffdhe::{FfdheOutcome, FfdheProbeOutput, FfdheProbeResult},
+        kx_groups::{KxGroupOutcome, KxGroupProbeOutput, KxGroupProbeResult},
         OpensslObservations,
     };
 
     let mut results = fixture_results();
     results.openssl_observations = Some(OpensslObservations {
         cipher_probes: None,
-        ffdhe_probes: Some(FfdheProbeOutput {
-            results: vec![FfdheProbeResult {
+        kx_group_probes: Some(KxGroupProbeOutput {
+            results: vec![KxGroupProbeResult {
                 group_name: "ffdhe2048".to_string(),
                 iana_code: 0x0100,
-                tls12_outcome: FfdheOutcome::IgnoredGroupReturnedCustomPrime,
-                tls13_outcome: FfdheOutcome::Supported,
+                tls12_outcome: KxGroupOutcome::IgnoredGroupReturnedCustomPrime,
+                tls13_outcome: KxGroupOutcome::Supported,
             }],
         }),
         fallback_scsv: None,

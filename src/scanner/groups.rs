@@ -16,7 +16,6 @@
 //!   SecP384r1MLKEM1024 (0x11ED)
 //! - Standalone ML-KEM: MLKEM512 (0x0200), MLKEM768 (0x0201), MLKEM1024
 //!   (0x0202)
-//! - Pre-standard: X25519Kyber768Draft00 (0x6399)
 //!
 //! ## Restricted to TLS 1.3
 //! rustls applies `kx_groups` to both TLS 1.2 ECDHE and TLS 1.3 key share,
@@ -26,9 +25,10 @@
 //! classify cleanly as group rejection.
 //!
 //! ## Future: extending probe coverage for un-shipped groups
-//! Groups aws-lc-rs does not expose (`MLKEM512`, `MLKEM1024`, `X448`,
-//! `secp521r1`, `secp384r1MLKEM1024`, `X25519Kyber768Draft00`) currently
-//! emit `not_probed`. Two paths, not mutually exclusive:
+//! Groups aws-lc-rs does not expose are covered by the OpenSSL path in
+//! [`crate::scanner::openssl::kx_groups`] where OpenSSL 3.5 ships them
+//! (X448, secp521r1, MLKEM512/1024, secp384r1MLKEM1024). For any future
+//! codepoints neither backend ships, two paths are available:
 //!
 //! **(a) Raw-ClientHello probing.** Hand-craft a TLS 1.3 ClientHello with
 //! the target codepoint in `key_share` plus a dummy payload — see
@@ -125,8 +125,6 @@ const TARGET_GROUPS: &[(&str, u16)] = &[
     ("secp256r1MLKEM768", 0x11eb),
     ("X25519MLKEM768", 0x11ec),
     ("secp384r1MLKEM1024", 0x11ed),
-    // Pre-standard (Cloudflare research codepoint)
-    ("X25519Kyber768Draft00", 0x6399),
 ];
 
 /// Probe every target group. Respects `per_probe_delay` between

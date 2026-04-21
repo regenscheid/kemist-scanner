@@ -13,7 +13,7 @@ pub mod ciphers;
 pub mod client_auth;
 pub mod dh_params;
 pub mod fallback_scsv;
-pub mod ffdhe;
+pub mod kx_groups;
 pub mod protocol_versions;
 pub mod renegotiation;
 pub mod sigalg_policy;
@@ -70,10 +70,10 @@ pub struct OpensslObservations {
     /// anon-DH, DHE-RSA, PSK / Camellia / SEED / ARIA / static DH
     /// families across TLS 1.0/1.1/1.2.
     pub cipher_probes: Option<ciphers::LegacyCipherProbeOutput>,
-    /// RFC 7919 FFDHE named-group probes across TLS 1.2 and TLS 1.3,
-    /// with a cross-check for servers that ignore `supported_groups`
-    /// and return a custom prime instead.
-    pub ffdhe_probes: Option<ffdhe::FfdheProbeOutput>,
+    /// Per-group TLS 1.2 (FFDHE) and TLS 1.3 (FFDHE + non-FFDHE groups
+    /// aws-lc-rs doesn't ship) probes, with a cross-check for FFDHE
+    /// servers that ignore `supported_groups` and return a custom prime.
+    pub kx_group_probes: Option<kx_groups::KxGroupProbeOutput>,
     /// `TLS_FALLBACK_SCSV` (RFC 7507) enforcement observation.
     pub fallback_scsv: Option<fallback_scsv::FallbackScsvResult>,
     /// Client-initiated renegotiation verdict.
@@ -125,8 +125,9 @@ pub async fn run_all_probes(cfg: &ScanConfig) -> Result<OpensslObservations, Sca
     .await;
     out.cipher_probes = Some(cipher_out);
 
-    // FFDHE named-group probing (TLS 1.2 + TLS 1.3).
-    let ffdhe_out = ffdhe::probe_ffdhe_groups(
+    // Named-group probing (FFDHE across TLS 1.2 + TLS 1.3; groups
+    // aws-lc-rs doesn't ship at TLS 1.3).
+    let kx_out = kx_groups::probe_kx_groups(
         cfg.target,
         &cfg.hostname,
         cfg.timeout,
@@ -134,7 +135,7 @@ pub async fn run_all_probes(cfg: &ScanConfig) -> Result<OpensslObservations, Sca
         cfg.per_target_delay,
     )
     .await;
-    out.ffdhe_probes = Some(ffdhe_out);
+    out.kx_group_probes = Some(kx_out);
 
     // TLS_FALLBACK_SCSV (RFC 7507) enforcement.
     let scsv = fallback_scsv::probe(cfg.target, &cfg.hostname, cfg.timeout, cfg.timeout).await;

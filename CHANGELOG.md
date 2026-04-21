@@ -79,6 +79,15 @@ mechanics.
 
 ### Changed
 
+- OpenSSL named-group probe now covers `X448`, `secp521r1`, `MLKEM512`,
+  `MLKEM1024`, and `secp384r1MLKEM1024` in addition to FFDHE. Five
+  aws-lc-rs `not_probed` slots flip to real `supported: true | false`
+  observations. Probe module renamed `openssl::ffdhe` →
+  `openssl::kx_groups`; `OpensslObservations.ffdhe_probes` →
+  `kx_group_probes`. Output-schema shape unchanged.
+- Removed `X25519Kyber768Draft00` from the probe inventory —
+  pre-standard Cloudflare codepoint obsoleted by `X25519MLKEM768`;
+  field no longer appears in `tls.groups.tls1_3`.
 - **Removed** `tls.downgrade_signaling.fallback_scsv_accepted` — the
   deprecated-in-0.2.0 heuristic field is gone from the schema. Its
   replacement `fallback_scsv_enforced` has been the authoritative
@@ -291,12 +300,11 @@ downstream projects.
   Single-cipher `CryptoProvider` per probe. Real `supported: true/false`
   signals from the wire. Server-ordering detection via two handshakes
   with reversed suite orderings.
-- Per-kx-group probing for 12 target groups: classical (X25519/X448/
+- Per-kx-group probing for 11 target groups: classical (X25519/X448/
   secp256r1-521) + PQC hybrids (X25519MLKEM768/secp256r1MLKEM768/
-  secp384r1MLKEM1024) + standalone ML-KEM (512/768/1024) + the
-  pre-standard X25519Kyber768Draft00. Groups aws-lc-rs doesn't ship
-  emit `not_probed` with a specific reason — never `supported: false`
-  without a real probe.
+  secp384r1MLKEM1024) + standalone ML-KEM (512/768/1024). Groups
+  aws-lc-rs doesn't ship emit `not_probed` with a specific reason —
+  never `supported: false` without a real probe.
 - Characterization handshake captures rustls connection state:
   negotiated version, cipher suite, kx group, signature scheme (from
   verifier callback), ALPN, OCSP stapling bytes.
@@ -384,9 +392,9 @@ downstream projects.
   array rather than `supported: false`. Cross-reference against a
   fuller cipher registry for weak-cipher policies.
 - aws-lc-rs kx group coverage: 6 groups. Standalone ML-KEM-512/1024,
-  X448, secp521r1, secp384r1MLKEM1024, X25519Kyber768Draft00 emit
-  `not_probed`. Three future extension paths documented in
-  [docs/PQC.md](docs/PQC.md).
+  X448, secp521r1, secp384r1MLKEM1024 emit `not_probed` from the
+  aws-lc-rs path; the OpenSSL named-group probe fills those slots.
+  See [docs/PQC.md](docs/PQC.md).
 - HSTS preload list is a 12-entry stub. Full Chromium
   `transport_security_state_static.json` snapshot deferred.
 - PQC signature verification not performed — OID match only. Chain

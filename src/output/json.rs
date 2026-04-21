@@ -348,63 +348,83 @@ fn build_groups(results: &ScanResults) -> TlsGroups {
         }
     }
 
-    merge_openssl_ffdhe(results, &mut out);
+    merge_openssl_kx_groups(results, &mut out);
     out
 }
 
-fn merge_openssl_ffdhe(results: &ScanResults, out: &mut TlsGroups) {
+fn merge_openssl_kx_groups(results: &ScanResults, out: &mut TlsGroups) {
     #[cfg(feature = "legacy-probes")]
     {
-        use crate::scanner::openssl::ffdhe::FfdheOutcome;
+        use crate::scanner::openssl::kx_groups::KxGroupOutcome;
         let Some(obs) = results.openssl_observations.as_ref() else {
             return;
         };
-        let Some(probes) = obs.ffdhe_probes.as_ref() else {
+        let Some(probes) = obs.kx_group_probes.as_ref() else {
             return;
         };
-        let to_obs = |o: &FfdheOutcome, iana: &str| match o {
-            FfdheOutcome::Supported => GroupObservation {
-                supported: Some(true),
-                method: Method::Probe,
-                reason: None,
-                iana_code: Some(iana.to_string()),
-                provider: Some("openssl".to_string()),
-            },
-            FfdheOutcome::NotSupported => GroupObservation {
-                supported: Some(false),
-                method: Method::Probe,
-                reason: None,
-                iana_code: Some(iana.to_string()),
-                provider: Some("openssl".to_string()),
-            },
-            FfdheOutcome::IgnoredGroupReturnedCustomPrime => GroupObservation {
-                supported: Some(false),
-                method: Method::Probe,
-                reason: Some("server_ignored_group_offer_returned_custom_prime".to_string()),
-                iana_code: Some(iana.to_string()),
-                provider: Some("openssl".to_string()),
-            },
-            FfdheOutcome::Error(e) => GroupObservation {
-                supported: None,
-                method: Method::Error,
-                reason: Some(e.clone()),
-                iana_code: Some(iana.to_string()),
-                provider: Some("openssl".to_string()),
-            },
-            FfdheOutcome::NotProbed(r) => GroupObservation {
-                supported: None,
-                method: Method::NotProbed,
-                reason: Some(r.clone()),
-                iana_code: Some(iana.to_string()),
-                provider: Some("openssl".to_string()),
-            },
+        let to_obs = |o: &KxGroupOutcome, iana: &str| -> Option<GroupObservation> {
+            Some(match o {
+                KxGroupOutcome::Supported => GroupObservation {
+                    supported: Some(true),
+                    method: Method::Probe,
+                    reason: None,
+                    iana_code: Some(iana.to_string()),
+                    provider: Some("openssl".to_string()),
+                },
+                KxGroupOutcome::NotSupported => GroupObservation {
+                    supported: Some(false),
+                    method: Method::Probe,
+                    reason: None,
+                    iana_code: Some(iana.to_string()),
+                    provider: Some("openssl".to_string()),
+                },
+                KxGroupOutcome::IgnoredGroupReturnedCustomPrime => GroupObservation {
+                    supported: Some(false),
+                    method: Method::Probe,
+                    reason: Some("server_ignored_group_offer_returned_custom_prime".to_string()),
+                    iana_code: Some(iana.to_string()),
+                    provider: Some("openssl".to_string()),
+                },
+                KxGroupOutcome::Error(e) => GroupObservation {
+                    supported: None,
+                    method: Method::Error,
+                    reason: Some(e.clone()),
+                    iana_code: Some(iana.to_string()),
+                    provider: Some("openssl".to_string()),
+                },
+                // A "TLS 1.2 not applicable" cell for a non-FFDHE group
+                // would just clutter the output — suppress it.
+                KxGroupOutcome::NotProbed(r) if r == "tls12_not_applicable" => return None,
+                KxGroupOutcome::NotProbed(r) => GroupObservation {
+                    supported: None,
+                    method: Method::NotProbed,
+                    reason: Some(r.clone()),
+                    iana_code: Some(iana.to_string()),
+                    provider: Some("openssl".to_string()),
+                },
+            })
+        };
+        // aws-lc-rs-first override discipline: a real aws-lc-rs probe
+        // result (`method: Probe`) wins; only overwrite slots aws-lc-rs
+        // reported as `not_probed`.
+        let should_override = |existing: Option<&GroupObservation>| -> bool {
+            match existing {
+                None => true,
+                Some(o) => matches!(o.method, Method::NotProbed),
+            }
         };
         for r in &probes.results {
             let iana = format!("0x{:04X}", r.iana_code);
-            out.tls1_2
-                .insert(r.group_name.clone(), to_obs(&r.tls12_outcome, &iana));
-            out.tls1_3
-                .insert(r.group_name.clone(), to_obs(&r.tls13_outcome, &iana));
+            if let Some(o) = to_obs(&r.tls12_outcome, &iana) {
+                if should_override(out.tls1_2.get(&r.group_name)) {
+                    out.tls1_2.insert(r.group_name.clone(), o);
+                }
+            }
+            if let Some(o) = to_obs(&r.tls13_outcome, &iana) {
+                if should_override(out.tls1_3.get(&r.group_name)) {
+                    out.tls1_3.insert(r.group_name.clone(), o);
+                }
+            }
         }
     }
     #[cfg(not(feature = "legacy-probes"))]

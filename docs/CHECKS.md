@@ -72,7 +72,7 @@ run against a vendored OpenSSL 3.5 LTS (`openssl-src = "=300.5.5"`).
 | Legacy cipher suite probe | Per-suite handshake with single-suite cipher list + SECLEVEL=0 + version pinned | `tls.cipher_suites.{tls1_0, tls1_1, tls1_2}[]` entries with `provider: "openssl"` | [openssl/ciphers.rs](../src/scanner/openssl/ciphers.rs) |
 | DH parameter capture | `SSL_get_peer_tmp_key` after every successful DHE handshake; SHA-256 of prime classified against RFC 7919 | `tls.dh_parameters[]` | [openssl/dh_params.rs](../src/scanner/openssl/dh_params.rs) |
 | SKE / CertificateVerify signature | `SSL_ctrl(SSL_CTRL_GET_PEER_SIGNATURE_NAME, …)` post-handshake | `tls.server_key_exchange_signatures[]` | [openssl/ske_sig.rs](../src/scanner/openssl/ske_sig.rs) |
-| FFDHE named-group probe | `set_groups_list("ffdheNNNN")` × `{TLS 1.2 + DHE cipher list, TLS 1.3}`; cross-checks observed prime against advertised group | `tls.groups.{tls1_2, tls1_3}.ffdheNNNN` entries with `provider: "openssl"` | [openssl/ffdhe.rs](../src/scanner/openssl/ffdhe.rs) |
+| Named-group probe (FFDHE + aws-lc-rs gaps) | `set_groups_list(<name>)` × `{TLS 1.2 + DHE cipher list (FFDHE only), TLS 1.3}`; FFDHE rows cross-check observed prime against advertised codepoint. Also covers TLS 1.3 groups aws-lc-rs does not ship: `X448`, `secp521r1`, `MLKEM512`, `MLKEM1024`, `secp384r1MLKEM1024` — those slots override aws-lc-rs `not_probed` with a real observation. | `tls.groups.{tls1_2, tls1_3}.*` entries with `provider: "openssl"` | [openssl/kx_groups.rs](../src/scanner/openssl/kx_groups.rs) |
 | TLS_FALLBACK_SCSV enforcement | Characterize server max → probe one step below with `SslMode::SEND_FALLBACK_SCSV`; expect `inappropriate_fallback` alert | `tls.downgrade_signaling.fallback_scsv_enforced` | [openssl/fallback_scsv.rs](../src/scanner/openssl/fallback_scsv.rs) |
 | Client-initiated renegotiation | TLS 1.2 handshake → `SSL_renegotiate` → `SSL_do_handshake`; observe alert / close / success | `tls.renegotiation_behavior` | [openssl/renegotiation.rs](../src/scanner/openssl/renegotiation.rs) |
 | CertificateRequest capture | `SSL_CTX_set_msg_callback` (via `SSL_CTX_callback_ctrl`) intercepting msg_type 13; parse TLS 1.2 and TLS 1.3 shapes | `tls.client_auth_request` | [openssl/client_auth.rs](../src/scanner/openssl/client_auth.rs) |
@@ -148,14 +148,15 @@ PQC hybrids: `X25519MLKEM768` (0x11EC), `secp256r1MLKEM768` (0x11EB),
 Standalone ML-KEM: `MLKEM512` (0x0200), `MLKEM768` (0x0201),
 `MLKEM1024` (0x0202)
 
-Pre-standard: `X25519Kyber768Draft00` (0x6399) — Cloudflare research
-codepoint, obsoleted by `X25519MLKEM768`
-
-**Coverage gap.** aws-lc-rs ships only ~6 of the 12 (typically X25519,
-secp256r1, secp384r1, MLKEM768, X25519MLKEM768, secp256r1MLKEM768).
-The others emit `{supported: null, method: not_probed, reason:
-"aws_lc_rs_no_<name>_support"}` — never `supported: false` without a
-real probe.
+**Coverage.** aws-lc-rs ships ~6 of the 11 (typically X25519,
+secp256r1, secp384r1, MLKEM768, X25519MLKEM768, secp256r1MLKEM768). The
+remaining five (`X448`, `secp521r1`, `MLKEM512`, `MLKEM1024`,
+`secp384r1MLKEM1024`) are filled by the OpenSSL named-group probe in
+[openssl/kx_groups.rs](../src/scanner/openssl/kx_groups.rs), which
+overrides any leftover `not_probed` slot with a real
+`supported: true | false` observation. Entries that carry
+`method: not_probed` after both paths have run identify a codepoint
+neither backend ships.
 
 **Mechanism.** Per-group TLS 1.3 handshake with that single group in
 `kx_groups`. Outcomes classify identically to cipher probes.

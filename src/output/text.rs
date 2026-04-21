@@ -941,7 +941,6 @@ mod tests {
     fn pqc_group_detection() {
         assert!(is_pqc_group("X25519MLKEM768"));
         assert!(is_pqc_group("mlkem1024"));
-        assert!(is_pqc_group("X25519Kyber768Draft00"));
         assert!(!is_pqc_group("X25519"));
         assert!(!is_pqc_group("secp256r1"));
     }
