@@ -76,6 +76,9 @@ run against a vendored OpenSSL 3.5 LTS (`openssl-src = "=300.5.5"`).
 | TLS_FALLBACK_SCSV enforcement | Characterize server max → probe one step below with `SslMode::SEND_FALLBACK_SCSV`; expect `inappropriate_fallback` alert | `tls.downgrade_signaling.fallback_scsv_enforced` | [openssl/fallback_scsv.rs](../src/scanner/openssl/fallback_scsv.rs) |
 | Client-initiated renegotiation | TLS 1.2 handshake → `SSL_renegotiate` → `SSL_do_handshake`; observe alert / close / success | `tls.renegotiation_behavior` | [openssl/renegotiation.rs](../src/scanner/openssl/renegotiation.rs) |
 | CertificateRequest capture | `SSL_CTX_set_msg_callback` (via `SSL_CTX_callback_ctrl`) intercepting msg_type 13; parse TLS 1.2 and TLS 1.3 shapes | `tls.client_auth_request` | [openssl/client_auth.rs](../src/scanner/openssl/client_auth.rs) |
+| TLS 1.3 EncryptedExtensions capture | `SSL_CTX_set_msg_callback` intercepts msg_type 8; parser extracts `record_size_limit` (RFC 8449) and `compress_certificate` (RFC 8879). See caveat below. | `tls.extensions.record_size_limit`, `tls.extensions.compress_certificate_algorithms` | [openssl/tls13_extensions.rs](../src/scanner/openssl/tls13_extensions.rs) |
+| Session resumption — TLS 1.2 ticket + rotation | Two sequential TLS 1.2 handshakes with session cache mode `CLIENT`; compare `SSL_SESSION_get_id` across handshakes for rotation proxy | `tls.session_resumption.tls1_2.*` | [openssl/tickets.rs](../src/scanner/openssl/tickets.rs) |
+| Signature-algorithm policy probe | Four constrained handshakes with `SSL_CTX_set1_sigalgs_list` pinned to each constraint family; capture outcome + selected sigalg | `tls.signature_algorithm_policy_probe.*` | [openssl/sigalg_policy.rs](../src/scanner/openssl/sigalg_policy.rs) |
 
 Error classification for every OpenSSL probe flows through
 [openssl/alerts.rs](../src/scanner/openssl/alerts.rs) — same
@@ -102,6 +105,36 @@ feature matrices.
 **Pre-1.3 protocol-version probing** (SSL 3.0, TLS 1.0, TLS 1.1) also
 moves onto this subsystem when `legacy-probes` is on; see the top of
 this document for the backend-selection table.
+
+**TLS 1.3 EncryptedExtensions — known limitation.** Both
+`record_size_limit` (RFC 8449) and `compress_certificate` (RFC 8879)
+require the server to echo only in response to a matching client
+offer. OpenSSL 3.5 reserves ext codes 27 and 28 for its internal
+handlers so `SSL_CTX_add_custom_ext` refuses to register, and the
+native high-level setters (`SSL_CTX_set1_cert_comp_preference`
+etc.) aren't exposed in openssl-sys 0.9.109. Result: on real-world
+targets both fields are typically absent. The msg_callback
+infrastructure + parser are in place; a future workstream fills the
+client-offer gap.
+
+**Session resumption — rotation proxy semantics.** openssl-sys
+0.9.109 doesn't expose `SSL_SESSION_get0_ticket`, so we diff the
+session-ID bytes across two successive handshakes as a rotation
+proxy. Treat `ticket_rotated_across_connections: false` as "likely
+stable" rather than "definitely same ticket bytes." TLS 1.3 PSK
+resumption + 0-RTT (`early_data_accepted`) are plumbed as
+`not_probed` pending a follow-up workstream; both require a
+post-handshake read dance + `SSL_write_early_data` handling.
+
+**Sigalg policy probe — cost + CLI skip.** +4 handshakes per
+target by default. `--sigalg-probe-skip=<csv>` opts out individual
+constraints; skipped slots emit
+`method: not_probed, reason: cli_skipped`. Interpretation:
+`rsa_pkcs1_only → handshake_failure` is the modern-posture "good"
+signal (server refuses PKCS#1 v1.5 signatures);
+`sha256_plus_only → handshake_failure` flags SHA-1-signed cert
+chains; `ecdsa_only → handshake_failure` flags RSA-only
+deployments.
 
 ## Key exchange groups
 
@@ -145,6 +178,14 @@ From [scanner/cert.rs](../src/scanner/cert.rs) and
   Composite/hybrid sig OIDs stubbed for future IETF draft codepoints.
 - `embedded_scts` — count of entries in extension 1.3.6.1.4.1.11129.2.4.2
 - `fingerprint_sha256` / `fingerprint_sha1` — full cert DER hash
+- `extensions` — parsed X.509 v3 extensions per cert; see
+  [OUTPUT_SCHEMA.md](OUTPUT_SCHEMA.md#certificates) for the field
+  reference. Populated via x509-parser's `parsed_extension()` plus a
+  byte-level RFC 7633 TLS Feature parser for Must-Staple (no
+  dedicated variant in x509-parser 0.16). Per-SCT detail (`log_id`,
+  `timestamp`, sig algo, signature) now lands under
+  `extensions.scts[]` alongside the backwards-compat `embedded_scts`
+  count.
 
 ## Trust validation
 
@@ -166,7 +207,10 @@ byte-level TLS 1.2 probe.
 | Schema field | Source |
 |---|---|
 | `tls.negotiated.*` | `ClientConnection::{protocol_version,negotiated_cipher_suite,negotiated_key_exchange_group,alpn_protocol}` |
-| `tls.extensions.ocsp_stapling` | Verifier `verify_server_cert` receives `ocsp_response: &[u8]`; we record the length and whether it was non-empty |
+| `tls.extensions.ocsp_stapling.{stapled, response_length}` | Verifier `verify_server_cert` receives `ocsp_response: &[u8]`; bytes retained for downstream parsing |
+| `tls.extensions.ocsp_stapling.content` | Raw bytes parsed via [model/ocsp_response.rs](../src/model/ocsp_response.rs) (RFC 6960 BasicOCSPResponse). `cert_status`, timestamps, responder ID, serial, hash-algorithm OID |
+| `tls.extensions.ocsp_stapling.delivery_path` | Derived from negotiated version: `tls1_2` for CertificateStatus flight, `tls1_3` for EncryptedExtensions status_request response |
+| `tls.extensions.ocsp_stapling.raw_hex` | Gated behind `--include-ocsp-raw` CLI flag |
 | `tls.extensions.alpn_offered` | What kemist sent in ClientHello |
 
 ### From byte-level ServerHello probe ([scanner/hello.rs](../src/scanner/hello.rs))
@@ -184,10 +228,23 @@ ServerHello bytes.
 | `tls.extensions.secure_renegotiation` | 0xff01 (RFC 5746 renegotiation_info) |
 | `tls.extensions.compression_offered` | compression_method byte in ServerHello |
 | `tls.extensions.sct.delivery_paths` (tls_extension) | 18 (signed_certificate_timestamp) |
+| `tls.extensions.truncated_hmac` | 4 (RFC 6066 §7 — deprecated) |
+| `tls.extensions.npn` | 13172 (Google pre-ALPN, deprecated) |
+| `tls.extensions.supported_point_formats_echoed` | 11 (RFC 4492 §5.1.2) — parsed canonical names |
+| `tls.extensions.max_fragment_length` | 1 (RFC 6066 §4) — server-echoed code mapped to `2^9`..`2^12` |
+| `tls.downgrade_protection.tls13_downgrade_sentinel` | Last 8 bytes of ServerRandom per RFC 8446 §4.1.3 |
 
 **The byte probe is a TLS 1.2 probe.** When the server only speaks TLS
 1.3, EMS/EtM/secure_renegotiation render as `not_applicable`. Heartbeat
 is defined for both and renders regardless.
+
+**TLS 1.3 downgrade sentinel.** Observed from the plaintext
+ServerRandom (first 32 bytes of ServerHello). A TLS 1.3-capable
+server that negotiates TLS 1.2 in response to a TLS 1.2 ClientHello
+MUST set the trailing 8 bytes to `DOWNGRD\x01` per RFC 8446 §4.1.3.
+Because kemist's byte probe always offers TLS 1.2, matching this
+sentinel is a useful TLS-1.3-capability signal even though the probe
+itself never negotiates 1.3.
 
 ### Other extension-adjacent observations
 

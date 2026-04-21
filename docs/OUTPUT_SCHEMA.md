@@ -148,15 +148,25 @@ from rustls's post-handshake `ClientConnection` state:
 }
 
 CipherSuiteEntry = {
-  name:          "TLS_RSA_WITH_AES_128_CBC_SHA",
-  iana_code:     "0x002F",
-  supported:     bool | null,
-  method:        Method,
-  reason?:       string,
-  openssl_name?: "AES128-SHA",                 // present only for openssl-backed probes
-  provider?:     "aws_lc_rs" | "openssl"       // backend that ran the probe
+  name:           "TLS_RSA_WITH_AES_128_CBC_SHA",
+  iana_code:      "0x002F",
+  supported:      bool | null,
+  method:         Method,
+  reason?:        string,
+  openssl_name?:  "AES128-SHA",                // present only for openssl-backed probes
+  provider?:      "aws_lc_rs" | "openssl",     // backend that ran the probe
+  classification: "rsa_kex"                    // kx+privacy family — always present
 }
 ```
+
+`classification` labels each suite with its kx + privacy family.
+Values: `rsa_kex`, `dhe_aead`, `dhe_cbc`, `ecdhe_aead`, `ecdhe_cbc`,
+`anon`, `export`, `static_dh`, `static_ecdh`, `psk`, `dhe_psk`,
+`ecdhe_psk`, `rsa_psk`, `null_cipher`, `other`. Privacy-dominant
+concerns (`null_cipher`, `anon`, `export`) take precedence over the
+kx prefix. TLS 1.3 suites (`TLS13_*`) map to `ecdhe_aead`. Stability
+contract: values permanent within schema v1.x; new values may be
+added. See the "Enum stability" section at the bottom.
 
 One entry per probed suite, partitioned by TLS version. Suites outside
 aws-lc-rs' ship set aren't probed via the rustls path — the openssl
@@ -206,15 +216,53 @@ a specific reason — never `supported: false` without a real probe.
 {
   ems: ObservationBool,
   secure_renegotiation: ObservationBool,
-  ocsp_stapling: {stapled, method, reason?, response_length},
+  ocsp_stapling: {
+    stapled, method, reason?, response_length,
+    content?,           // parsed OCSP response (RFC 6960)
+    delivery_path?,     // "tls1_2" | "tls1_3"
+    raw_hex?            // only with --include-ocsp-raw
+  },
   sct: {delivery_paths: [...], count},
   alpn_offered: [...],
   encrypt_then_mac: ObservationBool,
   heartbeat_present: ObservationBool,
   heartbeat_echoes_oversized_payload: ObservationBool,
-  compression_offered: [...]
+  compression_offered: [...],
+  truncated_hmac: ObservationBool,
+  npn: ObservationBool,
+  supported_point_formats_echoed: [...],
+  max_fragment_length?: string,             // "2^9".."2^12" or "0xNN"
+  record_size_limit?: int,                  // RFC 8449 (see caveat)
+  compress_certificate_algorithms: [...]    // RFC 8879 (see caveat)
 }
 ```
+
+Notes:
+
+- **`ocsp_stapling.content`** — parsed BasicOCSPResponse per RFC 6960 §4.2.
+  Populated when a staple was delivered and parsed successfully. Fields:
+  `response_status`, `signature_algorithm_oid`, `responder_id_by_name` /
+  `responder_id_by_key`, `produced_at`, `single_responses_count`,
+  `cert_status` (`good` / `revoked` / `unknown`), `revocation_time`,
+  `revocation_reason`, `this_update`, `next_update`, `cert_id`
+  (hashAlg OID + issuer name/key hashes + serial).
+- **`ocsp_stapling.raw_hex`** — gated behind `--include-ocsp-raw` CLI
+  flag. Off by default because the parsed `content` is what rule
+  engines want and raw DER inflates output size noticeably.
+- **`record_size_limit` / `compress_certificate_algorithms`** —
+  captured via an OpenSSL msg-callback on the TLS 1.3
+  EncryptedExtensions message. **Known limitation**: OpenSSL 3.5
+  reserves these extension codes for its own internal handlers so
+  we can't inject a matching client offer via `add_custom_ext`, and
+  openssl-sys 0.9.109 doesn't expose the native setters. Per RFC
+  8449 / 8879, servers MUST NOT advertise these unsolicited — so in
+  practice both fields are typically absent on real scans. A
+  future workstream will close this gap when native binding
+  coverage improves.
+- **`truncated_hmac` / `npn`** — observed in plaintext TLS 1.2
+  ServerHello via the byte-level hello probe. Client offers both
+  extensions to elicit server echoes (without actually negotiating
+  them — probe bails after ServerHello).
 
 See [CHECKS.md](CHECKS.md) for how each observation is obtained.
 
@@ -222,9 +270,20 @@ See [CHECKS.md](CHECKS.md) for how each observation is obtained.
 ```
 {
   fallback_scsv_accepted: ObservationBool,  // DEPRECATED — see below
-  fallback_scsv_enforced:  ObservationBool
+  fallback_scsv_enforced:  ObservationBool,
+  tls13_downgrade_sentinel?: "tls12" | "lte_tls11" | "none"
 }
 ```
+
+- **`tls13_downgrade_sentinel`** — the RFC 8446 §4.1.3 last-8-bytes
+  sentinel observed in the byte-level TLS 1.2 ServerHello
+  ServerRandom. Always absent when the hello probe couldn't
+  produce a ServerHello. `"tls12"` means the server is TLS
+  1.3-capable but negotiated TLS 1.2 (real signal even though the
+  byte probe only offers TLS 1.2). `"lte_tls11"` means a TLS
+  1.3-capable stack negotiated TLS 1.1 or lower. `"none"` = no
+  sentinel pattern match (pure-TLS-1.2/earlier server or a
+  non-compliant TLS 1.3 stack).
 
 - **`fallback_scsv_enforced`** — active OpenSSL-backed probe. Sends a
   handshake with `SSL_MODE_SEND_FALLBACK_SCSV` and `max_proto_version`
@@ -241,6 +300,65 @@ See [CHECKS.md](CHECKS.md) for how each observation is obtained.
   version on it always renders `{value: null, method: "not_probed",
   reason: "superseded_by_fallback_scsv_enforced"}`. Consumers should
   migrate to `fallback_scsv_enforced`.
+
+### `tls.session_resumption`
+```
+{
+  tls1_2: {
+    session_ticket_issued: ObservationBool,
+    ticket_lifetime_hint_secs?: int,
+    session_id_issued: ObservationBool,
+    ticket_rotated_across_connections: ObservationBool
+  },
+  tls1_3: {
+    new_session_ticket_count?: int,
+    ticket_lifetime_secs: [int, ...],
+    psk_resumption_accepted: ObservationBool,
+    early_data_accepted: ObservationBool
+  }
+}
+```
+
+Observed by opening two successive handshakes and comparing state.
+`ticket_rotated_across_connections` is a best-effort proxy: kemist
+diffs the session-ID bytes across handshakes because
+openssl-sys 0.9.109 doesn't expose `SSL_SESSION_get0_ticket`. Treat
+`false` as "likely stable ticket" rather than "definitely same
+ticket bytes."
+
+The TLS 1.3 slots currently emit `method: not_probed` with reasons
+`tls13_resumption_probe_not_implemented` and
+`early_data_probe_not_implemented`. A follow-up workstream will
+implement them.
+
+### `tls.signature_algorithm_policy_probe`
+```
+{
+  sha256_plus_only: ConstrainedProbeResult,
+  ecdsa_only:       ConstrainedProbeResult,
+  rsa_pss_only:     ConstrainedProbeResult,
+  rsa_pkcs1_only:   ConstrainedProbeResult
+}
+
+ConstrainedProbeResult = {
+  outcome: "handshake_complete" | "handshake_failure" | "connection_closed" | "other_alert" | "not_probed",
+  selected_sigalg?: string,        // server's chosen sigalg on complete
+  alert?:           string,        // alert category on refusal
+  method:           Method,
+  reason?:          string
+}
+```
+
+Four active handshakes with restricted `signature_algorithms`
+offers; see [CHECKS.md](CHECKS.md#signature-algorithm-policy-probe)
+for the exact sigalgs list per constraint.
+
+The CLI flag `--sigalg-probe-skip=<csv>` opts out individual probes;
+skipped slots emit `method: not_probed, reason: cli_skipped`.
+
+Rule-engine note: `rsa_pkcs1_only` returning `handshake_failure` is
+the modern-posture "good" signal — the server is refusing PKCS#1
+v1.5 signatures.
 
 ### `tls.sni_behavior`
 ```
@@ -282,6 +400,27 @@ handshake and a second handshake with SNI omitted (via `ServerName::IpAddress`).
 | `embedded_scts` | `int` | Count from extension 1.3.6.1.4.1.11129.2.4.2 |
 | `fingerprint_sha256` | `string` | Hex |
 | `fingerprint_sha1` | `string` | Hex |
+| `extensions` | `CertExtensions` | Parsed X.509 v3 extensions — see below |
+
+`CertExtensions`:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `basic_constraints` | `{ca: bool, path_len_constraint?: int}` | RFC 5280 §4.2.1.9 |
+| `key_usage` | `{bits: [string, ...]}` | RFC 5280 §4.2.1.3 — canonical names: `digital_signature`, `content_commitment`, `key_encipherment`, `data_encipherment`, `key_agreement`, `key_cert_sign`, `crl_sign`, `encipher_only`, `decipher_only` |
+| `extended_key_usage` | `{oids: [string, ...]}` | RFC 5280 §4.2.1.12 — `server_auth`, `client_auth`, `code_signing`, etc.; unknown OIDs in dotted-decimal |
+| `authority_key_identifier` | `string?` | Hex of keyIdentifier |
+| `subject_key_identifier` | `string?` | Hex of keyIdentifier |
+| `authority_information_access` | `{ocsp: [...], ca_issuers: [...]}` | URIs only |
+| `crl_distribution_points` | `{urls: [...]}` | `fullName` URI entries only |
+| `name_constraints` | `{permitted_subtrees: [...], excluded_subtrees: [...]}` | Stringified GeneralName entries |
+| `certificate_policies` | `{oids: [string, ...]}` | Policy OIDs |
+| `must_staple` | `bool?` | RFC 7633 TLS Feature ext — `true` iff feature 5 (status_request) is listed |
+| `scts` | `[SctDetail, ...]` | Per-SCT detail from ext 1.3.6.1.4.1.11129.2.4.2 |
+
+`SctDetail = {log_id: hex, timestamp: RFC3339, signature_hash_algorithm: string, signature_algorithm: string, signature_hex: hex}`.
+The cert-level `embedded_scts` count remains for backwards
+compatibility and equals `scts.len()`.
 
 ### `validation`
 Trust observations — **three independent fields**, deliberately not
@@ -345,3 +484,33 @@ The `<name>` suffix on `tls_alert_` is the snake_case alert identifier
 (`handshake_failure`, `bad_certificate`, `unknown_ca`, etc.). Consumers
 that want to aggregate across alert types should match on the
 `tls_alert_` prefix and extract the remainder.
+
+---
+
+## Enum stability
+
+The schema pins several fields to string enums. All values listed
+below are **permanent within schema v1.x** — never renamed, never
+removed. New values may be added in minor-version bumps; consumers
+**MUST** tolerate unknown values gracefully rather than crashing or
+rejecting the record.
+
+| Field | Values |
+|---|---|
+| `cipher_suites.<ver>[].classification` | `rsa_kex`, `dhe_aead`, `dhe_cbc`, `ecdhe_aead`, `ecdhe_cbc`, `anon`, `export`, `static_dh`, `static_ecdh`, `psk`, `dhe_psk`, `ecdhe_psk`, `rsa_psk`, `null_cipher`, `other` |
+| `cipher_suites.<ver>[].provider`, `groups.<ver>.*.provider` | `aws_lc_rs`, `openssl` |
+| `*.method` (every `{value, method, reason?}` envelope) | `probe`, `not_probed`, `not_applicable`, `error`, `connection_state` |
+| `errors[].category` | `dns_resolution_failed`, `network_unreachable`, `connection_refused`, `connection_timeout`, `handshake_timeout`, `tls_alert_<name>`, `cert_parse_error`, `extension_parse_error`, `http_error`, `internal_scanner_error` |
+| `signature_algorithm_policy_probe.*.outcome` | `handshake_complete`, `handshake_failure`, `connection_closed`, `other_alert`, `not_probed` |
+| `ocsp_stapling.content.cert_status` | `good`, `revoked`, `unknown` |
+| `ocsp_stapling.content.response_status` | `successful`, `malformedRequest`, `internalError`, `tryLater`, `sigRequired`, `unauthorized`, `unknown_<n>` |
+| `ocsp_stapling.delivery_path` | `tls1_2`, `tls1_3` |
+| `downgrade_signaling.tls13_downgrade_sentinel` | `tls12`, `lte_tls11`, `none` |
+
+For `category` and `response_status`, the `<name>` / `<n>` suffix
+pattern is the permanent shape; new alert names or OCSP-status codes
+appear as new `tls_alert_<newname>` / `unknown_<newcode>` values
+without breaking the schema contract.
+
+If kemist ever needs to retire a value (extremely rare), that
+triggers a major-version bump.

@@ -6,6 +6,99 @@ numbers follow [semver](https://semver.org/).
 
 ## [Unreleased]
 
+### Added — Observation expansion workstream
+
+Extends the raw-observation surface so downstream rule engines
+(NIST SP 800-52, Mozilla profiles, custom policies) have more
+inputs without the scanner rendering verdicts itself. All additions
+are additive; `schema_version` remains `"1.0.0"`. See
+[docs/OUTPUT_SCHEMA.md](docs/OUTPUT_SCHEMA.md) for field-by-field
+semantics and [docs/CHECKS.md](docs/CHECKS.md) for per-probe
+mechanics.
+
+- `tls.certificates.chain[].extensions` — parsed X.509 v3 extensions
+  per cert: Basic Constraints (`ca`, `path_len_constraint`), Key
+  Usage bits (canonical RFC 5280 names), Extended Key Usage OIDs,
+  Authority/Subject Key Identifier, Authority Information Access
+  (OCSP + CA Issuers URLs), CRL Distribution Points URLs, Name
+  Constraints (permitted/excluded subtrees), Certificate Policies
+  OIDs, RFC 7633 Must-Staple flag, per-SCT detail (log_id,
+  timestamp, signature). Always-on.
+- `tls.extensions.truncated_hmac`, `.npn`,
+  `.supported_point_formats_echoed`, `.max_fragment_length` — new
+  ServerHello observations via the always-on byte-level TLS 1.2
+  probe.
+- `tls.downgrade_signaling.tls13_downgrade_sentinel` — RFC 8446
+  §4.1.3 trailing-8-bytes ServerRandom sentinel (`tls12` /
+  `lte_tls11` / `none`).
+- `tls.extensions.ocsp_stapling.content` — parsed OCSP response per
+  RFC 6960 §4.2: `response_status`, `signature_algorithm_oid`,
+  responder ID (byName or byKey), `produced_at`,
+  `single_responses_count`, and first-response fields
+  (`cert_status`, `revocation_time`, `revocation_reason`,
+  `this_update`, `next_update`, `cert_id`). Always-on pure parser
+  (`model/ocsp_response.rs`).
+- `tls.extensions.ocsp_stapling.delivery_path` (`tls1_2` / `tls1_3`)
+  and `raw_hex` (gated by new `--include-ocsp-raw` CLI flag).
+- `tls.extensions.record_size_limit`,
+  `tls.extensions.compress_certificate_algorithms` — TLS 1.3
+  EncryptedExtensions observation via OpenSSL msg-callback.
+  **Known limitation:** typically absent because OpenSSL 3.5
+  reserves these ext codes for internal handlers, blocking a
+  matching client offer; openssl-sys 0.9.109 doesn't expose the
+  native setters. Follow-up workstream to close.
+- `tls.cipher_suites.<ver>[].classification` — kx+privacy family
+  label per suite. 15-variant enum (`rsa_kex`, `dhe_aead`,
+  `dhe_cbc`, `ecdhe_aead`, `ecdhe_cbc`, `anon`, `export`,
+  `static_dh`, `static_ecdh`, `psk`, `dhe_psk`, `ecdhe_psk`,
+  `rsa_psk`, `null_cipher`, `other`). Privacy-dominant concerns
+  (`null_cipher`, `anon`, `export`) take precedence over kx prefix.
+  TLS 1.3 suites map to `ecdhe_aead`. Exhaustive test coverage.
+- Cipher-suite inventory expansion (legacy-probes): +18 TLS 1.2
+  probes — PSK family (4), Camellia (4), SEED (2), ARIA (4),
+  static DH / static ECDH (4).
+- `tls.session_resumption` — new top-level section. TLS 1.2 today:
+  `session_ticket_issued`, `ticket_lifetime_hint_secs`,
+  `session_id_issued`, `ticket_rotated_across_connections`
+  (two-connection probe). TLS 1.3 slots stubbed with
+  `method: not_probed` pending follow-up.
+- `tls.signature_algorithm_policy_probe` — four constrained
+  handshakes via `SSL_CTX_set1_sigalgs_list` (`sha256_plus_only`,
+  `ecdsa_only`, `rsa_pss_only`, `rsa_pkcs1_only`). Each records
+  outcome, selected sigalg on completion, alert category on
+  refusal. New `--sigalg-probe-skip=<csv>` CLI flag opts out
+  individual constraints.
+
+### Added — CLI
+
+- `--include-ocsp-raw` — emit raw OCSP bytes as hex under
+  `tls.extensions.ocsp_stapling.raw_hex`. Off by default.
+- `--sigalg-probe-skip=<csv>` — skip individual sigalg-policy
+  probes. Recognized: `sha256_plus_only`, `ecdsa_only`,
+  `rsa_pss_only`, `rsa_pkcs1_only`. Unknown entries ignored.
+
+### Changed
+
+- `cipher_suites.<ver>[].classification` is now a **required** field
+  on every `cipherSuiteEntry`. The classifier is total (no gaps),
+  so this lands as required with exhaustive test coverage.
+- `tls.extensions.ocsp_stapling` is now a richer object; existing
+  `stapled` / `method` / `response_length` / `reason` shape stays.
+- `impl Default for ObservationBool` returns the `{value: None,
+  method: "not_probed"}` shape. Internal ergonomic change; no
+  user-visible output difference.
+
+### Known limitations (deferred to follow-up workstreams)
+
+- TLS 1.3 EncryptedExtensions — `record_size_limit` and
+  `compress_certificate_algorithms` observable only when servers
+  advertise unsolicited (rare). Client-offer injection blocked by
+  the openssl-sys binding gap noted above.
+- TLS 1.3 session resumption + 0-RTT — structure stubbed,
+  `method: not_probed`. Will need post-handshake NST read dance +
+  `SSL_set_session` resumption + `SSL_write_early_data` for
+  `early_data_accepted`.
+
 ## [0.2.0] — 2026-04-19
 
 ### Added — Legacy TLS & misconfiguration probe subsystem
