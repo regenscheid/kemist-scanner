@@ -1,10 +1,8 @@
 //! Output layer.
 //!
 //! `json` submodule owns the schema-v1 emission path (the canonical form).
-//! The old legacy text/XML emitters were deleted once PR 4 gave main.rs
-//! its own `print_text_summary` over `ScanResult`, and PR 7 removed the
-//! last references to the legacy `ScanResults` cipher fields. PR 12 will
-//! add a dedicated schema-aware text renderer.
+//! `text` submodule renders a compact human-readable summary of the same
+//! `ScanResult` for interactive debugging.
 
 pub mod json;
 pub mod text;

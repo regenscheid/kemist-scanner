@@ -380,25 +380,25 @@ mod tests {
             "TLS_DHE_RSA_WITH_AES_128_CBC_SHA",
             "TLS_DHE_RSA_WITH_AES_256_CBC_SHA",
             "TLS_DHE_RSA_WITH_AES_128_CBC_SHA256",
-            // PSK family (Phase E1)
+            // PSK family
             "TLS_PSK_WITH_AES_128_CBC_SHA",
             "TLS_PSK_WITH_AES_128_GCM_SHA256",
             "TLS_DHE_PSK_WITH_AES_128_GCM_SHA256",
             "TLS_ECDHE_PSK_WITH_AES_128_CBC_SHA",
-            // Camellia (Phase E2)
+            // Camellia
             "TLS_RSA_WITH_CAMELLIA_128_CBC_SHA",
             "TLS_RSA_WITH_CAMELLIA_256_CBC_SHA",
             "TLS_DHE_RSA_WITH_CAMELLIA_128_CBC_SHA",
             "TLS_ECDHE_RSA_WITH_CAMELLIA_128_CBC_SHA256",
-            // SEED (Phase E2)
+            // SEED
             "TLS_RSA_WITH_SEED_CBC_SHA",
             "TLS_DHE_RSA_WITH_SEED_CBC_SHA",
-            // ARIA (Phase E2)
+            // ARIA
             "TLS_RSA_WITH_ARIA_128_GCM_SHA256",
             "TLS_RSA_WITH_ARIA_256_GCM_SHA384",
             "TLS_DHE_RSA_WITH_ARIA_128_GCM_SHA256",
             "TLS_ECDHE_RSA_WITH_ARIA_128_GCM_SHA256",
-            // Static DH / static ECDH (Phase E3)
+            // Static DH / static ECDH
             "TLS_DH_RSA_WITH_AES_128_CBC_SHA",
             "TLS_DH_DSS_WITH_AES_128_CBC_SHA",
             "TLS_ECDH_RSA_WITH_AES_128_CBC_SHA",

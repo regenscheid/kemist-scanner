@@ -215,9 +215,8 @@
         },
         "downgrade_signaling": {
           "type": "object",
-          "required": ["fallback_scsv_accepted", "fallback_scsv_enforced"],
+          "required": ["fallback_scsv_enforced"],
           "properties": {
-            "fallback_scsv_accepted": { "$ref": "#/$defs/observationBool" },
             "fallback_scsv_enforced": { "$ref": "#/$defs/observationBool" },
             "tls13_downgrade_sentinel": {
               "type": "string",

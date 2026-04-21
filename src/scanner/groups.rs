@@ -6,9 +6,10 @@
 //! specific reason — never `supported: false` without a real probe.
 //!
 //! ## Target list
-//! Hardcoded below per the kemist spec. PR 13 plans to move this to a YAML
-//! config so new groups can be added without a code release. Until then the
-//! defaults cover the groups the spec acceptance criteria exercise:
+//! Hardcoded below per the kemist spec. A future workstream could move this
+//! to a YAML config so new groups can be added without a code release.
+//! Until then the defaults cover the groups the spec acceptance criteria
+//! exercise:
 //!
 //! - Classical: X25519, X448, secp256r1/384r1/521r1
 //! - PQC hybrids: X25519MLKEM768 (0x11EC), SecP256r1MLKEM768 (0x11EB),

@@ -79,6 +79,10 @@ mechanics.
 
 ### Changed
 
+- **Removed** `tls.downgrade_signaling.fallback_scsv_accepted` — the
+  deprecated-in-0.2.0 heuristic field is gone from the schema. Its
+  replacement `fallback_scsv_enforced` has been the authoritative
+  observation since 0.2.0; consumers should read that instead.
 - `cipher_suites.<ver>[].classification` is now a **required** field
   on every `cipherSuiteEntry`. The classifier is total (no gaps),
   so this lands as required with exhaustive test coverage.

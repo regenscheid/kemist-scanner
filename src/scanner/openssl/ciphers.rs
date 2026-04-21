@@ -66,7 +66,7 @@ pub struct LegacyCipherResult {
     pub ske_sig: Option<String>,
 }
 
-/// Aggregate output of the D1 probe pass.
+/// Aggregate output of the legacy cipher probe pass.
 #[derive(Debug, Clone, Default)]
 pub struct LegacyCipherProbeOutput {
     pub results: Vec<LegacyCipherResult>,
@@ -149,7 +149,7 @@ const TARGETS: &[Target] = &[
         iana_code: 0x0034,
         version: TlsVersion::Tls12,
     },
-    // DHE-RSA — gates D2 DH-parameter observer and D3 SKE signature observer
+    // DHE-RSA — gates the DH-parameter observer + SKE signature observer
     Target {
         iana_name: "TLS_DHE_RSA_WITH_AES_128_CBC_SHA",
         openssl_name: "DHE-RSA-AES128-SHA",
@@ -168,7 +168,7 @@ const TARGETS: &[Target] = &[
         iana_code: 0x0067,
         version: TlsVersion::Tls12,
     },
-    // --- PSK family (E1) ---
+    // --- PSK family ---
     // Without a pre-shared secret the scanner can't complete a PSK
     // handshake. On most servers these probes alert
     // unknown_psk_identity or handshake_failure, classified as
@@ -200,7 +200,7 @@ const TARGETS: &[Target] = &[
         iana_code: 0xC035,
         version: TlsVersion::Tls12,
     },
-    // --- Camellia (E2) ---
+    // --- Camellia ---
     Target {
         iana_name: "TLS_RSA_WITH_CAMELLIA_128_CBC_SHA",
         openssl_name: "CAMELLIA128-SHA",
@@ -225,7 +225,7 @@ const TARGETS: &[Target] = &[
         iana_code: 0xC076,
         version: TlsVersion::Tls12,
     },
-    // --- SEED (E2) ---
+    // --- SEED ---
     Target {
         iana_name: "TLS_RSA_WITH_SEED_CBC_SHA",
         openssl_name: "SEED-SHA",
@@ -238,7 +238,7 @@ const TARGETS: &[Target] = &[
         iana_code: 0x009A,
         version: TlsVersion::Tls12,
     },
-    // --- ARIA (E2) ---
+    // --- ARIA ---
     Target {
         iana_name: "TLS_RSA_WITH_ARIA_128_GCM_SHA256",
         openssl_name: "ARIA128-GCM-SHA256",
@@ -263,7 +263,7 @@ const TARGETS: &[Target] = &[
         iana_code: 0xC060,
         version: TlsVersion::Tls12,
     },
-    // --- Static DH / static ECDH (E3) ---
+    // --- Static DH / static ECDH ---
     // Require the server's CERTIFICATE to embed a DH/ECDH public key
     // (not the common ephemeral-DH + signed-cert pattern). Modern CAs
     // don't issue those certs, so real-world `supported: true` is
@@ -401,7 +401,7 @@ pub async fn probe_legacy_suites(
 }
 
 /// Internal return value of [`probe_single_suite_blocking`] — outcome plus
-/// any post-handshake observations (D2 DH snapshot, D3 SKE signature).
+/// any post-handshake observations (DH parameter snapshot, SKE signature).
 struct ProbeRun {
     outcome: LegacyProbeOutcome,
     dh_snapshot: Option<DhSnapshot>,
@@ -411,7 +411,7 @@ struct ProbeRun {
 /// Synchronous single-suite probe. Called inside `spawn_blocking`. Never
 /// panics, never returns Err; failure categories fold into
 /// `LegacyProbeOutcome::Error`. On handshake success, also observes DH
-/// parameters (D2) if the server's tmp key is DH.
+/// parameters if the server's tmp key is DH.
 fn probe_single_suite_blocking(
     target: SocketAddr,
     hostname: &str,
@@ -476,11 +476,11 @@ fn probe_single_suite_blocking(
 
     match ssl.connect(tcp) {
         Ok(stream) => {
-            // Handshake completed. Observe DH parameters (D2) and the
-            // server's signature algorithm (D3). Both return None for
-            // handshakes where the observation doesn't apply (e.g. RSA-kex
-            // has no SKE signature; ECDHE has no DH parameters). A
-            // snapshot-level ErrorStack from D2 is swallowed — the
+            // Handshake completed. Observe DH parameters and the server's
+            // signature algorithm. Both return None for handshakes where
+            // the observation doesn't apply (e.g. RSA-kex has no SKE
+            // signature; ECDHE has no DH parameters). A snapshot-level
+            // ErrorStack from the DH observer is swallowed — the
             // Supported outcome is the primary signal.
             let dh_snapshot = dh_params::snapshot(stream.ssl()).unwrap_or(None);
             let ske_sig = ske_sig::snapshot(stream.ssl());
@@ -541,8 +541,9 @@ fn build_legacy_context(
 
 /// Project our TLS version enum onto OpenSSL's constants. SSLv2 has no
 /// OpenSSL 3.x representation (the protocol was dropped entirely); SSLv3
-/// resolves but requires the legacy provider and seclevel 0 — D8 handles
-/// that pathway explicitly, D1 restricts itself to TLS 1.0+.
+/// resolves but requires the legacy provider and seclevel 0 —
+/// `protocol_versions.rs` handles the SSLv3 pathway explicitly, this
+/// probe restricts itself to TLS 1.0+.
 fn tls_version_to_ossl(v: TlsVersion) -> Option<SslVersion> {
     match v {
         TlsVersion::Tls10 => Some(SslVersion::TLS1),
@@ -590,8 +591,9 @@ mod tests {
 
     #[test]
     fn target_table_restricts_versions_to_tls10_through_tls12() {
-        // D1 scope is TLS 1.0/1.1/1.2. SSLv3 is D8's surface; TLS 1.3 has
-        // no legacy-cipher observables that OpenSSL adds over aws-lc-rs.
+        // This probe's scope is TLS 1.0/1.1/1.2. SSLv3 is handled by
+        // `protocol_versions.rs`; TLS 1.3 has no legacy-cipher
+        // observables that OpenSSL adds over aws-lc-rs.
         for t in TARGETS {
             assert!(
                 matches!(
@@ -672,6 +674,9 @@ mod tests {
         assert!(has("3DES") || has("DES-CBC3"), "3DES missing");
         assert!(has("NULL"), "NULL ciphers missing");
         assert!(has("ADH"), "anon-DH missing");
-        assert!(has("DHE-RSA"), "DHE-RSA missing (D2 observer won't fire)");
+        assert!(
+            has("DHE-RSA"),
+            "DHE-RSA missing — DH parameter observer won't fire"
+        );
     }
 }

@@ -152,9 +152,9 @@ fn build_context(ossl_version: SslVersion) -> Result<SslContext, openssl::error:
     Ok(builder.build())
 }
 
-/// Restrict to the three versions D8 owns. TLS 1.2/1.3 are handled by the
-/// rustls path at `src/scanner/mod.rs::test_rustls_protocol`; SSLv2 by
-/// `src/scanner/legacy.rs::test_sslv2`.
+/// Restrict to the three versions this probe covers. TLS 1.2/1.3 are
+/// handled by the rustls path at `src/scanner/mod.rs::test_rustls_protocol`;
+/// SSLv2 by `src/scanner/legacy.rs::test_sslv2`.
 fn tls_version_to_ossl(v: TlsVersion) -> Option<SslVersion> {
     match v {
         TlsVersion::Ssl3 => Some(SslVersion::SSL3),

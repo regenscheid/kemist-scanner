@@ -365,10 +365,11 @@ fn max_fragment_length_name(code: u8) -> String {
 
 /// Walk a flat TLS extensions block into `{type → body bytes}`.
 ///
-/// Replaces an older `HashSet<u16>` presence-only variant — Phase B
-/// needs access to extension contents (supported_point_formats) for a
-/// few observations, and storing the bodies is cheap since the
-/// ServerHello extension block is at most a few hundred bytes.
+/// Replaces an older `HashSet<u16>` presence-only variant — the parser
+/// needs access to extension contents (supported_point_formats,
+/// max_fragment_length) for a few observations, and storing the bodies
+/// is cheap since the ServerHello extension block is at most a few
+/// hundred bytes.
 fn walk_extensions(bytes: &[u8]) -> HashMap<u16, &[u8]> {
     let mut seen = HashMap::new();
     let mut i = 0;

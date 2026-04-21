@@ -223,8 +223,7 @@ fn install_logging(verbose: u8) {
 }
 
 fn enabled_cargo_features() -> Vec<String> {
-    // No cargo features defined on kemist today. PR 13 will replace this
-    // with a build-time feature inspection macro.
+    // Placeholder for build-time feature inspection.
     Vec::new()
 }
 

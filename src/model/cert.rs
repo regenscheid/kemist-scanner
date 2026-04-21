@@ -46,8 +46,7 @@ pub struct CertificateInfo {
     /// via extension OID 1.3.6.1.4.1.11129.2.4.2. Presence only —
     /// signatures are not validated.
     pub embedded_scts: u32,
-    /// Parsed X.509 v3 extension observations. Empty in step A1 —
-    /// per-extension extractors land in A2–A5. See
+    /// Parsed X.509 v3 extension observations. See
     /// [`crate::model::cert_extensions`].
     #[serde(default)]
     pub extensions: CertExtensions,

@@ -39,7 +39,7 @@ use crate::scanner::openssl::dh_params::{self, DhClassification};
 #[derive(Debug, Clone)]
 pub enum FfdheOutcome {
     /// Server honored the group offer — handshake completed with this
-    /// FFDHE group, verified via the D2 cross-check.
+    /// FFDHE group, verified against the observed DH prime.
     Supported,
     /// Server rejected the single-group offer (handshake alert or reset).
     NotSupported,
@@ -63,7 +63,7 @@ pub struct FfdheProbeResult {
     pub tls13_outcome: FfdheOutcome,
 }
 
-/// Aggregate output of the D4 probe pass.
+/// Aggregate output of the FFDHE probe pass.
 #[derive(Debug, Clone, Default)]
 pub struct FfdheProbeOutput {
     pub results: Vec<FfdheProbeResult>,
@@ -318,7 +318,8 @@ mod tests {
 
     #[test]
     fn classify_scanner_error_promotes_alerts_to_not_supported() {
-        // Alerts from server → NotSupported, same discipline as D1.
+        // Alerts from server → NotSupported, same discipline as the
+        // legacy cipher probe.
         let alert = ScannerError::tls_alert("handshake_failure", "ctx");
         assert!(matches!(
             classify_scanner_error(alert),

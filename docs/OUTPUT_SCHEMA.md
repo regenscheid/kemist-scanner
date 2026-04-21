@@ -269,21 +269,10 @@ See [CHECKS.md](CHECKS.md) for how each observation is obtained.
 ### `tls.downgrade_signaling`
 ```
 {
-  fallback_scsv_accepted: ObservationBool,  // DEPRECATED — see below
   fallback_scsv_enforced:  ObservationBool,
   tls13_downgrade_sentinel?: "tls12" | "lte_tls11" | "none"
 }
 ```
-
-- **`tls13_downgrade_sentinel`** — the RFC 8446 §4.1.3 last-8-bytes
-  sentinel observed in the byte-level TLS 1.2 ServerHello
-  ServerRandom. Always absent when the hello probe couldn't
-  produce a ServerHello. `"tls12"` means the server is TLS
-  1.3-capable but negotiated TLS 1.2 (real signal even though the
-  byte probe only offers TLS 1.2). `"lte_tls11"` means a TLS
-  1.3-capable stack negotiated TLS 1.1 or lower. `"none"` = no
-  sentinel pattern match (pure-TLS-1.2/earlier server or a
-  non-compliant TLS 1.3 stack).
 
 - **`fallback_scsv_enforced`** — active OpenSSL-backed probe. Sends a
   handshake with `SSL_MODE_SEND_FALLBACK_SCSV` and `max_proto_version`
@@ -294,12 +283,15 @@ See [CHECKS.md](CHECKS.md) for how each observation is obtained.
   (e.g. server max already ≤ TLS 1.1 so no downgrade is possible;
   server disabled the downgrade target entirely and answered
   `protocol_version` instead).
-- **`fallback_scsv_accepted`** — **DEPRECATED** in schema v1; scheduled
-  for removal in schema v2. Earlier kemist versions populated this with
-  a TLS 1.3-support heuristic that gave false positives. From this
-  version on it always renders `{value: null, method: "not_probed",
-  reason: "superseded_by_fallback_scsv_enforced"}`. Consumers should
-  migrate to `fallback_scsv_enforced`.
+- **`tls13_downgrade_sentinel`** — the RFC 8446 §4.1.3 last-8-bytes
+  sentinel observed in the byte-level TLS 1.2 ServerHello
+  ServerRandom. Always absent when the hello probe couldn't
+  produce a ServerHello. `"tls12"` means the server is TLS
+  1.3-capable but negotiated TLS 1.2 (real signal even though the
+  byte probe only offers TLS 1.2). `"lte_tls11"` means a TLS
+  1.3-capable stack negotiated TLS 1.1 or lower. `"none"` = no
+  sentinel pattern match (pure-TLS-1.2/earlier server or a
+  non-compliant TLS 1.3 stack).
 
 ### `tls.session_resumption`
 ```

@@ -76,38 +76,38 @@ pub struct ScanResults {
     pub certificate_chain: Vec<CertificateInfo>,
     pub tls_renegotiation: TlsRenegotiation,
     pub heartbeat_echoes_oversized_payload: Option<bool>,
-    pub fallback_scsv_accepted: Option<bool>,
     /// State from the characterization handshake (one successful connection).
-    /// Populated by PR 5; feeds `tls.negotiated` + several `tls.extensions`
-    /// fields in the schema.
+    /// Feeds `tls.negotiated` + several `tls.extensions` fields in the
+    /// schema.
     #[serde(skip_serializing)]
     pub negotiated: Option<NegotiatedState>,
     /// ALPN protocols kemist proposed on the characterization handshake.
     #[serde(skip_serializing)]
     pub alpn_offered: Vec<String>,
     /// Trust observations — chain validity, name match, first-failure
-    /// category string. Populated by PR 6. Feeds `validation.*` in schema.
+    /// category string. Feeds `validation.*` in schema.
     #[serde(skip_serializing)]
     pub validation: ValidationResult,
     /// Real per-cipher probe results + server ordering observation.
-    /// Populated by PR 7. Feeds `tls.cipher_suites.*` in schema.
+    /// Feeds `tls.cipher_suites.*` in schema.
     #[serde(skip_serializing)]
     pub cipher_probes: Option<CipherProbeOutput>,
     /// Real per-group probe results (classical + PQC hybrid + standalone
-    /// ML-KEM). Populated by PR 8. Feeds `tls.groups.*` in schema.
+    /// ML-KEM). Feeds `tls.groups.*` in schema.
     #[serde(skip_serializing)]
     pub group_probes: Option<GroupProbeOutput>,
-    /// SNI-omitted comparison probe. Populated by PR 9. Feeds
+    /// SNI-omitted comparison probe. Feeds
     /// `tls.sni_behavior.omitted_probe` in schema.
     #[serde(skip_serializing)]
     pub sni_behavior: Option<SniBehaviorResult>,
-    /// Byte-level ServerHello observations (EMS, EtM, heartbeat,
-    /// renegotiation_info, compression method, SCT via extension 18).
-    /// Populated by PR 9 Part B via a dedicated TLS 1.2 probe.
+    /// Byte-level ServerHello observations from a dedicated TLS 1.2 probe
+    /// — EMS, EtM, heartbeat, renegotiation_info, compression method, SCT
+    /// via extension 18, truncated_hmac, NPN, supported_point_formats,
+    /// max_fragment_length, TLS 1.3 downgrade sentinel.
     #[serde(skip_serializing)]
     pub hello_observed: Option<HelloExtensionsObserved>,
     /// HTTP-layer observations (HSTS / security.txt / preload list).
-    /// Populated by PR 10. Feeds the top-level `http` field in schema.
+    /// Feeds the top-level `http` field in schema.
     #[serde(skip_serializing)]
     pub http_observations: Option<HttpObservations>,
     /// OpenSSL-backed legacy-probe subsystem output — legacy ciphers, DH
@@ -150,7 +150,6 @@ impl SslScanner {
                 compression_supported: None,
             },
             heartbeat_echoes_oversized_payload: None,
-            fallback_scsv_accepted: None,
             negotiated: None,
             alpn_offered: vec![],
             validation: ValidationResult::default(),
@@ -180,17 +179,10 @@ impl SslScanner {
         }
         pause().await;
 
-        // `fallback_scsv_accepted` is deprecated-in-place for schema v1 —
-        // it's a TLS-1.3-heuristic stub and gave false positives. Real
-        // observation lives in `openssl_observations.fallback_scsv`.
-        // Left unpopulated so the field renders null with a
-        // `superseded_by_fallback_scsv_enforced` reason via the output
-        // layer.
-        //
-        // Similarly `tls_renegotiation` was a pair of heuristics whose
-        // signal is now produced by `openssl_observations.renegotiation`
-        // and the byte-level `hello_observed.secure_renegotiation`
-        // extension detection.
+        // `tls_renegotiation` was a pair of heuristics whose signal is
+        // now produced by `openssl_observations.renegotiation` and the
+        // byte-level `hello_observed.secure_renegotiation` extension
+        // detection.
 
         results.heartbeat_echoes_oversized_payload = self.test_heartbleed(&mut results).await;
         pause().await;

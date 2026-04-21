@@ -38,10 +38,7 @@
 //!   Schema versioning is semver over shape — consumers pin on the major.
 //! - No compliance verdicts appear anywhere in the output. Searching the
 //!   schema or any emitted record for `grade`, `verdict`, `severity`,
-//!   `weak`, `compliant`, `pass`, `fail` returns zero matches. (Except
-//!   `downgrade_signaling.fallback_scsv_accepted` — the word "downgrade"
-//!   is an observation category, not a verdict. The suffix `_accepted`
-//!   refers to a wire-level server behavior.)
+//!   `weak`, `compliant`, `pass`, `fail` returns zero matches.
 //!
 //! # The tri-state contract
 //!

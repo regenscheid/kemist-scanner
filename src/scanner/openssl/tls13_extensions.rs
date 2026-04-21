@@ -42,11 +42,15 @@
 //! 1.3 deployment.
 //!
 //! Deliberately **not** observed here:
-//! - `early_data` (ext 42) — only populated in EncryptedExtensions on a
-//!   resumed handshake that accepts 0-RTT. Belongs in the session
-//!   resumption probe (Phase F), not here.
-//! - `psk_key_exchange_modes` (ext 45) — client-side offer only.
-//! - `post_handshake_auth` (ext 49) — client-side offer only.
+//! - `early_data` (ext 42) — only populated in EncryptedExtensions on
+//!   a resumed handshake that accepts 0-RTT. A session-resumption
+//!   probe is the right place for it; currently that probe reserves
+//!   `early_data_accepted` as a `NotProbed` slot pending
+//!   `SSL_write_early_data` integration.
+//! - `psk_key_exchange_modes` (ext 45) — client-side offer only, no
+//!   server observation possible.
+//! - `post_handshake_auth` (ext 49) — client-side offer only, no
+//!   server observation possible.
 //!
 //! ## Failure modes
 //!

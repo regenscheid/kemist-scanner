@@ -2,8 +2,8 @@
 //!
 //! `Scanner` wraps the internal probe orchestrator with DNS resolution,
 //! timing, retry logic, and schema-v1 conversion. It is the stable surface
-//! downstream consumers depend on — probe internals will churn as PR 5+
-//! land, but `Scanner::scan(Target) -> ScanResult` and
+//! downstream consumers depend on — probe internals will churn over time,
+//! but `Scanner::scan(Target) -> ScanResult` and
 //! `Scanner::scan_many(Vec<Target>) -> Vec<ScanResult>` do not.
 
 use std::net::{IpAddr, SocketAddr};
@@ -30,8 +30,9 @@ pub struct ScannerConfig {
     /// Maximum concurrent targets. Probes to a single target are always
     /// sequential — this limits parallelism across distinct targets.
     pub concurrency: usize,
-    /// Minimum delay between probes to the same target. Reserved for PR 5+
-    /// wiring; today the scanner's internal probes run back-to-back.
+    /// Minimum delay between probes to the same target. Honored between
+    /// probes inside the OpenSSL subsystem; rustls-path probes currently
+    /// run back-to-back.
     pub per_target_delay: Duration,
     /// TCP connect timeout (per attempt, per target).
     pub connect_timeout: Duration,
@@ -324,7 +325,6 @@ fn empty_scan_results(target: &Target, addr: SocketAddr) -> crate::scanner::Scan
             compression_supported: None,
         },
         heartbeat_echoes_oversized_payload: None,
-        fallback_scsv_accepted: None,
         negotiated: None,
         alpn_offered: vec![],
         validation: crate::scanner::probe::ValidationResult::default(),

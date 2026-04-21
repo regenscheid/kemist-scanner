@@ -186,7 +186,7 @@ fn render_groups(r: &ScanResult) {
             print_group(name, obs);
         }
     }
-    // TLS 1.2 — FFDHE only. This is where the D4/D2 cross-check
+    // TLS 1.2 — FFDHE only. This is where the FFDHE cross-check
     // finding (`server_ignored_group_offer_returned_custom_prime`)
     // surfaces, handled inside print_group.
     if !g.tls1_2.is_empty() {

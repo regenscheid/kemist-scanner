@@ -7,12 +7,12 @@
 //!
 //! ## Scope of this module
 //!
-//! Implemented (F1–F3 of the observation-expansion plan):
+//! Implemented:
 //! - TLS 1.2 single-connection: `session_ticket_issued`,
 //!   `session_id_issued`, `ticket_lifetime_hint_secs`.
 //! - TLS 1.2 two-connection: `ticket_rotated_across_connections`.
 //!
-//! Plumbed as `NotProbed` (F4–F5, future workstream):
+//! Plumbed as `NotProbed` for a follow-up workstream:
 //! - TLS 1.3 NewSessionTicket count + per-ticket lifetimes + PSK
 //!   resumption acceptance. OpenSSL's TLS 1.3 NSTs arrive post-
 //!   handshake and require a small read to drive their processing;

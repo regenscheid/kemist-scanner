@@ -67,7 +67,6 @@ pub struct ScanMetadata {
 /// How a given observation was obtained. Stable enum — never add without a schema bump.
 #[derive(Serialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "snake_case")]
-#[allow(dead_code)] // variants consumed by later PRs (5, 6, 8, 9)
 pub enum Method {
     /// Active wire probe was performed and the result reflects the server's response.
     Probe,
@@ -105,7 +104,6 @@ impl Default for ObservationBool {
     }
 }
 
-#[allow(dead_code)] // some constructors consumed by later PRs
 impl ObservationBool {
     pub fn probe(value: bool) -> Self {
         Self {
@@ -309,7 +307,6 @@ pub struct VersionOffered {
     pub reason: Option<String>,
 }
 
-#[allow(dead_code)] // `error` constructor consumed by PR 3
 impl VersionOffered {
     pub fn probe(offered: bool) -> Self {
         Self {
@@ -428,7 +425,6 @@ pub struct GroupObservation {
     pub provider: Option<String>,
 }
 
-#[allow(dead_code)] // `probe` consumed by PR 8
 impl GroupObservation {
     pub fn probe(supported: bool) -> Self {
         Self {
@@ -527,13 +523,7 @@ pub struct SctObservation {
 
 #[derive(Serialize, Debug, Clone)]
 pub struct DowngradeSignaling {
-    /// Deprecated in schema v1 — now always renders as `{value: null,
-    /// method: not_probed, reason: "superseded_by_fallback_scsv_enforced"}`.
-    /// The prior implementation was a TLS 1.3-support heuristic that
-    /// over-reported enforcement. Scheduled for removal in schema v2.
-    /// Consumers should migrate to `fallback_scsv_enforced`.
-    pub fallback_scsv_accepted: ObservationBool,
-    /// Real SCSV enforcement observation. `{value: true}` when the
+    /// SCSV enforcement observation. `{value: true}` when the
     /// server returned `inappropriate_fallback` on a deliberate
     /// downgrade probe; `{value: false}` when it accepted the
     /// downgraded handshake; `{value: null}` with reason string when

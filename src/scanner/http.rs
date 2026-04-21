@@ -18,8 +18,8 @@
 //!
 //! ## Preload list snapshot
 //! The hardcoded list below covers a small set of well-known preloaded
-//! domains for demonstration. PR 13 (docs + release) plans to bundle a
-//! full Chromium `transport_security_state_static.json` snapshot as a
+//! domains for demonstration. A future workstream could bundle a full
+//! Chromium `transport_security_state_static.json` snapshot as a
 //! compile-time data file. Until then the observation is correct for
 //! listed entries and a conservative `null` for everything else.
 
@@ -60,8 +60,9 @@ pub struct SecurityTxtObservation {
 /// Each entry is `(domain, include_subdomains)`. Domain match is exact
 /// plus, when `include_subdomains: true`, any subdomain also matches.
 ///
-/// This is a stub — a PR 13 task is to replace with a full Chromium
-/// `transport_security_state_static.json` snapshot bundled at build time.
+/// This is a stub — a future workstream can replace with a full
+/// Chromium `transport_security_state_static.json` snapshot bundled
+/// at build time.
 const PRELOAD_LIST: &[(&str, bool)] = &[
     ("github.com", true),
     ("www.github.com", true),

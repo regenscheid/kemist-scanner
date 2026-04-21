@@ -13,10 +13,11 @@
 //! - Whether EMS (RFC 7627) was negotiated on a TLS 1.2 connection
 //! - Whether the server sent the RFC 5746 renegotiation_info extension
 //! - SCT delivery via TLS extension (only embedded-in-cert SCTs are
-//!   accessible via x509 parsing, which PR 6 covers)
+//!   accessible via x509 parsing)
 //!
-//! Those stay `not_probed` with a reason pointing at PR 9's byte parsing,
-//! or `not_applicable` on TLS 1.3 where they don't apply.
+//! Those fields are populated instead by the dedicated byte-level TLS
+//! 1.2 ServerHello probe in `scanner/hello.rs`, or `not_applicable`
+//! on TLS 1.3 where they don't apply.
 
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
@@ -349,7 +350,8 @@ fn decode_certs(raw: &[Vec<u8>]) -> Vec<CertificateInfo> {
 /// 3. Captures the signature scheme from TLS 1.2/1.3 CertificateVerify.
 ///
 /// Accepts all certs — validation is a separate observation emitted via
-/// the `validation.*` schema section (PR 6 wires this properly).
+/// the `validation.*` schema section, computed offline after the
+/// handshake completes.
 #[derive(Debug, Default)]
 struct StateCollector {
     certs: Mutex<Vec<Vec<u8>>>,

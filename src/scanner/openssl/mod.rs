@@ -66,17 +66,19 @@ pub fn ensure_legacy_providers() -> &'static Result<(), ScannerError> {
 /// individual `tls.*` sections per the schema.
 #[derive(Debug, Default, Clone)]
 pub struct OpensslObservations {
-    /// D1 — Per-suite probe results for RSA-kex, RC4, DES/3DES, NULL,
-    /// anon-DH, DHE-RSA, etc. across TLS 1.0/1.1/1.2.
+    /// Per-suite probe results for RSA-kex, RC4, DES/3DES, NULL,
+    /// anon-DH, DHE-RSA, PSK / Camellia / SEED / ARIA / static DH
+    /// families across TLS 1.0/1.1/1.2.
     pub cipher_probes: Option<ciphers::LegacyCipherProbeOutput>,
-    /// D4 — RFC 7919 FFDHE named-group probes across TLS 1.2 and TLS 1.3,
-    /// with D2 cross-check for servers that ignore `supported_groups`.
+    /// RFC 7919 FFDHE named-group probes across TLS 1.2 and TLS 1.3,
+    /// with a cross-check for servers that ignore `supported_groups`
+    /// and return a custom prime instead.
     pub ffdhe_probes: Option<ffdhe::FfdheProbeOutput>,
-    /// D5 — `TLS_FALLBACK_SCSV` (RFC 7507) enforcement observation.
+    /// `TLS_FALLBACK_SCSV` (RFC 7507) enforcement observation.
     pub fallback_scsv: Option<fallback_scsv::FallbackScsvResult>,
-    /// D6 — Client-initiated renegotiation verdict.
+    /// Client-initiated renegotiation verdict.
     pub renegotiation: Option<renegotiation::RenegotiationObservation>,
-    /// D7 — Server `CertificateRequest` observation. `None` when the
+    /// Server `CertificateRequest` observation. `None` when the
     /// probe's outer setup failed; `Some(req)` with `req.requested: false`
     /// when the server did not request a client certificate.
     pub client_auth: Option<client_auth::ClientAuthRequest>,
@@ -89,10 +91,10 @@ pub struct OpensslObservations {
     /// today, TLS 1.3 PSK + 0-RTT stubbed for a future workstream.
     /// `None` when the probe's outer setup failed (rare).
     pub session_resumption: Option<crate::model::scan_result::SessionResumption>,
-    /// Phase G — constrained-sigalg handshake outcomes for the four
-    /// canonical constraint families. `None` only when the outer
-    /// probe setup failed; per-constraint skip lands as
-    /// `method: not_probed` inside.
+    /// Constrained-sigalg handshake outcomes for the four canonical
+    /// constraint families. `None` only when the outer probe setup
+    /// failed; per-constraint skip lands as `method: not_probed`
+    /// inside.
     pub sigalg_policy: Option<crate::model::scan_result::SignatureAlgorithmPolicyProbe>,
     /// Per-probe non-fatal errors collected during the scan. Populated so
     /// every "not probed" outcome carries a reason string rather than going
@@ -100,7 +102,7 @@ pub struct OpensslObservations {
     pub probe_errors: Vec<ScannerError>,
 }
 
-/// Orchestration entry point. Loads providers, then runs each D1-D8 probe
+/// Orchestration entry point. Loads providers, then runs each probe
 /// honoring the scan config's `per_target_delay`. Returns `Err` only on
 /// fatal setup (provider load failure); per-probe errors land in
 /// `OpensslObservations::probe_errors` and the scan continues.
@@ -111,8 +113,8 @@ pub async fn run_all_probes(cfg: &ScanConfig) -> Result<OpensslObservations, Sca
 
     let mut out = OpensslObservations::default();
 
-    // D1 — legacy cipher enumeration. D2 and D3 observers run inside
-    // the per-suite handshake driver.
+    // Legacy cipher enumeration. DH parameter + SKE signature
+    // observers run inside the per-suite handshake driver.
     let cipher_out = ciphers::probe_legacy_suites(
         cfg.target,
         &cfg.hostname,
@@ -123,7 +125,7 @@ pub async fn run_all_probes(cfg: &ScanConfig) -> Result<OpensslObservations, Sca
     .await;
     out.cipher_probes = Some(cipher_out);
 
-    // D4 — FFDHE named-group probing (TLS 1.2 + TLS 1.3).
+    // FFDHE named-group probing (TLS 1.2 + TLS 1.3).
     let ffdhe_out = ffdhe::probe_ffdhe_groups(
         cfg.target,
         &cfg.hostname,
@@ -134,30 +136,30 @@ pub async fn run_all_probes(cfg: &ScanConfig) -> Result<OpensslObservations, Sca
     .await;
     out.ffdhe_probes = Some(ffdhe_out);
 
-    // D5 — TLS_FALLBACK_SCSV (RFC 7507) enforcement.
+    // TLS_FALLBACK_SCSV (RFC 7507) enforcement.
     let scsv = fallback_scsv::probe(cfg.target, &cfg.hostname, cfg.timeout, cfg.timeout).await;
     out.fallback_scsv = Some(scsv);
 
-    // D6 — Client-initiated renegotiation behavior.
+    // Client-initiated renegotiation behavior.
     let reneg = renegotiation::probe(cfg.target, &cfg.hostname, cfg.timeout, cfg.timeout).await;
     out.renegotiation = Some(reneg);
 
-    // D7 — CertificateRequest capture via msg_callback.
+    // CertificateRequest capture via msg_callback.
     let ca = client_auth::probe(cfg.target, &cfg.hostname, cfg.timeout, cfg.timeout).await;
     out.client_auth = ca;
 
-    // B3 — TLS 1.3 EncryptedExtensions capture (record_size_limit,
+    // TLS 1.3 EncryptedExtensions capture (record_size_limit,
     // compress_certificate). Same msg_callback pattern as client_auth.
     let ee = tls13_extensions::probe(cfg.target, &cfg.hostname, cfg.timeout, cfg.timeout).await;
     out.tls13_extensions = Some(ee);
 
-    // Phase F — session resumption (TLS 1.2 ticket issuance +
-    // rotation; TLS 1.3 stubbed for a follow-up workstream).
+    // Session resumption (TLS 1.2 ticket issuance + rotation;
+    // TLS 1.3 stubbed for a follow-up workstream).
     let sr = tickets::probe(cfg.target, &cfg.hostname, cfg.timeout, cfg.timeout).await;
     out.session_resumption = Some(sr);
 
-    // Phase G — signature-algorithm policy probe (four constrained
-    // handshakes; `--sigalg-probe-skip` opts out individual ones).
+    // Signature-algorithm policy probe (four constrained handshakes;
+    // `--sigalg-probe-skip` opts out individual ones).
     let sap = sigalg_policy::probe(
         cfg.target,
         &cfg.hostname,
@@ -167,8 +169,6 @@ pub async fn run_all_probes(cfg: &ScanConfig) -> Result<OpensslObservations, Sca
     )
     .await;
     out.sigalg_policy = Some(sap);
-
-    // D8 hooks in here as that module lands live.
 
     Ok(out)
 }

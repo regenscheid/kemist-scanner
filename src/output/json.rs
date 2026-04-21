@@ -1,6 +1,6 @@
 //! JSON emission for schema v1.
 //!
-//! Converts internal `ScanResults` (probe data, unchanged since PR 1) into the
+//! Converts internal `ScanResults` (probe data) into the
 //! canonical `ScanResult` shape defined in [`crate::model::scan_result`] and
 //! emits it. This conversion layer is the authoritative mapping from "what the
 //! scanner measured" to "what the JSON contract says."
@@ -134,12 +134,6 @@ fn build_tls(results: &ScanResults, ctx: &JsonEmitContext) -> Tls {
         groups: build_groups(results),
         extensions: build_extensions(results, ctx),
         downgrade_signaling: DowngradeSignaling {
-            // Deprecated-in-place for v1: always renders null with a
-            // supersession reason, regardless of the (now-deleted)
-            // heuristic. See docs/OUTPUT_SCHEMA.md deprecation note.
-            fallback_scsv_accepted: ObservationBool::not_probed(
-                "superseded_by_fallback_scsv_enforced",
-            ),
             fallback_scsv_enforced: build_fallback_scsv_enforced(results),
             tls13_downgrade_sentinel: results
                 .hello_observed
@@ -480,8 +474,8 @@ fn build_extensions(results: &ScanResults, ctx: &JsonEmitContext) -> TlsExtensio
 
     let ocsp_stapling = build_ocsp_stapling(results, ctx);
 
-    // SCT delivery paths. Embedded (cert extension) is counted in PR 6
-    // via CertificateInfo.embedded_scts. ext_path comes from the hello
+    // SCT delivery paths. Embedded (cert extension) is counted via
+    // CertificateInfo.embedded_scts. ext_path comes from the hello
     // probe. OCSP-stapled SCTs aren't parsed in v1.0.
     let mut delivery_paths: Vec<String> = Vec::new();
     let embedded_scts_total: u32 = results
@@ -662,7 +656,7 @@ fn cert_to_facts(c: &CertificateInfo) -> CertificateFacts {
 
 fn extract_cn(dn: &str) -> Option<String> {
     // Minimal CN extractor. x509-parser's Display produces comma-separated RDNs;
-    // full RFC 4514 unescaping lands in PR 6 alongside OID inspection.
+    // full RFC 4514 unescaping can land later alongside OID inspection.
     for rdn in dn.split(',') {
         let rdn = rdn.trim();
         if let Some(v) = rdn.strip_prefix("CN=") {
@@ -736,8 +730,9 @@ fn parse_dependency_versions() -> (String, String, String) {
         }
     }
     // aws-lc-rs is transitive via rustls's aws_lc_rs feature; we don't get a
-    // dedicated version string without parsing Cargo.lock. Leave as a sentinel
-    // for PR 2; PR 13 can read Cargo.lock during release builds.
+    // dedicated version string without parsing Cargo.lock. Leave as a
+    // `"bundled"` sentinel — a future release-time build step could read
+    // Cargo.lock and substitute the real pinned version.
     (rustls_version, "bundled".to_string(), native_tls_version)
 }
 

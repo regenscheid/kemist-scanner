@@ -1,8 +1,8 @@
-//! Validates that a freshly built ScanResult (with every field populated by the
-//! PR 2 conversion layer) conforms to schemas/output-v1.json.
+//! Validates that a freshly built `ScanResult` conforms to
+//! `schemas/output-v1.json`.
 //!
-//! Later PRs add real probe-derived values; this test only guards the shape
-//! contract, which must never regress even when values change.
+//! Probe-derived values change over time; this test only guards the
+//! shape contract, which must never regress.
 
 use chrono::{TimeZone, Utc};
 use kemist::model::errors::ScannerError;
@@ -54,7 +54,6 @@ fn fixture_results() -> ScanResults {
             compression_supported: Some(false),
         },
         heartbeat_echoes_oversized_payload: Some(false),
-        fallback_scsv_accepted: Some(true),
         negotiated: None,
         alpn_offered: vec![],
         validation: kemist::scanner::probe::ValidationResult::default(),
@@ -313,7 +312,7 @@ fn fully_populated_openssl_observations_match_schema_v1() {
         negotiated_version: Some("tls1_3".to_string()),
     };
 
-    // Phase B3 — TLS 1.3 EncryptedExtensions observation.
+    // TLS 1.3 EncryptedExtensions observation.
     let tls13_ee = Tls13EncryptedExtensions {
         parsed: true,
         record_size_limit: Some(16385),
@@ -321,9 +320,9 @@ fn fully_populated_openssl_observations_match_schema_v1() {
         error: None,
     };
 
-    // Phase F — session resumption. TLS 1.2 fully populated via the
-    // two-connection probe; TLS 1.3 slots deliberately NotProbed to
-    // exercise the documented "pending follow-up" shape.
+    // Session resumption. TLS 1.2 fully populated via the two-connection
+    // probe; TLS 1.3 slots deliberately NotProbed to exercise the
+    // documented "pending follow-up" shape.
     let session_resumption = SessionResumption {
         tls1_2: Tls12Resumption {
             session_ticket_issued: ObservationBool::probe(true),
@@ -341,7 +340,7 @@ fn fully_populated_openssl_observations_match_schema_v1() {
         },
     };
 
-    // Phase G — sigalg policy probe. All four constraints populated,
+    // Sigalg policy probe. All four constraints populated,
     // mirroring the cloudflare.com real-scan shape (three complete
     // with distinct selected sigalgs, rsa_pkcs1_only refused).
     let complete = |sigalg: &str| ConstrainedProbeResult {
@@ -446,21 +445,9 @@ fn fully_populated_openssl_observations_match_schema_v1() {
             .as_bool(),
         Some(true)
     );
-    // Deprecated field renders null with the supersession reason.
-    let deprecated = tls
-        .get("downgrade_signaling")
-        .unwrap()
-        .get("fallback_scsv_accepted")
-        .unwrap();
-    assert!(deprecated.get("value").unwrap().is_null());
-    assert_eq!(
-        deprecated.get("reason").unwrap().as_str(),
-        Some("superseded_by_fallback_scsv_enforced")
-    );
-
-    // Phase D — every cipher suite entry carries a classification
-    // from the 15-variant enum. Cross-check that non-null strings
-    // from the documented set land on every emitted entry.
+    // Every cipher suite entry carries a classification from the
+    // 15-variant enum. Cross-check that non-null strings from the
+    // documented set land on every emitted entry.
     let valid_classifications: &[&str] = &[
         "rsa_kex",
         "dhe_aead",
@@ -492,7 +479,7 @@ fn fully_populated_openssl_observations_match_schema_v1() {
         }
     }
 
-    // Phase B3 — TLS 1.3 EncryptedExtensions fields land under
+    // TLS 1.3 EncryptedExtensions fields land under
     // tls.extensions.{record_size_limit, compress_certificate_algorithms}.
     let ext = tls.get("extensions").unwrap();
     assert_eq!(
@@ -509,8 +496,8 @@ fn fully_populated_openssl_observations_match_schema_v1() {
         vec!["zlib", "brotli"]
     );
 
-    // Phase F — session_resumption TLS 1.2 slots carry real probe
-    // values; TLS 1.3 slots stay NotProbed.
+    // session_resumption TLS 1.2 slots carry real probe values;
+    // TLS 1.3 slots stay NotProbed.
     let sr = tls.get("session_resumption").unwrap();
     let sr12 = sr.get("tls1_2").unwrap();
     assert_eq!(
@@ -552,7 +539,7 @@ fn fully_populated_openssl_observations_match_schema_v1() {
         Some("not_probed")
     );
 
-    // Phase G — four sigalg-policy constraints each land with the
+    // Four sigalg-policy constraints each land with the
     // fixture's canonical outcomes.
     let sap = tls.get("signature_algorithm_policy_probe").unwrap();
     for name in ["sha256_plus_only", "ecdsa_only", "rsa_pss_only"] {
@@ -660,7 +647,8 @@ fn legacy_probes_disabled_renders_empty_schema_sections() {
             .as_str(),
         Some("feature_disabled")
     );
-    // Phase F/G shape is stable under http-checks only: both
+    // Session-resumption + sigalg-policy shape is stable under
+    // http-checks only: both
     // sections always emit, with `method: not_probed` / reason
     // `feature_disabled` slots rather than being absent.
     let sr = tls.get("session_resumption").unwrap();

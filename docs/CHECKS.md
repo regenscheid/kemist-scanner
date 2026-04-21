@@ -252,9 +252,6 @@ itself never negotiates 1.3.
   the pre-kemist TLSferret code. Sends a malformed heartbeat with
   oversized payload length; records whether the server echoed more
   bytes than we sent. Raw wire signal (not a CVE verdict).
-- `downgrade_signaling.fallback_scsv_accepted` — heuristic SCSV
-  observation from the same legacy code. Keeps the raw signal; rename
-  from the original TLSferret `fallback_scsv_supported`.
 
 ## SNI behavior probe
 
