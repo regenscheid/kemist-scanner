@@ -317,6 +317,7 @@ fn fully_populated_openssl_observations_match_schema_v1() {
         client_auth: Some(client_auth),
         tls13_extensions: None,
         session_resumption: None,
+        sigalg_policy: None,
         probe_errors: vec![],
     });
 
@@ -426,6 +427,7 @@ fn ffdhe_cross_check_reason_surfaces_in_output() {
         client_auth: None,
         tls13_extensions: None,
         session_resumption: None,
+        sigalg_policy: None,
         probe_errors: vec![],
     });
 

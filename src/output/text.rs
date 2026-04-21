@@ -451,7 +451,15 @@ fn render_legacy_probes(r: &ScanResult) {
         || matches!(
             tls.session_resumption.tls1_2.session_ticket_issued.method,
             Method::Probe | Method::ConnectionState
-        );
+        )
+        || [
+            &tls.signature_algorithm_policy_probe.sha256_plus_only,
+            &tls.signature_algorithm_policy_probe.ecdsa_only,
+            &tls.signature_algorithm_policy_probe.rsa_pss_only,
+            &tls.signature_algorithm_policy_probe.rsa_pkcs1_only,
+        ]
+        .iter()
+        .any(|r| matches!(r.method, Method::Probe));
     if !anything {
         return;
     }
@@ -462,6 +470,46 @@ fn render_legacy_probes(r: &ScanResult) {
     render_renegotiation_behavior(&tls.renegotiation_behavior);
     render_client_auth_request(tls.client_auth_request.as_ref());
     render_session_resumption(&tls.session_resumption);
+    render_sigalg_policy(&tls.signature_algorithm_policy_probe);
+}
+
+fn render_sigalg_policy(p: &crate::model::scan_result::SignatureAlgorithmPolicyProbe) {
+    use crate::model::scan_result::SigalgOutcome;
+    let has_signal = [
+        &p.sha256_plus_only,
+        &p.ecdsa_only,
+        &p.rsa_pss_only,
+        &p.rsa_pkcs1_only,
+    ]
+    .iter()
+    .any(|r| matches!(r.method, Method::Probe));
+    if !has_signal {
+        return;
+    }
+    section("Signature-algorithm policy probe");
+    for (label, r) in [
+        ("sha256_plus_only", &p.sha256_plus_only),
+        ("ecdsa_only", &p.ecdsa_only),
+        ("rsa_pss_only", &p.rsa_pss_only),
+        ("rsa_pkcs1_only", &p.rsa_pkcs1_only),
+    ] {
+        let outcome_str = match r.outcome {
+            SigalgOutcome::HandshakeComplete => "complete".green().to_string(),
+            SigalgOutcome::HandshakeFailure => "handshake_failure".yellow().to_string(),
+            SigalgOutcome::ConnectionClosed => "connection_closed".yellow().to_string(),
+            SigalgOutcome::OtherAlert => "other_alert".yellow().to_string(),
+            SigalgOutcome::NotProbed => "not_probed".dimmed().to_string(),
+        };
+        let suffix = match (&r.selected_sigalg, &r.alert) {
+            (Some(s), _) => format!(" → {s}"),
+            (None, Some(a)) => format!(" ({a})"),
+            (None, None) => match &r.reason {
+                Some(reason) => format!(" ({reason})"),
+                None => String::new(),
+            },
+        };
+        println!("  {:<22} {}{}", format!("{label}:"), outcome_str, suffix);
+    }
 }
 
 fn render_session_resumption(sr: &crate::model::scan_result::SessionResumption) {

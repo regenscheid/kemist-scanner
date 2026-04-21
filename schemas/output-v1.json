@@ -79,7 +79,8 @@
         "dh_parameters",
         "server_key_exchange_signatures",
         "renegotiation_behavior",
-        "session_resumption"
+        "session_resumption",
+        "signature_algorithm_policy_probe"
       ],
       "properties": {
         "versions_offered": {
@@ -261,6 +262,7 @@
           "additionalProperties": false
         },
         "session_resumption": { "$ref": "#/$defs/sessionResumption" },
+        "signature_algorithm_policy_probe": { "$ref": "#/$defs/sigalgPolicyProbe" },
         "client_auth_request": {
           "type": ["object", "null"],
           "required": ["requested", "method"],
@@ -656,6 +658,39 @@
           },
           "additionalProperties": false
         }
+      },
+      "additionalProperties": false
+    },
+    "sigalgPolicyProbe": {
+      "type": "object",
+      "description": "Phase G — per-constraint outcomes from restricted signature_algorithms handshakes. Every slot always present; `method: not_probed` + reason when skipped or feature-disabled.",
+      "required": ["sha256_plus_only", "ecdsa_only", "rsa_pss_only", "rsa_pkcs1_only"],
+      "properties": {
+        "sha256_plus_only": { "$ref": "#/$defs/constrainedProbeResult" },
+        "ecdsa_only":       { "$ref": "#/$defs/constrainedProbeResult" },
+        "rsa_pss_only":     { "$ref": "#/$defs/constrainedProbeResult" },
+        "rsa_pkcs1_only":   { "$ref": "#/$defs/constrainedProbeResult" }
+      },
+      "additionalProperties": false
+    },
+    "constrainedProbeResult": {
+      "type": "object",
+      "required": ["outcome", "method"],
+      "properties": {
+        "outcome": {
+          "type": "string",
+          "enum": [
+            "handshake_complete",
+            "handshake_failure",
+            "connection_closed",
+            "other_alert",
+            "not_probed"
+          ]
+        },
+        "selected_sigalg": { "type": "string" },
+        "alert":           { "type": "string" },
+        "method":          { "$ref": "#/$defs/method" },
+        "reason":          { "type": "string" }
       },
       "additionalProperties": false
     },

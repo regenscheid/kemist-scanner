@@ -56,6 +56,9 @@ pub struct ScanConfig {
     pub enable_http_checks: bool,
     /// Appended to User-Agent when HTTP checks fire: `kemist/<ver> (+<url>)`.
     pub user_agent_info_url: String,
+    /// Canonical names of signature-algorithm policy probes to skip
+    /// (from `--sigalg-probe-skip`). Empty = run all four.
+    pub sigalg_probe_skip: Vec<String>,
 }
 
 #[derive(Debug)]

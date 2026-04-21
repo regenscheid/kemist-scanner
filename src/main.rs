@@ -108,6 +108,14 @@ struct Args {
     #[arg(long)]
     include_ocsp_raw: bool,
 
+    /// Comma-separated list of signature-algorithm policy probes to
+    /// skip. By default all four run (sha256_plus_only, ecdsa_only,
+    /// rsa_pss_only, rsa_pkcs1_only). Useful for fast smoke scans or
+    /// when a target gets unhappy with a specific constraint offer.
+    /// Unknown entries are ignored.
+    #[arg(long, value_name = "CSV", value_delimiter = ',')]
+    sigalg_probe_skip: Vec<String>,
+
     /// Increase logging verbosity (-v info, -vv debug, -vvv trace).
     #[arg(short, long, action = clap::ArgAction::Count)]
     verbose: u8,
@@ -192,6 +200,7 @@ async fn run() -> Result<()> {
         enable_http_checks: args.enable_http_checks,
         user_agent_info_url,
         include_ocsp_raw: args.include_ocsp_raw,
+        sigalg_probe_skip: args.sigalg_probe_skip.clone(),
     });
 
     let results = scanner.scan_many(targets).await;

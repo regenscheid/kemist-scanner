@@ -177,6 +177,77 @@ pub struct Tls {
     /// acceptance, 0-RTT acceptance. See
     /// [`crate::model::scan_result::SessionResumption`].
     pub session_resumption: SessionResumption,
+    /// Active probe: handshake with constrained
+    /// `signature_algorithms` offers and record what the server does.
+    /// Four independent slots per RFC 8446 §4.2.3 / RFC 8017 sigalg
+    /// families. See [`SignatureAlgorithmPolicyProbe`].
+    pub signature_algorithm_policy_probe: SignatureAlgorithmPolicyProbe,
+}
+
+/// Per-constraint outcomes for the sig-alg policy probe.
+#[derive(Serialize, Debug, Clone, Default)]
+pub struct SignatureAlgorithmPolicyProbe {
+    pub sha256_plus_only: ConstrainedProbeResult,
+    pub ecdsa_only: ConstrainedProbeResult,
+    pub rsa_pss_only: ConstrainedProbeResult,
+    pub rsa_pkcs1_only: ConstrainedProbeResult,
+}
+
+/// Result of one constrained-sigalg handshake attempt.
+#[derive(Serialize, Debug, Clone)]
+pub struct ConstrainedProbeResult {
+    /// Probed outcome. See [`SigalgOutcome`].
+    pub outcome: SigalgOutcome,
+    /// Signature algorithm the server selected when the handshake
+    /// completed — canonical OpenSSL name (`"ecdsa_secp256r1_sha256"`,
+    /// `"rsa_pss_rsae_sha256"`, …). `None` on non-completing outcomes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selected_sigalg: Option<String>,
+    /// Alert category string when the server refused
+    /// (`"tls_alert_handshake_failure"`, etc.). Same taxonomy as
+    /// `errors[].category`. `None` when the handshake completed or
+    /// the connection closed without an alert.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub alert: Option<String>,
+    /// Method: `probe` when the attempt ran, `not_probed` when
+    /// `--sigalg-probe-skip` opted out, `feature_disabled` under
+    /// non-legacy-probes builds, `error` on setup failure.
+    pub method: Method,
+    /// Human-readable reason for non-probe outcomes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+impl Default for ConstrainedProbeResult {
+    fn default() -> Self {
+        Self {
+            outcome: SigalgOutcome::NotProbed,
+            selected_sigalg: None,
+            alert: None,
+            method: Method::NotProbed,
+            reason: None,
+        }
+    }
+}
+
+/// Classifier for a constrained-sigalg handshake attempt.
+#[derive(Serialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SigalgOutcome {
+    /// Handshake completed; the server picked a sigalg from our
+    /// constrained list.
+    HandshakeComplete,
+    /// Server returned `handshake_failure` (alert 40) — the canonical
+    /// response when it has no compatible cert/sigalg.
+    HandshakeFailure,
+    /// Peer closed TCP without sending an alert.
+    ConnectionClosed,
+    /// Server returned some other alert
+    /// (`insufficient_security`, `internal_error`, etc.).
+    OtherAlert,
+    /// Probe didn't run for this constraint (CLI skip or feature
+    /// disabled).
+    NotProbed,
 }
 
 /// TLS 1.2 + TLS 1.3 session resumption observations.

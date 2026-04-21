@@ -16,6 +16,7 @@ pub mod fallback_scsv;
 pub mod ffdhe;
 pub mod protocol_versions;
 pub mod renegotiation;
+pub mod sigalg_policy;
 pub mod ske_sig;
 pub mod tickets;
 pub mod tls13_extensions;
@@ -88,6 +89,11 @@ pub struct OpensslObservations {
     /// today, TLS 1.3 PSK + 0-RTT stubbed for a future workstream.
     /// `None` when the probe's outer setup failed (rare).
     pub session_resumption: Option<crate::model::scan_result::SessionResumption>,
+    /// Phase G — constrained-sigalg handshake outcomes for the four
+    /// canonical constraint families. `None` only when the outer
+    /// probe setup failed; per-constraint skip lands as
+    /// `method: not_probed` inside.
+    pub sigalg_policy: Option<crate::model::scan_result::SignatureAlgorithmPolicyProbe>,
     /// Per-probe non-fatal errors collected during the scan. Populated so
     /// every "not probed" outcome carries a reason string rather than going
     /// silent.
@@ -149,6 +155,18 @@ pub async fn run_all_probes(cfg: &ScanConfig) -> Result<OpensslObservations, Sca
     // rotation; TLS 1.3 stubbed for a follow-up workstream).
     let sr = tickets::probe(cfg.target, &cfg.hostname, cfg.timeout, cfg.timeout).await;
     out.session_resumption = Some(sr);
+
+    // Phase G — signature-algorithm policy probe (four constrained
+    // handshakes; `--sigalg-probe-skip` opts out individual ones).
+    let sap = sigalg_policy::probe(
+        cfg.target,
+        &cfg.hostname,
+        cfg.timeout,
+        cfg.timeout,
+        &cfg.sigalg_probe_skip,
+    )
+    .await;
+    out.sigalg_policy = Some(sap);
 
     // D8 hooks in here as that module lands live.
 

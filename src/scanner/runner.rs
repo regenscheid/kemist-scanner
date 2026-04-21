@@ -67,6 +67,12 @@ pub struct ScannerConfig {
     /// default — rule engines rarely need the raw bytes, and
     /// including them inflates per-scan JSON size noticeably.
     pub include_ocsp_raw: bool,
+    /// Canonical names of signature-algorithm policy probes the
+    /// operator explicitly skipped (`--sigalg-probe-skip=...`).
+    /// Recognized: `"sha256_plus_only"`, `"ecdsa_only"`,
+    /// `"rsa_pss_only"`, `"rsa_pkcs1_only"`. Unknown entries are
+    /// ignored.
+    pub sigalg_probe_skip: Vec<String>,
 }
 
 impl Default for ScannerConfig {
@@ -86,6 +92,7 @@ impl Default for ScannerConfig {
             enable_http_checks: false,
             user_agent_info_url: "https://www.kemist-tls.net".to_string(),
             include_ocsp_raw: false,
+            sigalg_probe_skip: Vec::new(),
         }
     }
 }
@@ -219,6 +226,7 @@ impl Scanner {
                     per_target_delay: self.config.per_target_delay,
                     enable_http_checks: self.config.enable_http_checks,
                     user_agent_info_url: self.config.user_agent_info_url.clone(),
+                    sigalg_probe_skip: self.config.sigalg_probe_skip.clone(),
                 };
 
                 info!(

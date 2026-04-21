@@ -151,6 +151,7 @@ fn build_tls(results: &ScanResults, ctx: &JsonEmitContext) -> Tls {
         server_key_exchange_signatures: build_ske_sigs(results),
         renegotiation_behavior: build_renegotiation_behavior(results),
         session_resumption: build_session_resumption(results),
+        signature_algorithm_policy_probe: build_sigalg_policy(results),
         client_auth_request: build_client_auth_request(results),
     }
 }
@@ -923,6 +924,39 @@ fn build_session_resumption(results: &ScanResults) -> crate::model::scan_result:
             psk_resumption_accepted: ObservationBool::not_probed("feature_disabled"),
             early_data_accepted: ObservationBool::not_probed("feature_disabled"),
         },
+    }
+}
+
+fn build_sigalg_policy(
+    results: &ScanResults,
+) -> crate::model::scan_result::SignatureAlgorithmPolicyProbe {
+    use crate::model::scan_result::{
+        ConstrainedProbeResult, Method, SigalgOutcome, SignatureAlgorithmPolicyProbe,
+    };
+
+    #[cfg(feature = "legacy-probes")]
+    {
+        if let Some(obs) = results.openssl_observations.as_ref() {
+            if let Some(sap) = obs.sigalg_policy.as_ref() {
+                return sap.clone();
+            }
+        }
+    }
+    let _ = results;
+    // feature_disabled fallback — stable shape with every slot
+    // resolving to the same not_probed reason.
+    let slot = || ConstrainedProbeResult {
+        outcome: SigalgOutcome::NotProbed,
+        selected_sigalg: None,
+        alert: None,
+        method: Method::NotProbed,
+        reason: Some("feature_disabled".to_string()),
+    };
+    SignatureAlgorithmPolicyProbe {
+        sha256_plus_only: slot(),
+        ecdsa_only: slot(),
+        rsa_pss_only: slot(),
+        rsa_pkcs1_only: slot(),
     }
 }
 
