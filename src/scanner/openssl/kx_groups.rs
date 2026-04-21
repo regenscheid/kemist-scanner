@@ -19,7 +19,7 @@
 //! match the advertised codepoint. Servers that complete a DHE
 //! handshake with a *custom* prime ignored `supported_groups` — a
 //! misconfiguration finding surfaced via the
-//! [`KxGroupOutcome::IgnoredGroupReturnedCustomPrime`] variant. ECDH
+//! [`HandshakeOutcome::IgnoredGroupReturnedCustomPrime`] variant. ECDH
 //! and ML-KEM rows skip this cross-check (their key exchange
 //! produces no modular prime).
 
@@ -30,34 +30,17 @@ use openssl::ssl::{HandshakeError, Ssl, SslContext, SslMethod, SslVerifyMode, Ss
 use tracing::{debug, info};
 
 use crate::model::errors::ScannerError;
+use crate::scanner::backends::{is_wire_rejection, HandshakeOutcome};
 use crate::scanner::openssl::alerts;
 use crate::scanner::openssl::dh_params::{self, DhClassification};
-
-/// Outcome of a single named-group probe at one protocol version.
-#[derive(Debug, Clone)]
-pub enum KxGroupOutcome {
-    /// Server honored the group offer — handshake completed with this
-    /// group. For FFDHE rows, also verified against the observed DH prime.
-    Supported,
-    /// Server rejected the single-group offer (handshake alert or reset).
-    NotSupported,
-    /// FFDHE-only: server completed a DHE handshake but returned a prime
-    /// that doesn't match the advertised codepoint. Meaningless for
-    /// ECDH / ML-KEM rows.
-    IgnoredGroupReturnedCustomPrime,
-    /// Probe itself failed (TCP timeout, unexpected error).
-    Error(String),
-    /// Probe not attempted — e.g. TLS 1.2 cell for a TLS-1.3-only group.
-    NotProbed(String),
-}
 
 /// Per-group probe result across TLS 1.2 and TLS 1.3.
 #[derive(Debug, Clone)]
 pub struct KxGroupProbeResult {
     pub group_name: String,
     pub iana_code: u16,
-    pub tls12_outcome: KxGroupOutcome,
-    pub tls13_outcome: KxGroupOutcome,
+    pub tls12_outcome: HandshakeOutcome,
+    pub tls13_outcome: HandshakeOutcome,
 }
 
 /// Aggregate output of the named-group probe pass.
@@ -212,7 +195,7 @@ pub async fn probe_kx_groups(
             }
             o
         } else {
-            KxGroupOutcome::NotProbed("tls12_not_applicable".to_string())
+            HandshakeOutcome::NotProbed("tls12_not_applicable".to_string())
         };
 
         let tls13_outcome = run_attempt(
@@ -254,7 +237,7 @@ async fn run_attempt(
     version: SslVersion,
     connect_timeout: Duration,
     handshake_timeout: Duration,
-) -> KxGroupOutcome {
+) -> HandshakeOutcome {
     let hostname_owned = hostname.to_string();
     tokio::task::spawn_blocking(move || {
         probe_blocking(
@@ -267,7 +250,7 @@ async fn run_attempt(
         )
     })
     .await
-    .unwrap_or_else(|join_err| KxGroupOutcome::Error(format!("spawn_blocking_panic: {join_err}")))
+    .unwrap_or_else(|join_err| HandshakeOutcome::Error(format!("spawn_blocking_panic: {join_err}")))
 }
 
 fn probe_blocking(
@@ -277,7 +260,7 @@ fn probe_blocking(
     version: SslVersion,
     connect_timeout: Duration,
     handshake_timeout: Duration,
-) -> KxGroupOutcome {
+) -> HandshakeOutcome {
     let tcp = match std::net::TcpStream::connect_timeout(&target, connect_timeout) {
         Ok(s) => s,
         Err(e) => {
@@ -291,37 +274,37 @@ fn probe_blocking(
     let ctx = match build_context(version, t.openssl_name) {
         Ok(c) => c,
         Err(stack) => {
-            return KxGroupOutcome::Error(format!("openssl_ctx_build: {stack}"));
+            return HandshakeOutcome::Error(format!("openssl_ctx_build: {stack}"));
         }
     };
 
     let mut ssl = match Ssl::new(&ctx) {
         Ok(s) => s,
-        Err(stack) => return KxGroupOutcome::Error(format!("openssl_ssl_new: {stack}")),
+        Err(stack) => return HandshakeOutcome::Error(format!("openssl_ssl_new: {stack}")),
     };
     let _ = ssl.set_hostname(hostname);
 
     match ssl.connect(tcp) {
         Ok(stream) => match t.ffdhe_cross_check {
             Some(expected) => match dh_params::snapshot(stream.ssl()) {
-                Ok(Some(snap)) if snap.classification == expected => KxGroupOutcome::Supported,
-                Ok(Some(_)) => KxGroupOutcome::IgnoredGroupReturnedCustomPrime,
+                Ok(Some(snap)) if snap.classification == expected => HandshakeOutcome::Supported,
+                Ok(Some(_)) => HandshakeOutcome::IgnoredGroupReturnedCustomPrime,
                 Ok(None) => {
-                    KxGroupOutcome::Error("handshake_success_but_no_dh_tmp_key".to_string())
+                    HandshakeOutcome::Error("handshake_success_but_no_dh_tmp_key".to_string())
                 }
-                Err(stack) => KxGroupOutcome::Error(format!("dh_snapshot_error: {stack}")),
+                Err(stack) => HandshakeOutcome::Error(format!("dh_snapshot_error: {stack}")),
             },
-            None => KxGroupOutcome::Supported,
+            None => HandshakeOutcome::Supported,
         },
         Err(HandshakeError::Failure(mid)) => {
             let se = alerts::classify_openssl_error("kx group handshake", mid.error());
             classify_scanner_error(se)
         }
         Err(HandshakeError::SetupFailure(stack)) => {
-            KxGroupOutcome::Error(format!("openssl_setup: {stack}"))
+            HandshakeOutcome::Error(format!("openssl_setup: {stack}"))
         }
         Err(HandshakeError::WouldBlock(_)) => {
-            KxGroupOutcome::Error("openssl_would_block".to_string())
+            HandshakeOutcome::Error("openssl_would_block".to_string())
         }
     }
 }
@@ -342,11 +325,11 @@ fn build_context(
     Ok(builder.build())
 }
 
-fn classify_scanner_error(e: ScannerError) -> KxGroupOutcome {
-    if e.category.starts_with("tls_alert_") || e.category == "connection_refused" {
-        KxGroupOutcome::NotSupported
+fn classify_scanner_error(e: ScannerError) -> HandshakeOutcome {
+    if is_wire_rejection(&e) {
+        HandshakeOutcome::NotSupported
     } else {
-        KxGroupOutcome::Error(e.category)
+        HandshakeOutcome::Error(e.category)
     }
 }
 
@@ -398,13 +381,13 @@ mod tests {
         let alert = ScannerError::tls_alert("handshake_failure", "ctx");
         assert!(matches!(
             classify_scanner_error(alert),
-            KxGroupOutcome::NotSupported
+            HandshakeOutcome::NotSupported
         ));
 
         let refused = ScannerError::connection_refused("ctx");
         assert!(matches!(
             classify_scanner_error(refused),
-            KxGroupOutcome::NotSupported
+            HandshakeOutcome::NotSupported
         ));
     }
 
@@ -412,7 +395,7 @@ mod tests {
     fn classify_scanner_error_preserves_other_categories_as_error() {
         let timeout = ScannerError::connection_timeout("ctx");
         match classify_scanner_error(timeout) {
-            KxGroupOutcome::Error(cat) => assert_eq!(cat, "connection_timeout"),
+            HandshakeOutcome::Error(cat) => assert_eq!(cat, "connection_timeout"),
             other => panic!("expected Error, got {other:?}"),
         }
     }

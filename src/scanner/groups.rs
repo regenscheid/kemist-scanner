@@ -62,6 +62,7 @@ use tokio_rustls::{rustls, TlsConnector};
 use tracing::debug;
 
 use crate::model::errors::ScannerError;
+use crate::scanner::backends::{is_wire_rejection, HandshakeOutcome};
 
 /// One per-group probe result.
 #[derive(Debug, Clone)]
@@ -71,20 +72,7 @@ pub struct GroupProbeResult {
     pub name: String,
     /// IANA codepoint (e.g. `0x11EC`).
     pub iana_code: u16,
-    pub outcome: GroupProbeOutcome,
-}
-
-#[derive(Debug, Clone)]
-pub enum GroupProbeOutcome {
-    /// Handshake succeeded with this group alone.
-    Supported,
-    /// Server rejected the single-group offer — handshake alert or reset.
-    NotSupported,
-    /// Probe itself failed (TCP timeout, DNS, unexpected error).
-    Error(String),
-    /// Probe not attempted — aws-lc-rs doesn't ship this group at build
-    /// time. Carries a specific reason for downstream consumers.
-    NotProbed(String),
+    pub outcome: HandshakeOutcome,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -157,7 +145,7 @@ pub async fn probe_kx_groups(
             }
             None => {
                 debug!("group {} not exposed by aws-lc-rs, skipping probe", name);
-                GroupProbeOutcome::NotProbed(format!(
+                HandshakeOutcome::NotProbed(format!(
                     "aws_lc_rs_no_{}_support",
                     name.to_lowercase()
                 ))
@@ -173,7 +161,7 @@ pub async fn probe_kx_groups(
         if !per_probe_delay.is_zero()
             && !matches!(
                 results.last().unwrap().outcome,
-                GroupProbeOutcome::NotProbed(_)
+                HandshakeOutcome::NotProbed(_)
             )
         {
             tokio::time::sleep(per_probe_delay).await;
@@ -189,7 +177,7 @@ async fn probe_single_group(
     group: &'static dyn SupportedKxGroup,
     connect_timeout: Duration,
     handshake_timeout: Duration,
-) -> GroupProbeOutcome {
+) -> HandshakeOutcome {
     let mut provider = aws_lc_rs::default_provider();
     provider.kx_groups = vec![group];
 
@@ -200,42 +188,38 @@ async fn probe_single_group(
             .dangerous()
             .with_custom_certificate_verifier(Arc::new(PermissiveVerifier))
             .with_no_client_auth(),
-        Err(e) => return GroupProbeOutcome::Error(format!("config_builder:{e}")),
+        Err(e) => return HandshakeOutcome::Error(format!("config_builder:{e}")),
     };
 
     let connector = TlsConnector::from(Arc::new(config));
 
     let tcp = match timeout(connect_timeout, TcpStream::connect(&target)).await {
-        Err(_) => return GroupProbeOutcome::Error("tcp_connect_timeout".to_string()),
+        Err(_) => return HandshakeOutcome::Error("tcp_connect_timeout".to_string()),
         Ok(Err(e)) => {
             let err = ScannerError::from_io("tcp_connect", e);
-            return GroupProbeOutcome::Error(err.category);
+            return HandshakeOutcome::Error(err.category);
         }
         Ok(Ok(s)) => s,
     };
 
     let domain = match ServerName::try_from(hostname.to_string()) {
         Ok(d) => d,
-        Err(_) => return GroupProbeOutcome::Error(format!("invalid_sni:{hostname}")),
+        Err(_) => return HandshakeOutcome::Error(format!("invalid_sni:{hostname}")),
     };
 
     match timeout(handshake_timeout, connector.connect(domain, tcp)).await {
-        Err(_) => GroupProbeOutcome::Error("handshake_timeout".to_string()),
-        Ok(Ok(_)) => GroupProbeOutcome::Supported,
+        Err(_) => HandshakeOutcome::Error("handshake_timeout".to_string()),
+        Ok(Ok(_)) => HandshakeOutcome::Supported,
         Ok(Err(e)) => classify_probe_error(e),
     }
 }
 
-fn classify_probe_error(e: std::io::Error) -> GroupProbeOutcome {
+fn classify_probe_error(e: std::io::Error) -> HandshakeOutcome {
     let scanner_err = ScannerError::from_io("handshake", e);
-    let is_rejection = scanner_err.category.starts_with("tls_alert_")
-        || scanner_err.category == "connection_refused";
-    if is_rejection {
-        GroupProbeOutcome::NotSupported
+    if is_wire_rejection(&scanner_err) {
+        HandshakeOutcome::NotSupported
     } else {
-        // Preserve the context for diagnosis; see the matching
-        // comment in `ciphers::classify_probe_error`.
-        GroupProbeOutcome::Error(format!("{}: {}", scanner_err.category, scanner_err.context))
+        HandshakeOutcome::Error(format!("{}: {}", scanner_err.category, scanner_err.context))
     }
 }
 

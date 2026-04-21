@@ -23,24 +23,10 @@ use tracing::{debug, info};
 
 use crate::model::errors::ScannerError;
 use crate::model::protocol::TlsVersion;
+use crate::scanner::backends::{is_wire_rejection, HandshakeOutcome};
 use crate::scanner::openssl::alerts;
 use crate::scanner::openssl::dh_params::{self, DhSnapshot};
 use crate::scanner::openssl::ske_sig;
-
-/// Per-suite probe outcome. Parallel to
-/// `crate::scanner::ciphers::ProbeOutcome` on the rustls side; downstream
-/// consumers get the same three-state contract across both probe families.
-#[derive(Debug, Clone)]
-pub enum LegacyProbeOutcome {
-    /// Handshake completed with this suite alone in the ClientHello.
-    Supported,
-    /// Server rejected the single-suite offer with a handshake alert or a
-    /// post-ClientHello reset.
-    NotSupported,
-    /// Probe itself failed (TCP timeout, unexpected error). Category string
-    /// from [`ScannerError`] is preserved.
-    Error(String),
-}
 
 /// One per-suite probe result.
 #[derive(Debug, Clone)]
@@ -55,7 +41,7 @@ pub struct LegacyCipherResult {
     /// TLS version the probe targeted. Each suite may be probed at multiple
     /// versions; those appear as separate result entries.
     pub version: TlsVersion,
-    pub outcome: LegacyProbeOutcome,
+    pub outcome: HandshakeOutcome,
     /// Populated by [`crate::scanner::openssl::dh_params::snapshot`] for any
     /// handshake whose server `tmp_key` is DH (i.e. DHE-RSA suites). `None`
     /// for RSA-kex, ECDHE, and failed handshakes.
@@ -379,7 +365,7 @@ pub async fn probe_legacy_suites(
         })
         .await
         .unwrap_or_else(|join_err| ProbeRun {
-            outcome: LegacyProbeOutcome::Error(format!("spawn_blocking_panic: {join_err}")),
+            outcome: HandshakeOutcome::Error(format!("spawn_blocking_panic: {join_err}")),
             dh_snapshot: None,
             ske_sig: None,
         });
@@ -414,14 +400,14 @@ pub async fn probe_legacy_suites(
 /// Internal return value of [`probe_single_suite_blocking`] — outcome plus
 /// any post-handshake observations (DH parameter snapshot, SKE signature).
 struct ProbeRun {
-    outcome: LegacyProbeOutcome,
+    outcome: HandshakeOutcome,
     dh_snapshot: Option<DhSnapshot>,
     ske_sig: Option<String>,
 }
 
 /// Synchronous single-suite probe. Called inside `spawn_blocking`. Never
 /// panics, never returns Err; failure categories fold into
-/// `LegacyProbeOutcome::Error`. On handshake success, also observes DH
+/// `HandshakeOutcome::Error`. On handshake success, also observes DH
 /// parameters if the server's tmp key is DH.
 fn probe_single_suite_blocking(
     target: SocketAddr,
@@ -433,7 +419,7 @@ fn probe_single_suite_blocking(
 ) -> ProbeRun {
     let Some(ossl_version) = tls_version_to_ossl(version) else {
         return ProbeRun {
-            outcome: LegacyProbeOutcome::Error(format!(
+            outcome: HandshakeOutcome::Error(format!(
                 "unsupported_tls_version_for_openssl:{version:?}"
             )),
             dh_snapshot: None,
@@ -465,7 +451,7 @@ fn probe_single_suite_blocking(
             // OpenSSL build. Classify as Error, not NotSupported — this is
             // a kemist-side bug, not a server observation.
             return ProbeRun {
-                outcome: LegacyProbeOutcome::Error(format!("openssl_ctx_build: {stack}")),
+                outcome: HandshakeOutcome::Error(format!("openssl_ctx_build: {stack}")),
                 dh_snapshot: None,
                 ske_sig: None,
             };
@@ -476,7 +462,7 @@ fn probe_single_suite_blocking(
         Ok(s) => s,
         Err(stack) => {
             return ProbeRun {
-                outcome: LegacyProbeOutcome::Error(format!("openssl_ssl_new: {stack}")),
+                outcome: HandshakeOutcome::Error(format!("openssl_ssl_new: {stack}")),
                 dh_snapshot: None,
                 ske_sig: None,
             }
@@ -496,7 +482,7 @@ fn probe_single_suite_blocking(
             let dh_snapshot = dh_params::snapshot(stream.ssl()).unwrap_or(None);
             let ske_sig = ske_sig::snapshot(stream.ssl());
             ProbeRun {
-                outcome: LegacyProbeOutcome::Supported,
+                outcome: HandshakeOutcome::Supported,
                 dh_snapshot,
                 ske_sig,
             }
@@ -510,7 +496,7 @@ fn probe_single_suite_blocking(
             }
         }
         Err(HandshakeError::SetupFailure(stack)) => ProbeRun {
-            outcome: LegacyProbeOutcome::Error(format!("openssl_setup: {stack}")),
+            outcome: HandshakeOutcome::Error(format!("openssl_setup: {stack}")),
             dh_snapshot: None,
             ske_sig: None,
         },
@@ -519,7 +505,7 @@ fn probe_single_suite_blocking(
             // does, record as Error so the anomaly surfaces rather than
             // masquerading as NotSupported.
             ProbeRun {
-                outcome: LegacyProbeOutcome::Error("openssl_would_block".to_string()),
+                outcome: HandshakeOutcome::Error("openssl_would_block".to_string()),
                 dh_snapshot: None,
                 ske_sig: None,
             }
@@ -568,14 +554,14 @@ fn tls_version_to_ossl(v: TlsVersion) -> Option<SslVersion> {
 
 /// Fold a [`ScannerError`] into the probe-outcome shape.
 ///
-/// Mirrors `crate::scanner::ciphers::classify_probe_error`: any `tls_alert_*`
-/// or `connection_refused` is promoted to `NotSupported`. Everything else is
-/// `Error` with the category string preserved so rule engines can read it.
-fn classify_scanner_error(e: ScannerError) -> LegacyProbeOutcome {
-    if e.category.starts_with("tls_alert_") || e.category == "connection_refused" {
-        LegacyProbeOutcome::NotSupported
+/// Uses the shared `is_wire_rejection` predicate. This (OpenSSL) path
+/// emits the `category` only in Error; the rustls-path `classify_probe_error`
+/// includes both category and context — schema v1 depends on that asymmetry.
+fn classify_scanner_error(e: ScannerError) -> HandshakeOutcome {
+    if is_wire_rejection(&e) {
+        HandshakeOutcome::NotSupported
     } else {
-        LegacyProbeOutcome::Error(e.category)
+        HandshakeOutcome::Error(e.category)
     }
 }
 
@@ -652,7 +638,7 @@ mod tests {
         let alert = ScannerError::tls_alert("handshake_failure", "ctx");
         assert!(matches!(
             classify_scanner_error(alert),
-            LegacyProbeOutcome::NotSupported
+            HandshakeOutcome::NotSupported
         ));
 
         // connection_refused at TCP level is a real refusal, but some
@@ -661,7 +647,7 @@ mod tests {
         let refused = ScannerError::connection_refused("ctx");
         assert!(matches!(
             classify_scanner_error(refused),
-            LegacyProbeOutcome::NotSupported
+            HandshakeOutcome::NotSupported
         ));
     }
 
@@ -669,7 +655,7 @@ mod tests {
     fn classify_scanner_error_preserves_other_categories_as_error() {
         let timeout = ScannerError::connection_timeout("ctx");
         match classify_scanner_error(timeout) {
-            LegacyProbeOutcome::Error(cat) => assert_eq!(cat, "connection_timeout"),
+            HandshakeOutcome::Error(cat) => assert_eq!(cat, "connection_timeout"),
             other => panic!("expected Error, got {other:?}"),
         }
     }

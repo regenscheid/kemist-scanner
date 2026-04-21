@@ -11,7 +11,54 @@
 //! (`capabilities.provider_cipher_suites`, `.provider_kx_groups`) and
 //! the classification-coverage test under `tests/` consume it.
 
+use crate::model::errors::ScannerError;
 use crate::model::protocol::TlsVersion;
+
+/// Outcome of a single probe handshake. Unifies the per-probe-family
+/// outcome enums that used to live alongside each probe (`ProbeOutcome`,
+/// `LegacyProbeOutcome`, `GroupProbeOutcome`, `KxGroupOutcome`).
+///
+/// Not every probe family produces every variant — `NotProbed` is only
+/// emitted by group probes (aws-lc-rs doesn't ship some named groups;
+/// FFDHE at TLS 1.2 doesn't apply to ECDH codepoints), and
+/// `IgnoredGroupReturnedCustomPrime` is FFDHE-specific. Cipher probes
+/// use only `Supported` / `NotSupported` / `Error`.
+#[derive(Debug, Clone)]
+pub enum HandshakeOutcome {
+    /// Handshake completed with the constrained offer.
+    Supported,
+    /// Server evaluated the single-codepoint offer and rejected it —
+    /// handshake alert or post-ClientHello reset.
+    NotSupported,
+    /// Probe itself failed (transport timeout, unexpected error).
+    /// The string carries the scanner error category (and sometimes
+    /// context) — format is caller-specific for backwards compatibility
+    /// with schema v1 error strings.
+    Error(String),
+    /// Probe not attempted — e.g. aws-lc-rs doesn't ship this group, or
+    /// the probe doesn't apply to this TLS version. Group probes only.
+    NotProbed(String),
+    /// FFDHE-only: server completed a DHE handshake but returned a
+    /// prime that doesn't match the advertised codepoint — i.e. it
+    /// ignored our `supported_groups` offer. Meaningless for ECDH /
+    /// ML-KEM / cipher probes.
+    IgnoredGroupReturnedCustomPrime,
+}
+
+/// Heuristic: does this `ScannerError` indicate the server evaluated
+/// our offer and rejected it at the wire level? Any `tls_alert_*`
+/// category or `connection_refused` is a real observation (server
+/// said "no"); everything else is a probe failure we should surface
+/// as `Error`.
+///
+/// Callers produce the `Error` variant themselves because rustls-path
+/// and OpenSSL-path probes emit subtly different Error strings (the
+/// rustls path includes both category and context; the OpenSSL path
+/// emits category only) and schema-v1 output depends on both formats
+/// staying as they were.
+pub fn is_wire_rejection(e: &ScannerError) -> bool {
+    e.category.starts_with("tls_alert_") || e.category == "connection_refused"
+}
 
 /// Declares which codepoints a backend can probe.
 ///

@@ -211,11 +211,16 @@ fn build_cipher_suites(results: &ScanResults) -> TlsCipherSuites {
     // aws-lc-rs modern probes.
     let server_enforces_order = if let Some(probes) = &results.cipher_probes {
         for r in &probes.results {
-            use crate::scanner::ciphers::ProbeOutcome;
+            use crate::scanner::backends::HandshakeOutcome;
             let (supported, method, reason) = match &r.outcome {
-                ProbeOutcome::Supported => (Some(true), Method::Probe, None),
-                ProbeOutcome::NotSupported => (Some(false), Method::Probe, None),
-                ProbeOutcome::Error(e) => (None, Method::Error, Some(e.clone())),
+                HandshakeOutcome::Supported => (Some(true), Method::Probe, None),
+                HandshakeOutcome::NotSupported => (Some(false), Method::Probe, None),
+                HandshakeOutcome::Error(e) => (None, Method::Error, Some(e.clone())),
+                HandshakeOutcome::NotProbed(_)
+                | HandshakeOutcome::IgnoredGroupReturnedCustomPrime => unreachable!(
+                    "cipher probe never constructs NotProbed or \
+                     IgnoredGroupReturnedCustomPrime variants"
+                ),
             };
             let entry = CipherSuiteEntry {
                 classification: crate::model::cipher_classification::classify(&r.name),
@@ -265,7 +270,7 @@ fn merge_openssl_cipher_probes(
 ) {
     #[cfg(feature = "legacy-probes")]
     {
-        use crate::scanner::openssl::ciphers::LegacyProbeOutcome;
+        use crate::scanner::backends::HandshakeOutcome;
         let Some(obs) = results.openssl_observations.as_ref() else {
             return;
         };
@@ -274,9 +279,14 @@ fn merge_openssl_cipher_probes(
         };
         for r in &probes.results {
             let (supported, method, reason) = match &r.outcome {
-                LegacyProbeOutcome::Supported => (Some(true), Method::Probe, None),
-                LegacyProbeOutcome::NotSupported => (Some(false), Method::Probe, None),
-                LegacyProbeOutcome::Error(e) => (None, Method::Error, Some(e.clone())),
+                HandshakeOutcome::Supported => (Some(true), Method::Probe, None),
+                HandshakeOutcome::NotSupported => (Some(false), Method::Probe, None),
+                HandshakeOutcome::Error(e) => (None, Method::Error, Some(e.clone())),
+                HandshakeOutcome::NotProbed(_)
+                | HandshakeOutcome::IgnoredGroupReturnedCustomPrime => unreachable!(
+                    "OpenSSL cipher probe never constructs NotProbed or \
+                     IgnoredGroupReturnedCustomPrime variants"
+                ),
             };
             let entry = CipherSuiteEntry {
                 classification: crate::model::cipher_classification::classify(&r.name),
@@ -310,34 +320,39 @@ fn build_groups(results: &ScanResults) -> TlsGroups {
 
     if let Some(probes) = &results.group_probes {
         for r in &probes.results {
-            use crate::scanner::groups::GroupProbeOutcome;
+            use crate::scanner::backends::HandshakeOutcome;
             let obs = match &r.outcome {
-                GroupProbeOutcome::Supported => GroupObservation {
+                HandshakeOutcome::Supported => GroupObservation {
                     supported: Some(true),
                     method: Method::Probe,
                     reason: None,
                     iana_code: None,
                     provider: Some("aws_lc_rs".to_string()),
                 },
-                GroupProbeOutcome::NotSupported => GroupObservation {
+                HandshakeOutcome::NotSupported => GroupObservation {
                     supported: Some(false),
                     method: Method::Probe,
                     reason: None,
                     iana_code: None,
                     provider: Some("aws_lc_rs".to_string()),
                 },
-                GroupProbeOutcome::Error(ctx) => GroupObservation {
+                HandshakeOutcome::Error(ctx) => GroupObservation {
                     supported: None,
                     method: Method::Error,
                     reason: Some(ctx.clone()),
                     iana_code: None,
                     provider: Some("aws_lc_rs".to_string()),
                 },
-                GroupProbeOutcome::NotProbed(reason) => {
+                HandshakeOutcome::NotProbed(reason) => {
                     let mut o = GroupObservation::not_probed(reason.as_str());
                     o.provider = Some("aws_lc_rs".to_string());
                     o
                 }
+                HandshakeOutcome::IgnoredGroupReturnedCustomPrime => unreachable!(
+                    "rustls group probe never constructs \
+                     IgnoredGroupReturnedCustomPrime — FFDHE cross-check \
+                     is OpenSSL-only"
+                ),
             };
             // src/scanner/groups.rs is TLS 1.3-only by design, so every
             // entry lands in tls1_3.
@@ -352,37 +367,37 @@ fn build_groups(results: &ScanResults) -> TlsGroups {
 fn merge_openssl_kx_groups(results: &ScanResults, out: &mut TlsGroups) {
     #[cfg(feature = "legacy-probes")]
     {
-        use crate::scanner::openssl::kx_groups::KxGroupOutcome;
+        use crate::scanner::backends::HandshakeOutcome;
         let Some(obs) = results.openssl_observations.as_ref() else {
             return;
         };
         let Some(probes) = obs.kx_group_probes.as_ref() else {
             return;
         };
-        let to_obs = |o: &KxGroupOutcome, iana: &str| -> Option<GroupObservation> {
+        let to_obs = |o: &HandshakeOutcome, iana: &str| -> Option<GroupObservation> {
             Some(match o {
-                KxGroupOutcome::Supported => GroupObservation {
+                HandshakeOutcome::Supported => GroupObservation {
                     supported: Some(true),
                     method: Method::Probe,
                     reason: None,
                     iana_code: Some(iana.to_string()),
                     provider: Some("openssl".to_string()),
                 },
-                KxGroupOutcome::NotSupported => GroupObservation {
+                HandshakeOutcome::NotSupported => GroupObservation {
                     supported: Some(false),
                     method: Method::Probe,
                     reason: None,
                     iana_code: Some(iana.to_string()),
                     provider: Some("openssl".to_string()),
                 },
-                KxGroupOutcome::IgnoredGroupReturnedCustomPrime => GroupObservation {
+                HandshakeOutcome::IgnoredGroupReturnedCustomPrime => GroupObservation {
                     supported: Some(false),
                     method: Method::Probe,
                     reason: Some("server_ignored_group_offer_returned_custom_prime".to_string()),
                     iana_code: Some(iana.to_string()),
                     provider: Some("openssl".to_string()),
                 },
-                KxGroupOutcome::Error(e) => GroupObservation {
+                HandshakeOutcome::Error(e) => GroupObservation {
                     supported: None,
                     method: Method::Error,
                     reason: Some(e.clone()),
@@ -391,8 +406,8 @@ fn merge_openssl_kx_groups(results: &ScanResults, out: &mut TlsGroups) {
                 },
                 // A "TLS 1.2 not applicable" cell for a non-FFDHE group
                 // would just clutter the output — suppress it.
-                KxGroupOutcome::NotProbed(r) if r == "tls12_not_applicable" => return None,
-                KxGroupOutcome::NotProbed(r) => GroupObservation {
+                HandshakeOutcome::NotProbed(r) if r == "tls12_not_applicable" => return None,
+                HandshakeOutcome::NotProbed(r) => GroupObservation {
                     supported: None,
                     method: Method::NotProbed,
                     reason: Some(r.clone()),

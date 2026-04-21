@@ -189,12 +189,13 @@ fn fully_populated_openssl_observations_match_schema_v1() {
         ConstrainedProbeResult, Method as ScanMethod, ObservationBool, SessionResumption,
         SigalgOutcome, SignatureAlgorithmPolicyProbe, Tls12Resumption, Tls13Resumption,
     };
+    use kemist::scanner::backends::HandshakeOutcome;
     use kemist::scanner::openssl::{
-        ciphers::{LegacyCipherProbeOutput, LegacyCipherResult, LegacyProbeOutcome},
+        ciphers::{LegacyCipherProbeOutput, LegacyCipherResult},
         client_auth::{CaDnEntry, ClientAuthRequest, OidFilter},
         dh_params::{DhClassification, DhSnapshot},
         fallback_scsv::FallbackScsvResult,
-        kx_groups::{KxGroupOutcome, KxGroupProbeOutput, KxGroupProbeResult},
+        kx_groups::{KxGroupProbeOutput, KxGroupProbeResult},
         renegotiation::{RenegotiationObservation, RenegotiationVerdict},
         tls13_extensions::Tls13EncryptedExtensions,
         OpensslObservations,
@@ -213,7 +214,7 @@ fn fully_populated_openssl_observations_match_schema_v1() {
         classification: DhClassification::Ffdhe2048,
     };
 
-    // Cipher-probe list covering every LegacyProbeOutcome variant and the
+    // Cipher-probe list covering every cipher-side HandshakeOutcome variant and the
     // DHE + SKE-sig observer slots.
     let cipher_probes = LegacyCipherProbeOutput {
         results: vec![
@@ -222,7 +223,7 @@ fn fully_populated_openssl_observations_match_schema_v1() {
                 openssl_name: "AES128-SHA".to_string(),
                 iana_code: 0x002F,
                 version: TlsVersion::Tls12,
-                outcome: LegacyProbeOutcome::Supported,
+                outcome: HandshakeOutcome::Supported,
                 dh_snapshot: None,
                 ske_sig: None,
             },
@@ -231,7 +232,7 @@ fn fully_populated_openssl_observations_match_schema_v1() {
                 openssl_name: "DHE-RSA-AES128-SHA".to_string(),
                 iana_code: 0x0033,
                 version: TlsVersion::Tls12,
-                outcome: LegacyProbeOutcome::Supported,
+                outcome: HandshakeOutcome::Supported,
                 dh_snapshot: Some(dh.clone()),
                 ske_sig: Some("rsa_pkcs1_sha1".to_string()),
             },
@@ -240,7 +241,7 @@ fn fully_populated_openssl_observations_match_schema_v1() {
                 openssl_name: "NULL-SHA".to_string(),
                 iana_code: 0x0002,
                 version: TlsVersion::Tls12,
-                outcome: LegacyProbeOutcome::NotSupported,
+                outcome: HandshakeOutcome::NotSupported,
                 dh_snapshot: None,
                 ske_sig: None,
             },
@@ -249,7 +250,7 @@ fn fully_populated_openssl_observations_match_schema_v1() {
                 openssl_name: "RC4-SHA".to_string(),
                 iana_code: 0x0005,
                 version: TlsVersion::Tls10,
-                outcome: LegacyProbeOutcome::Error("connection_timeout".to_string()),
+                outcome: HandshakeOutcome::Error("connection_timeout".to_string()),
                 dh_snapshot: None,
                 ske_sig: None,
             },
@@ -264,26 +265,26 @@ fn fully_populated_openssl_observations_match_schema_v1() {
             KxGroupProbeResult {
                 group_name: "ffdhe2048".to_string(),
                 iana_code: 0x0100,
-                tls12_outcome: KxGroupOutcome::Supported,
-                tls13_outcome: KxGroupOutcome::NotSupported,
+                tls12_outcome: HandshakeOutcome::Supported,
+                tls13_outcome: HandshakeOutcome::NotSupported,
             },
             KxGroupProbeResult {
                 group_name: "ffdhe3072".to_string(),
                 iana_code: 0x0101,
-                tls12_outcome: KxGroupOutcome::IgnoredGroupReturnedCustomPrime,
-                tls13_outcome: KxGroupOutcome::NotProbed("provider_limit".to_string()),
+                tls12_outcome: HandshakeOutcome::IgnoredGroupReturnedCustomPrime,
+                tls13_outcome: HandshakeOutcome::NotProbed("provider_limit".to_string()),
             },
             KxGroupProbeResult {
                 group_name: "ffdhe4096".to_string(),
                 iana_code: 0x0102,
-                tls12_outcome: KxGroupOutcome::Error("tls_alert_protocol_version".to_string()),
-                tls13_outcome: KxGroupOutcome::NotSupported,
+                tls12_outcome: HandshakeOutcome::Error("tls_alert_protocol_version".to_string()),
+                tls13_outcome: HandshakeOutcome::NotSupported,
             },
             KxGroupProbeResult {
                 group_name: "secp521r1".to_string(),
                 iana_code: 0x0019,
-                tls12_outcome: KxGroupOutcome::NotProbed("tls12_not_applicable".to_string()),
-                tls13_outcome: KxGroupOutcome::NotSupported,
+                tls12_outcome: HandshakeOutcome::NotProbed("tls12_not_applicable".to_string()),
+                tls13_outcome: HandshakeOutcome::NotSupported,
             },
         ],
     };
@@ -582,8 +583,9 @@ fn fully_populated_openssl_observations_match_schema_v1() {
 #[cfg(feature = "legacy-probes")]
 #[test]
 fn ffdhe_cross_check_reason_surfaces_in_output() {
+    use kemist::scanner::backends::HandshakeOutcome;
     use kemist::scanner::openssl::{
-        kx_groups::{KxGroupOutcome, KxGroupProbeOutput, KxGroupProbeResult},
+        kx_groups::{KxGroupProbeOutput, KxGroupProbeResult},
         OpensslObservations,
     };
 
@@ -594,8 +596,8 @@ fn ffdhe_cross_check_reason_surfaces_in_output() {
             results: vec![KxGroupProbeResult {
                 group_name: "ffdhe2048".to_string(),
                 iana_code: 0x0100,
-                tls12_outcome: KxGroupOutcome::IgnoredGroupReturnedCustomPrime,
-                tls13_outcome: KxGroupOutcome::Supported,
+                tls12_outcome: HandshakeOutcome::IgnoredGroupReturnedCustomPrime,
+                tls13_outcome: HandshakeOutcome::Supported,
             }],
         }),
         fallback_scsv: None,

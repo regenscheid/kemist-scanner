@@ -29,11 +29,9 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use kemist::model::protocol::TlsVersion;
+use kemist::scanner::backends::HandshakeOutcome;
 use kemist::scanner::openssl::{
-    ciphers::{probe_legacy_suites, LegacyProbeOutcome},
-    fallback_scsv,
-    kx_groups::{probe_kx_groups, KxGroupOutcome},
-    protocol_versions,
+    ciphers::probe_legacy_suites, fallback_scsv, kx_groups::probe_kx_groups, protocol_versions,
     renegotiation::{self, RenegotiationVerdict},
 };
 
@@ -74,26 +72,33 @@ async fn legacy_cipher_probe_observes_weak_suites_on_fixture() {
     let any_supported = out
         .results
         .iter()
-        .any(|r| matches!(r.outcome, LegacyProbeOutcome::Supported));
+        .any(|r| matches!(r.outcome, HandshakeOutcome::Supported));
     assert!(
         any_supported,
         "fixture didn't accept any legacy suite (nginx config drift?)"
     );
 
     // Every probe should be either Supported, NotSupported, or Error —
-    // never silently missing.
+    // never silently missing. NotProbed / IgnoredGroupReturnedCustomPrime
+    // are group-probe-only variants and should never appear here.
     for r in &out.results {
         match &r.outcome {
-            LegacyProbeOutcome::Supported
-            | LegacyProbeOutcome::NotSupported
-            | LegacyProbeOutcome::Error(_) => {}
+            HandshakeOutcome::Supported
+            | HandshakeOutcome::NotSupported
+            | HandshakeOutcome::Error(_) => {}
+            HandshakeOutcome::NotProbed(_) | HandshakeOutcome::IgnoredGroupReturnedCustomPrime => {
+                panic!(
+                    "cipher probe produced unexpected outcome variant for {}",
+                    r.name
+                );
+            }
         }
     }
 
     // DHE-RSA probe should populate a DH snapshot with the fixture's
     // deliberately weak 1024-bit custom prime.
     let dhe = out.results.iter().find(|r| {
-        r.openssl_name.starts_with("DHE-RSA") && matches!(r.outcome, LegacyProbeOutcome::Supported)
+        r.openssl_name.starts_with("DHE-RSA") && matches!(r.outcome, HandshakeOutcome::Supported)
     });
     if let Some(r) = dhe {
         let snap = r
@@ -123,19 +128,19 @@ async fn kx_group_probe_records_per_version_outcomes_on_fixture() {
     for r in &out.results {
         assert!(matches!(
             r.tls12_outcome,
-            KxGroupOutcome::Supported
-                | KxGroupOutcome::NotSupported
-                | KxGroupOutcome::IgnoredGroupReturnedCustomPrime
-                | KxGroupOutcome::Error(_)
-                | KxGroupOutcome::NotProbed(_)
+            HandshakeOutcome::Supported
+                | HandshakeOutcome::NotSupported
+                | HandshakeOutcome::IgnoredGroupReturnedCustomPrime
+                | HandshakeOutcome::Error(_)
+                | HandshakeOutcome::NotProbed(_)
         ));
         assert!(matches!(
             r.tls13_outcome,
-            KxGroupOutcome::Supported
-                | KxGroupOutcome::NotSupported
-                | KxGroupOutcome::IgnoredGroupReturnedCustomPrime
-                | KxGroupOutcome::Error(_)
-                | KxGroupOutcome::NotProbed(_)
+            HandshakeOutcome::Supported
+                | HandshakeOutcome::NotSupported
+                | HandshakeOutcome::IgnoredGroupReturnedCustomPrime
+                | HandshakeOutcome::Error(_)
+                | HandshakeOutcome::NotProbed(_)
         ));
     }
 }
