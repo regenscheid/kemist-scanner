@@ -186,6 +186,10 @@ fn error_category_strings_are_canonical() {
 #[test]
 fn fully_populated_openssl_observations_match_schema_v1() {
     use kemist::model::protocol::TlsVersion;
+    use kemist::model::scan_result::{
+        ConstrainedProbeResult, Method as ScanMethod, ObservationBool, SessionResumption,
+        SigalgOutcome, SignatureAlgorithmPolicyProbe, Tls12Resumption, Tls13Resumption,
+    };
     use kemist::scanner::openssl::{
         ciphers::{LegacyCipherProbeOutput, LegacyCipherResult, LegacyProbeOutcome},
         client_auth::{CaDnEntry, ClientAuthRequest, OidFilter},
@@ -193,6 +197,7 @@ fn fully_populated_openssl_observations_match_schema_v1() {
         fallback_scsv::FallbackScsvResult,
         ffdhe::{FfdheOutcome, FfdheProbeOutput, FfdheProbeResult},
         renegotiation::{RenegotiationObservation, RenegotiationVerdict},
+        tls13_extensions::Tls13EncryptedExtensions,
         OpensslObservations,
     };
 
@@ -308,6 +313,57 @@ fn fully_populated_openssl_observations_match_schema_v1() {
         negotiated_version: Some("tls1_3".to_string()),
     };
 
+    // Phase B3 — TLS 1.3 EncryptedExtensions observation.
+    let tls13_ee = Tls13EncryptedExtensions {
+        parsed: true,
+        record_size_limit: Some(16385),
+        compress_certificate_algorithms: vec!["zlib".to_string(), "brotli".to_string()],
+        error: None,
+    };
+
+    // Phase F — session resumption. TLS 1.2 fully populated via the
+    // two-connection probe; TLS 1.3 slots deliberately NotProbed to
+    // exercise the documented "pending follow-up" shape.
+    let session_resumption = SessionResumption {
+        tls1_2: Tls12Resumption {
+            session_ticket_issued: ObservationBool::probe(true),
+            ticket_lifetime_hint_secs: Some(7200),
+            session_id_issued: ObservationBool::probe(true),
+            ticket_rotated_across_connections: ObservationBool::probe(true),
+        },
+        tls1_3: Tls13Resumption {
+            new_session_ticket_count: None,
+            ticket_lifetime_secs: Vec::new(),
+            psk_resumption_accepted: ObservationBool::not_probed(
+                "tls13_resumption_probe_not_implemented",
+            ),
+            early_data_accepted: ObservationBool::not_probed("early_data_probe_not_implemented"),
+        },
+    };
+
+    // Phase G — sigalg policy probe. All four constraints populated,
+    // mirroring the cloudflare.com real-scan shape (three complete
+    // with distinct selected sigalgs, rsa_pkcs1_only refused).
+    let complete = |sigalg: &str| ConstrainedProbeResult {
+        outcome: SigalgOutcome::HandshakeComplete,
+        selected_sigalg: Some(sigalg.to_string()),
+        alert: None,
+        method: ScanMethod::Probe,
+        reason: None,
+    };
+    let sigalg_policy = SignatureAlgorithmPolicyProbe {
+        sha256_plus_only: complete("ecdsa_secp256r1_sha256"),
+        ecdsa_only: complete("ecdsa_secp256r1_sha256"),
+        rsa_pss_only: complete("rsa_pss_rsae_sha256"),
+        rsa_pkcs1_only: ConstrainedProbeResult {
+            outcome: SigalgOutcome::HandshakeFailure,
+            selected_sigalg: None,
+            alert: Some("tls_alert_handshake_failure".to_string()),
+            method: ScanMethod::Probe,
+            reason: Some("tls_alert_handshake_failure".to_string()),
+        },
+    };
+
     let mut results = fixture_results();
     results.openssl_observations = Some(OpensslObservations {
         cipher_probes: Some(cipher_probes),
@@ -315,9 +371,9 @@ fn fully_populated_openssl_observations_match_schema_v1() {
         fallback_scsv: Some(fallback_scsv),
         renegotiation: Some(renegotiation),
         client_auth: Some(client_auth),
-        tls13_extensions: None,
-        session_resumption: None,
-        sigalg_policy: None,
+        tls13_extensions: Some(tls13_ee),
+        session_resumption: Some(session_resumption),
+        sigalg_policy: Some(sigalg_policy),
         probe_errors: vec![],
     });
 
@@ -400,6 +456,122 @@ fn fully_populated_openssl_observations_match_schema_v1() {
     assert_eq!(
         deprecated.get("reason").unwrap().as_str(),
         Some("superseded_by_fallback_scsv_enforced")
+    );
+
+    // Phase D — every cipher suite entry carries a classification
+    // from the 15-variant enum. Cross-check that non-null strings
+    // from the documented set land on every emitted entry.
+    let valid_classifications: &[&str] = &[
+        "rsa_kex",
+        "dhe_aead",
+        "dhe_cbc",
+        "ecdhe_aead",
+        "ecdhe_cbc",
+        "anon",
+        "export",
+        "static_dh",
+        "static_ecdh",
+        "psk",
+        "dhe_psk",
+        "ecdhe_psk",
+        "rsa_psk",
+        "null_cipher",
+        "other",
+    ];
+    for v in ["tls1_0", "tls1_1", "tls1_2", "tls1_3"] {
+        for row in cs.get(v).unwrap().as_array().unwrap() {
+            let c = row
+                .get("classification")
+                .expect("every CipherSuiteEntry has classification")
+                .as_str()
+                .expect("classification is a string");
+            assert!(
+                valid_classifications.contains(&c),
+                "unknown classification {c:?} in tls.{v}"
+            );
+        }
+    }
+
+    // Phase B3 — TLS 1.3 EncryptedExtensions fields land under
+    // tls.extensions.{record_size_limit, compress_certificate_algorithms}.
+    let ext = tls.get("extensions").unwrap();
+    assert_eq!(
+        ext.get("record_size_limit").and_then(|v| v.as_u64()),
+        Some(16385)
+    );
+    let comp = ext
+        .get("compress_certificate_algorithms")
+        .unwrap()
+        .as_array()
+        .unwrap();
+    assert_eq!(
+        comp.iter().map(|v| v.as_str().unwrap()).collect::<Vec<_>>(),
+        vec!["zlib", "brotli"]
+    );
+
+    // Phase F — session_resumption TLS 1.2 slots carry real probe
+    // values; TLS 1.3 slots stay NotProbed.
+    let sr = tls.get("session_resumption").unwrap();
+    let sr12 = sr.get("tls1_2").unwrap();
+    assert_eq!(
+        sr12.get("session_ticket_issued")
+            .unwrap()
+            .get("value")
+            .unwrap()
+            .as_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        sr12.get("ticket_lifetime_hint_secs")
+            .and_then(|v| v.as_u64()),
+        Some(7200)
+    );
+    assert_eq!(
+        sr12.get("ticket_rotated_across_connections")
+            .unwrap()
+            .get("value")
+            .unwrap()
+            .as_bool(),
+        Some(true)
+    );
+    let sr13 = sr.get("tls1_3").unwrap();
+    assert_eq!(
+        sr13.get("psk_resumption_accepted")
+            .unwrap()
+            .get("method")
+            .unwrap()
+            .as_str(),
+        Some("not_probed")
+    );
+    assert_eq!(
+        sr13.get("early_data_accepted")
+            .unwrap()
+            .get("method")
+            .unwrap()
+            .as_str(),
+        Some("not_probed")
+    );
+
+    // Phase G — four sigalg-policy constraints each land with the
+    // fixture's canonical outcomes.
+    let sap = tls.get("signature_algorithm_policy_probe").unwrap();
+    for name in ["sha256_plus_only", "ecdsa_only", "rsa_pss_only"] {
+        let slot = sap.get(name).unwrap();
+        assert_eq!(
+            slot.get("outcome").unwrap().as_str(),
+            Some("handshake_complete"),
+            "{name} should complete on fixture",
+        );
+        assert!(slot.get("selected_sigalg").unwrap().is_string());
+    }
+    let rsa_pkcs1 = sap.get("rsa_pkcs1_only").unwrap();
+    assert_eq!(
+        rsa_pkcs1.get("outcome").unwrap().as_str(),
+        Some("handshake_failure")
+    );
+    assert_eq!(
+        rsa_pkcs1.get("alert").unwrap().as_str(),
+        Some("tls_alert_handshake_failure")
     );
 }
 
@@ -488,4 +660,35 @@ fn legacy_probes_disabled_renders_empty_schema_sections() {
             .as_str(),
         Some("feature_disabled")
     );
+    // Phase F/G shape is stable under http-checks only: both
+    // sections always emit, with `method: not_probed` / reason
+    // `feature_disabled` slots rather than being absent.
+    let sr = tls.get("session_resumption").unwrap();
+    assert_eq!(
+        sr.get("tls1_2")
+            .unwrap()
+            .get("session_ticket_issued")
+            .unwrap()
+            .get("reason")
+            .unwrap()
+            .as_str(),
+        Some("feature_disabled")
+    );
+    let sap = tls.get("signature_algorithm_policy_probe").unwrap();
+    for name in [
+        "sha256_plus_only",
+        "ecdsa_only",
+        "rsa_pss_only",
+        "rsa_pkcs1_only",
+    ] {
+        assert_eq!(
+            sap.get(name).unwrap().get("outcome").unwrap().as_str(),
+            Some("not_probed"),
+            "{name} should be not_probed under http-checks only"
+        );
+        assert_eq!(
+            sap.get(name).unwrap().get("reason").unwrap().as_str(),
+            Some("feature_disabled")
+        );
+    }
 }
