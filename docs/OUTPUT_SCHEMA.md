@@ -88,9 +88,9 @@ against what the scanner build was actually able to probe.
 | `enabled_features` | `string[]` | Cargo features compiled in (e.g. `http-checks`) |
 | `rustls_version` | `string` | Pinned rustls version at build time |
 | `aws_lc_rs_version` | `string` | aws-lc-rs version (or `"bundled"` if not parsed) |
-| `native_tls_version` | `string` | native-tls version for legacy SSLv3/TLS 1.0/1.1 |
-| `provider_cipher_suites` | `string[]` | Cipher suite names aws-lc-rs shipped — defines the probe set |
-| `provider_kx_groups` | `string[]` | KX group names aws-lc-rs shipped — defines the probe set |
+| `openssl_version` | `string` | Pinned OpenSSL version when `legacy-probes` is on, else `"not_shipped"` |
+| `probed_cipher_suites` | `string[]` | Cipher suite names the scanner probes — union across every backend compiled in. Per-suite `provider` tag under `tls.cipher_suites.*` identifies which backend ran each probe |
+| `probed_kx_groups` | `string[]` | KX group names the scanner probes — union across every backend |
 | `config_paths` | `string[]` | Config files consulted (reserved for PR 13 extensions) |
 | `probe_limitations` | `string[]` | Runtime-detected probe gaps (reserved) |
 

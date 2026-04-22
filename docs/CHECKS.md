@@ -49,7 +49,7 @@ entry in its `cipher_suites: Vec<SupportedCipherSuite>`, pass it to
 **What's NOT probed.** aws-lc-rs doesn't ship RC4, 3DES, null ciphers,
 export-grade ciphers, or most CBC suites. Servers still accepting
 those are invisible to this scanner's cipher probe path — they appear
-as "the suite is not in `capabilities.provider_cipher_suites`" rather
+as "the suite is not in `capabilities.probed_cipher_suites`" rather
 than as `supported: false`. Downstream rule engines checking for
 weak-cipher acceptance must cross-reference against a fuller cipher
 registry.

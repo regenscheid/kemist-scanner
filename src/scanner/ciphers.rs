@@ -16,7 +16,7 @@
 //! method: not_probed, reason: provider_no_suite_support` elsewhere in
 //! the pipeline (see output/json.rs). Downstream rule engines looking
 //! for weak-cipher acceptance must examine both `true` and `not_probed`
-//! sets together with `capabilities.provider_cipher_suites`.
+//! sets together with `capabilities.probed_cipher_suites`.
 //!
 //! ## Server ordering detection
 //! Two additional handshakes with the full provider suite list — default

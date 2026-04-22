@@ -20,7 +20,7 @@ The aws-lc-rs-exposed set is whatever your build's pinned version
 ships. Groups aws-lc-rs doesn't ship are filled by the OpenSSL
 named-group probe (see
 [openssl/kx_groups.rs](../src/scanner/openssl/kx_groups.rs)). Check
-`capabilities.provider_kx_groups` in any emitted record to see what
+`capabilities.probed_kx_groups` in any emitted record to see what
 aws-lc-rs covered directly.
 
 ### Signatures (certificate OID match)
@@ -63,7 +63,7 @@ Three paths for probing groups beyond the aws-lc-rs ship set:
 
 NIST-standardized parameter sets land in aws-lc-rs on AWS's release
 cadence. Pinning to a newer aws-lc-rs version picks them up without
-code changes. Check `capabilities.provider_kx_groups` in new builds —
+code changes. Check `capabilities.probed_kx_groups` in new builds —
 any time a group moves from `not_probed` to a real result, that's
 aws-lc-rs catching up.
 

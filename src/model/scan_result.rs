@@ -44,9 +44,16 @@ pub struct Capabilities {
     pub enabled_features: Vec<String>,
     pub rustls_version: String,
     pub aws_lc_rs_version: String,
-    pub native_tls_version: String,
-    pub provider_cipher_suites: Vec<String>,
-    pub provider_kx_groups: Vec<String>,
+    /// Pinned OpenSSL version from `openssl-src = "=..."` when
+    /// `legacy-probes` is compiled in, else `"not_shipped"`.
+    pub openssl_version: String,
+    /// Cipher suites the scanner probes at least once per scan — union
+    /// across every backend present at build time. Per-suite entries in
+    /// `tls.cipher_suites.*` carry a `provider` field identifying which
+    /// backend actually ran each probe.
+    pub probed_cipher_suites: Vec<String>,
+    /// Named groups the scanner probes — union across every backend.
+    pub probed_kx_groups: Vec<String>,
     pub config_paths: Vec<String>,
     pub probe_limitations: Vec<String>,
 }

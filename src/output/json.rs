@@ -100,24 +100,34 @@ fn build_http(results: &ScanResults) -> Option<Http> {
 fn build_capabilities(ctx: &JsonEmitContext) -> Capabilities {
     // Versions parsed from Cargo.toml at compile time. Best-effort — downstream
     // consumers should not depend on the exact format of these strings.
-    let (rustls_version, aws_lc_rs_version, native_tls_version) = parse_dependency_versions();
+    let (rustls_version, aws_lc_rs_version) = parse_dependency_versions();
 
-    // Provider-exposed cipher suites + kx groups — what aws-lc-rs ships at
-    // build time. Downstream consumers combine this with per-suite/per-group
-    // `not_probed` reasons to know what was actually in scope. Sourced from
-    // the rustls `BackendInventory` so the inventory remains the single
-    // source of truth for "what can this backend see."
-    let rustls_inv = crate::scanner::backends::rustls_inventory();
-    let provider_cipher_suites = rustls_inv.cipher_names.clone();
-    let provider_kx_groups = rustls_inv.group_names.clone();
+    // Merged probe inventory across every backend present in this build.
+    // The per-backend `provider: "aws_lc_rs" | "openssl"` tag on each
+    // `tls.cipher_suites.*` / `tls.groups.*` entry identifies which
+    // backend ran each probe; this summary is the flat union.
+    let mut probed_cipher_suites: Vec<String> = Vec::new();
+    let mut probed_kx_groups: Vec<String> = Vec::new();
+    for inv in crate::scanner::backends::all_inventories() {
+        for name in inv.cipher_names {
+            if !probed_cipher_suites.contains(&name) {
+                probed_cipher_suites.push(name);
+            }
+        }
+        for name in inv.group_names {
+            if !probed_kx_groups.contains(&name) {
+                probed_kx_groups.push(name);
+            }
+        }
+    }
 
     Capabilities {
         enabled_features: ctx.enabled_features.clone(),
         rustls_version,
         aws_lc_rs_version,
-        native_tls_version,
-        provider_cipher_suites,
-        provider_kx_groups,
+        openssl_version: openssl_version(),
+        probed_cipher_suites,
+        probed_kx_groups,
         config_paths: ctx.config_paths.clone(),
         probe_limitations: Vec::new(),
     }
@@ -736,12 +746,11 @@ fn build_validation(results: &ScanResults) -> Validation {
     }
 }
 
-/// Parse rustls/aws-lc-rs/native-tls versions from Cargo.toml at compile time.
-/// Moved from main.rs to keep capability-building self-contained.
-fn parse_dependency_versions() -> (String, String, String) {
+/// Parse rustls + openssl-src pinned versions from Cargo.toml at compile
+/// time. Moved from main.rs to keep capability-building self-contained.
+fn parse_dependency_versions() -> (String, String) {
     let cargo_toml = include_str!("../../Cargo.toml");
     let mut rustls_version = "unknown".to_string();
-    let mut native_tls_version = "unknown".to_string();
     for line in cargo_toml.lines() {
         let line = line.trim();
         if line.starts_with("rustls = {") {
@@ -752,20 +761,43 @@ fn parse_dependency_versions() -> (String, String, String) {
                 }
             }
         }
-        if line.starts_with("native-tls = \"") {
-            if let Some(start) = line.find('"') {
-                let start = start + 1;
-                if let Some(end) = line[start..].find('"') {
-                    native_tls_version = line[start..start + end].to_string();
+    }
+    // aws-lc-rs is transitive via rustls's aws_lc_rs feature; we don't
+    // get a dedicated version string without parsing Cargo.lock. Leave
+    // as a `"bundled"` sentinel — a future release-time build step
+    // could read Cargo.lock and substitute the real pinned version.
+    (rustls_version, "bundled".to_string())
+}
+
+/// Pinned OpenSSL version shipped by the `legacy-probes` feature.
+/// Sourced from `openssl-src = "=300.5.5"` in Cargo.toml. Returns
+/// `"not_shipped"` when the feature is compiled out so downstream
+/// consumers can tell legacy-probes-on vs off at a glance.
+fn openssl_version() -> String {
+    #[cfg(feature = "legacy-probes")]
+    {
+        let cargo_toml = include_str!("../../Cargo.toml");
+        for line in cargo_toml.lines() {
+            let line = line.trim();
+            // `openssl-src = { version = "=300.5.5", ... }` — the
+            // `=` prefix is an exact-version requirement; strip it so
+            // consumers see a clean version number.
+            if line.starts_with("openssl-src = {") {
+                if let Some(pos) = line.find("version = \"") {
+                    let start = pos + 11;
+                    if let Some(end) = line[start..].find('"') {
+                        let raw = &line[start..start + end];
+                        return raw.trim_start_matches('=').to_string();
+                    }
                 }
             }
         }
+        "unknown".to_string()
     }
-    // aws-lc-rs is transitive via rustls's aws_lc_rs feature; we don't get a
-    // dedicated version string without parsing Cargo.lock. Leave as a
-    // `"bundled"` sentinel — a future release-time build step could read
-    // Cargo.lock and substitute the real pinned version.
-    (rustls_version, "bundled".to_string(), native_tls_version)
+    #[cfg(not(feature = "legacy-probes"))]
+    {
+        "not_shipped".to_string()
+    }
 }
 
 pub fn print_json(results: &ScanResults, ctx: &JsonEmitContext) -> Result<(), ScannerError> {
