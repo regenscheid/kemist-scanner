@@ -30,7 +30,7 @@ use openssl::ssl::{HandshakeError, Ssl, SslContext, SslMethod, SslVerifyMode, Ss
 use tracing::info;
 
 use crate::model::errors::ScannerError;
-use crate::scanner::openssl::alerts;
+use super::alerts;
 
 extern "C" {
     /// Raw FFI — the `openssl` crate at 0.10.73 does not expose

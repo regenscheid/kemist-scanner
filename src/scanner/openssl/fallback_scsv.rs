@@ -91,7 +91,8 @@ pub async fn probe(
             reason: "characterization_handshake_failed".to_string(),
         };
     };
-    let Some(server_max) = tls_to_ssl_version_local(server_max_tls) else {
+    use crate::scanner::backends::openssl::{ssl_to_tls_version, tls_to_ssl_version};
+    let Some(server_max) = tls_to_ssl_version(server_max_tls) else {
         return FallbackScsvResult {
             enforced: None,
             reason: format!("characterization_version_out_of_scope:{:?}", server_max_tls),
@@ -104,7 +105,7 @@ pub async fn probe(
             reason: "no_downgrade_possible".to_string(),
         };
     };
-    let Some(downgrade_target_tls) = ssl_to_tls_version_local(downgrade_target) else {
+    let Some(downgrade_target_tls) = ssl_to_tls_version(downgrade_target) else {
         return FallbackScsvResult {
             enforced: None,
             reason: format!("downgrade_target_version_out_of_scope:{:?}", downgrade_target),
@@ -140,36 +141,6 @@ pub async fn probe(
     classify_probe_outcome(probe_outcome, server_max, downgrade_target)
 }
 
-/// Local `TlsVersion → SslVersion` conversion duplicating the helper in
-/// `backends::openssl`. Lives here for now to keep the probe's imports
-/// flat; Stage 4c collapses both into one canonical helper.
-fn tls_to_ssl_version_local(v: crate::model::protocol::TlsVersion) -> Option<SslVersion> {
-    match v {
-        crate::model::protocol::TlsVersion::Ssl3 => Some(SslVersion::SSL3),
-        crate::model::protocol::TlsVersion::Tls10 => Some(SslVersion::TLS1),
-        crate::model::protocol::TlsVersion::Tls11 => Some(SslVersion::TLS1_1),
-        crate::model::protocol::TlsVersion::Tls12 => Some(SslVersion::TLS1_2),
-        crate::model::protocol::TlsVersion::Tls13 => Some(SslVersion::TLS1_3),
-        crate::model::protocol::TlsVersion::Ssl2 => None,
-    }
-}
-
-fn ssl_to_tls_version_local(v: SslVersion) -> Option<crate::model::protocol::TlsVersion> {
-    use crate::model::protocol::TlsVersion;
-    if v == SslVersion::TLS1_3 {
-        Some(TlsVersion::Tls13)
-    } else if v == SslVersion::TLS1_2 {
-        Some(TlsVersion::Tls12)
-    } else if v == SslVersion::TLS1_1 {
-        Some(TlsVersion::Tls11)
-    } else if v == SslVersion::TLS1 {
-        Some(TlsVersion::Tls10)
-    } else if v == SslVersion::SSL3 {
-        Some(TlsVersion::Ssl3)
-    } else {
-        None
-    }
-}
 
 /// Raw outcome of the inner downgrade probe, pre-interpretation.
 /// `pub(crate)` so `backends::openssl` can surface these through

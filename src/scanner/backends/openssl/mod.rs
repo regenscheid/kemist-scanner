@@ -1,14 +1,30 @@
-//! OpenSSL 3.5 backend. Wraps the existing per-module probe code in
-//! `src/scanner/openssl/` until Stage 4 relocates it here.
+//! OpenSSL 3.5 backend.
 //!
-//! Supported constraint shapes (Stage 2):
+//! Houses the `OpensslBackend` implementation of `TlsBackend`, alert
+//! classification, DH parameter / SKE signature observers, and the
+//! post-handshake action modules (renegotiation, session resumption,
+//! CertificateRequest capture, TLS 1.3 EncryptedExtensions capture).
+//!
+//! Stage 4c consolidated these under one tree; the remaining
+//! entry-point probe drivers (cipher / group / version / FALLBACK_SCSV /
+//! sigalg_policy) still live in `src/scanner/openssl/` pending Stage 4d
+//! inlining into the orchestrator.
+//!
+//! Supported `handshake()` constraint shapes:
 //! - `single_cipher_at(code, version)` — pinned suite + pinned version
 //! - `single_group_at(code, version)` — pinned named group + pinned version
 //! - `version_only(v)` — one pinned TLS version
-//!
-//! Not yet implemented (Stage 3 will add):
-//! - `sigalgs` pinning for the sigalg-policy rewrite
-//! - `send_fallback_scsv` for the FALLBACK_SCSV rewrite
+//! - `sigalgs: Some(codepoints)` + `version_range` — sigalg-pinned handshake
+//! - `send_fallback_scsv: true` + `version_range` — SCSV downgrade probe
+//! - Wide `version_range` with no cipher/group pin — characterization
+
+pub mod alerts;
+pub mod client_auth;
+pub mod dh_params;
+pub mod renegotiation;
+pub mod ske_sig;
+pub mod tickets;
+pub mod tls13_extensions;
 
 use async_trait::async_trait;
 
@@ -243,7 +259,7 @@ impl TlsBackend for OpensslBackend {
 /// Convert a `TlsVersion` to the OpenSSL `SslVersion` enum. Covers
 /// the versions probe_scsv and the characterization helper accept;
 /// returns `None` for SSLv2 (not representable in OpenSSL 3.x).
-fn tls_to_ssl_version(v: TlsVersion) -> Option<openssl::ssl::SslVersion> {
+pub(crate) fn tls_to_ssl_version(v: TlsVersion) -> Option<openssl::ssl::SslVersion> {
     use openssl::ssl::SslVersion;
     match v {
         TlsVersion::Ssl3 => Some(SslVersion::SSL3),
@@ -258,7 +274,7 @@ fn tls_to_ssl_version(v: TlsVersion) -> Option<openssl::ssl::SslVersion> {
 /// Reverse mapping: OpenSSL's `SslVersion::version2()` result back into
 /// the scanner's `TlsVersion`. `None` for values OpenSSL exposes but
 /// the scanner doesn't model (e.g. DTLS versions).
-fn ssl_to_tls_version(v: openssl::ssl::SslVersion) -> Option<TlsVersion> {
+pub(crate) fn ssl_to_tls_version(v: openssl::ssl::SslVersion) -> Option<TlsVersion> {
     use openssl::ssl::SslVersion;
     if v == SslVersion::TLS1_3 {
         Some(TlsVersion::Tls13)

@@ -8,18 +8,19 @@
 //! Gated by the `legacy-probes` cargo feature; see Cargo.toml. The subsystem
 //! is additive — it does not modify the rustls probe path.
 
-pub mod alerts;
 pub mod ciphers;
-pub mod client_auth;
-pub mod dh_params;
 pub mod fallback_scsv;
 pub mod kx_groups;
 pub mod protocol_versions;
-pub mod renegotiation;
 pub mod sigalg_policy;
-pub mod ske_sig;
-pub mod tickets;
-pub mod tls13_extensions;
+// Post-handshake actions, observers, alert classification, and the
+// OpenSSL `TlsBackend` impl all live under `src/scanner/backends/openssl/`
+// as of Stage 4c. This module retains the entry-point probe drivers
+// that callers in `src/scanner/mod.rs` still invoke directly; Stage 4d
+// will inline them into the orchestrator and delete this module.
+pub use crate::scanner::backends::openssl::{
+    alerts, client_auth, dh_params, renegotiation, ske_sig, tickets, tls13_extensions,
+};
 
 use std::sync::OnceLock;
 
