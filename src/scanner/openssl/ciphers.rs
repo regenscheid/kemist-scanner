@@ -332,9 +332,9 @@ pub fn inventory_entries() -> Vec<(u16, &'static str, TlsVersion)> {
 /// Probe a single cipher identified by `(iana_code, version)`. Thin
 /// wrapper over `probe_single_suite_blocking` that looks up the
 /// matching `TARGETS` row and runs the probe on a `spawn_blocking`
-/// thread. Returns `HandshakeOutcome::Error` when no row matches — a
-/// programmer error on the caller's part since inventory_entries()
-/// and this function read the same table.
+/// thread. Returns a `ProbeRun` with `HandshakeOutcome::Error` when no
+/// row matches — a programmer error on the caller's part since
+/// `inventory_entries()` and this function read the same table.
 pub(crate) async fn probe_single_by_code(
     target: SocketAddr,
     hostname: &str,
@@ -342,21 +342,25 @@ pub(crate) async fn probe_single_by_code(
     version: TlsVersion,
     connect_timeout: Duration,
     handshake_timeout: Duration,
-) -> HandshakeOutcome {
+) -> ProbeRun {
     let Some(row) = TARGETS
         .iter()
         .find(|t| t.iana_code == iana_code && t.version == version)
     else {
-        return HandshakeOutcome::Error(format!(
-            "openssl_unknown_target:0x{:04X}:{:?}",
-            iana_code, version
-        ));
+        return ProbeRun {
+            outcome: HandshakeOutcome::Error(format!(
+                "openssl_unknown_target:0x{:04X}:{:?}",
+                iana_code, version
+            )),
+            dh_snapshot: None,
+            ske_sig: None,
+        };
     };
     let hostname_owned = hostname.to_string();
     let openssl_name = row.openssl_name.to_string();
     let version_copy = row.version;
 
-    let probe_out = tokio::task::spawn_blocking(move || {
+    tokio::task::spawn_blocking(move || {
         probe_single_suite_blocking(
             target,
             &hostname_owned,
@@ -371,9 +375,7 @@ pub(crate) async fn probe_single_by_code(
         outcome: HandshakeOutcome::Error(format!("spawn_blocking_panic: {join_err}")),
         dh_snapshot: None,
         ske_sig: None,
-    });
-
-    probe_out.outcome
+    })
 }
 
 /// Probe every suite in [`TARGETS`]. Each probe runs in `spawn_blocking` so
@@ -394,35 +396,49 @@ pub async fn probe_legacy_suites(
     let mut results = Vec::with_capacity(TARGETS.len());
     let last = TARGETS.len().saturating_sub(1);
 
-    for (i, t) in TARGETS.iter().enumerate() {
-        let hostname_owned = hostname.to_string();
-        let openssl_name = t.openssl_name.to_string();
-        let version = t.version;
-        let target_addr = target;
+    // Registry-driven per-suite probing through `OpensslBackend::handshake()`.
+    // Every `TARGETS` codepoint routes back to this backend (OpenSSL
+    // claims the full legacy cipher inventory), so the indirection is
+    // semantically a no-op — its purpose is to unify the dispatch path
+    // ahead of the Stage 4 file moves that collapse the wrapper layer.
+    let registry = crate::scanner::backends::BackendRegistry::new();
+    let ctx = crate::scanner::backends::ProbeContext {
+        target,
+        hostname: hostname.to_string(),
+        connect_timeout,
+        handshake_timeout,
+    };
 
-        let probe_out = tokio::task::spawn_blocking(move || {
-            probe_single_suite_blocking(
-                target_addr,
-                &hostname_owned,
-                &openssl_name,
-                version,
-                connect_timeout,
-                handshake_timeout,
-            )
-        })
-        .await
-        .unwrap_or_else(|join_err| ProbeRun {
-            outcome: HandshakeOutcome::Error(format!("spawn_blocking_panic: {join_err}")),
-            dh_snapshot: None,
-            ske_sig: None,
-        });
+    for (i, t) in TARGETS.iter().enumerate() {
+        let constraint = crate::scanner::backends::HandshakeConstraint::single_cipher_at(
+            t.iana_code,
+            t.version,
+        );
+        let (outcome, dh_snapshot, ske_sig) = match registry.route_cipher(t.iana_code) {
+            Some(backend) => match backend.handshake(constraint, &ctx).await {
+                Ok(r) => (r.outcome, r.dh_parameters, r.ske_signature_name),
+                Err(u) => (
+                    HandshakeOutcome::Error(format!("unsatisfiable_constraint:{}", u.reason)),
+                    None,
+                    None,
+                ),
+            },
+            None => (
+                HandshakeOutcome::Error(format!(
+                    "no_backend_routes_cipher:0x{:04X}",
+                    t.iana_code
+                )),
+                None,
+                None,
+            ),
+        };
 
         debug!(
             suite = %t.openssl_name,
             version = ?t.version,
-            outcome = ?probe_out.outcome,
-            dh_captured = probe_out.dh_snapshot.is_some(),
-            ske_sig = ?probe_out.ske_sig,
+            outcome = ?outcome,
+            dh_captured = dh_snapshot.is_some(),
+            ske_sig = ?ske_sig,
             "legacy probe result"
         );
 
@@ -431,9 +447,9 @@ pub async fn probe_legacy_suites(
             openssl_name: t.openssl_name.to_string(),
             iana_code: t.iana_code,
             version: t.version,
-            outcome: probe_out.outcome,
-            dh_snapshot: probe_out.dh_snapshot,
-            ske_sig: probe_out.ske_sig,
+            outcome,
+            dh_snapshot,
+            ske_sig,
         });
 
         if i < last && !per_probe_delay.is_zero() {
@@ -446,10 +462,12 @@ pub async fn probe_legacy_suites(
 
 /// Internal return value of [`probe_single_suite_blocking`] — outcome plus
 /// any post-handshake observations (DH parameter snapshot, SKE signature).
-struct ProbeRun {
-    outcome: HandshakeOutcome,
-    dh_snapshot: Option<DhSnapshot>,
-    ske_sig: Option<String>,
+/// Exposed pub(crate) so `backends::openssl` can surface the observer
+/// fields through `HandshakeResult`.
+pub(crate) struct ProbeRun {
+    pub(crate) outcome: HandshakeOutcome,
+    pub(crate) dh_snapshot: Option<DhSnapshot>,
+    pub(crate) ske_sig: Option<String>,
 }
 
 /// Synchronous single-suite probe. Called inside `spawn_blocking`. Never

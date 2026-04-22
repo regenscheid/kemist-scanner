@@ -231,17 +231,36 @@ pub async fn probe_kx_groups(
     let mut results = Vec::with_capacity(TARGETS.len());
     let mut attempt_idx: usize = 0;
 
+    // Registry-driven dispatch. OpenSSL claims every group codepoint in
+    // `TARGETS`, so routing is deterministic — this is setup for the
+    // Stage 4 orchestrator rewrite that will iterate `merged_group_codepoints()`.
+    let registry = crate::scanner::backends::BackendRegistry::new();
+    let ctx = crate::scanner::backends::ProbeContext {
+        target,
+        hostname: hostname.to_string(),
+        connect_timeout,
+        handshake_timeout,
+    };
+
     for t in TARGETS {
         let tls12_outcome = if t.tls12_applicable {
-            let o = run_attempt(
-                target,
-                hostname,
-                t,
-                SslVersion::TLS1_2,
-                connect_timeout,
-                handshake_timeout,
-            )
-            .await;
+            let c = crate::scanner::backends::HandshakeConstraint::single_group_at(
+                t.iana_code,
+                crate::model::protocol::TlsVersion::Tls12,
+            );
+            let o = match registry.route_group(t.iana_code) {
+                Some(backend) => match backend.handshake(c, &ctx).await {
+                    Ok(r) => r.outcome,
+                    Err(u) => HandshakeOutcome::Error(format!(
+                        "unsatisfiable_constraint:{}",
+                        u.reason
+                    )),
+                },
+                None => HandshakeOutcome::Error(format!(
+                    "no_backend_routes_group:0x{:04X}",
+                    t.iana_code
+                )),
+            };
             attempt_idx += 1;
             if attempt_idx < total_attempts && !per_probe_delay.is_zero() {
                 tokio::time::sleep(per_probe_delay).await;
@@ -251,15 +270,25 @@ pub async fn probe_kx_groups(
             HandshakeOutcome::NotProbed("tls12_not_applicable".to_string())
         };
 
-        let tls13_outcome = run_attempt(
-            target,
-            hostname,
-            t,
-            SslVersion::TLS1_3,
-            connect_timeout,
-            handshake_timeout,
-        )
-        .await;
+        let tls13_outcome = {
+            let c = crate::scanner::backends::HandshakeConstraint::single_group_at(
+                t.iana_code,
+                crate::model::protocol::TlsVersion::Tls13,
+            );
+            match registry.route_group(t.iana_code) {
+                Some(backend) => match backend.handshake(c, &ctx).await {
+                    Ok(r) => r.outcome,
+                    Err(u) => HandshakeOutcome::Error(format!(
+                        "unsatisfiable_constraint:{}",
+                        u.reason
+                    )),
+                },
+                None => HandshakeOutcome::Error(format!(
+                    "no_backend_routes_group:0x{:04X}",
+                    t.iana_code
+                )),
+            }
+        };
         attempt_idx += 1;
         if attempt_idx < total_attempts && !per_probe_delay.is_zero() {
             tokio::time::sleep(per_probe_delay).await;

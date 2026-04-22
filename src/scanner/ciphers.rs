@@ -75,6 +75,21 @@ pub async fn probe_cipher_suites(
     let all_suites: Vec<SupportedCipherSuite> = aws_lc_rs::ALL_CIPHER_SUITES.to_vec();
     let mut results = Vec::with_capacity(all_suites.len());
 
+    // Registry-driven per-suite probing. The registry routes each
+    // cipher codepoint to the backend that claims it; for this rustls
+    // path all `ALL_CIPHER_SUITES` codepoints route to `aws_lc_rs`, so
+    // `route_cipher` always returns Some(rustls). The loop still reads
+    // `ALL_CIPHER_SUITES` directly so it can derive the spec-version
+    // and Debug-format name from the `SupportedCipherSuite` object —
+    // inventory-only iteration is a Stage 4 follow-up.
+    let registry = crate::scanner::backends::BackendRegistry::new();
+    let ctx = crate::scanner::backends::ProbeContext {
+        target,
+        hostname: hostname.to_string(),
+        connect_timeout,
+        handshake_timeout,
+    };
+
     for suite in &all_suites {
         let Some(version) = to_model_version(suite.version()) else {
             debug!("skipping suite {:?} with unknown version", suite.suite());
@@ -83,8 +98,24 @@ pub async fn probe_cipher_suites(
         let name = format!("{:?}", suite.suite());
         let iana_code: u16 = suite.suite().into();
 
-        let outcome =
-            probe_single_suite(target, hostname, *suite, connect_timeout, handshake_timeout).await;
+        let outcome = match registry.route_cipher(iana_code) {
+            Some(backend) => {
+                let constraint = crate::scanner::backends::HandshakeConstraint::single_cipher(
+                    iana_code,
+                );
+                match backend.handshake(constraint, &ctx).await {
+                    Ok(r) => r.outcome,
+                    Err(u) => HandshakeOutcome::Error(format!(
+                        "unsatisfiable_constraint:{}",
+                        u.reason
+                    )),
+                }
+            }
+            None => HandshakeOutcome::Error(format!(
+                "no_backend_routes_cipher:0x{:04X}",
+                iana_code
+            )),
+        };
 
         results.push(CipherProbeResult {
             name,

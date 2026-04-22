@@ -94,7 +94,7 @@ impl TlsBackend for OpensslBackend {
             (Some(suites), None, Some((v_min, v_max)))
                 if suites.len() == 1 && v_min == v_max =>
             {
-                let outcome = crate::scanner::openssl::ciphers::probe_single_by_code(
+                let run = crate::scanner::openssl::ciphers::probe_single_by_code(
                     ctx.target,
                     &ctx.hostname,
                     suites[0],
@@ -103,7 +103,10 @@ impl TlsBackend for OpensslBackend {
                     ctx.handshake_timeout,
                 )
                 .await;
-                Ok(HandshakeResult::outcome_only(outcome))
+                let mut result = HandshakeResult::outcome_only(run.outcome);
+                result.dh_parameters = run.dh_snapshot;
+                result.ske_signature_name = run.ske_sig;
+                Ok(result)
             }
             (None, Some(groups), Some((v_min, v_max)))
                 if groups.len() == 1 && v_min == v_max =>

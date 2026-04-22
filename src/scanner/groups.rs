@@ -62,7 +62,7 @@ use tokio_rustls::{rustls, TlsConnector};
 use tracing::debug;
 
 use crate::model::errors::ScannerError;
-use crate::scanner::backends::{is_wire_rejection, HandshakeOutcome};
+use crate::scanner::backends::{is_wire_rejection, HandshakeOutcome, TlsBackend};
 
 /// One per-group probe result.
 #[derive(Debug, Clone)]
@@ -125,31 +125,48 @@ pub async fn probe_kx_groups(
     handshake_timeout: Duration,
     per_probe_delay: Duration,
 ) -> GroupProbeOutput {
-    // aws-lc-rs ships a subset of NamedGroups. Build a lookup of what's
-    // available at runtime so the probe loop can honestly distinguish
-    // "probed and rejected" from "can't be probed by this build".
-    let available: Vec<&'static dyn SupportedKxGroup> = aws_lc_rs::ALL_KX_GROUPS.to_vec();
+    // Registry-driven per-group probing. Every `TARGET_GROUPS` entry
+    // still appears in the output — codepoints aws-lc-rs doesn't ship
+    // emit `NotProbed` here and are filled in later by the OpenSSL
+    // group probe loop via the JSON merge logic. Stage 4 will push
+    // the merge into `BackendRegistry` so this rustls-path loop can
+    // skip OpenSSL-routed codepoints instead of emitting NotProbed.
+    let registry = crate::scanner::backends::BackendRegistry::new();
+    let ctx = crate::scanner::backends::ProbeContext {
+        target,
+        hostname: hostname.to_string(),
+        connect_timeout,
+        handshake_timeout,
+    };
+    let rustls_cipher_codes: std::collections::HashSet<u16> = registry
+        .rustls
+        .inventory()
+        .group_codepoints
+        .iter()
+        .copied()
+        .collect();
 
     let mut results = Vec::with_capacity(TARGET_GROUPS.len());
 
     for (name, iana_code) in TARGET_GROUPS {
-        let matched = available
-            .iter()
-            .find(|g| format!("{:?}", g.name()) == *name)
-            .copied();
-
-        let outcome = match matched {
-            Some(group) => {
-                probe_single_group(target, hostname, group, connect_timeout, handshake_timeout)
-                    .await
+        let outcome = if rustls_cipher_codes.contains(iana_code) {
+            let constraint = crate::scanner::backends::HandshakeConstraint::single_group_at(
+                *iana_code,
+                crate::model::protocol::TlsVersion::Tls13,
+            );
+            match registry.rustls.handshake(constraint, &ctx).await {
+                Ok(r) => r.outcome,
+                Err(u) => HandshakeOutcome::Error(format!(
+                    "unsatisfiable_constraint:{}",
+                    u.reason
+                )),
             }
-            None => {
-                debug!("group {} not exposed by aws-lc-rs, skipping probe", name);
-                HandshakeOutcome::NotProbed(format!(
-                    "aws_lc_rs_no_{}_support",
-                    name.to_lowercase()
-                ))
-            }
+        } else {
+            debug!("group {} not exposed by aws-lc-rs, skipping probe", name);
+            HandshakeOutcome::NotProbed(format!(
+                "aws_lc_rs_no_{}_support",
+                name.to_lowercase()
+            ))
         };
 
         results.push(GroupProbeResult {
