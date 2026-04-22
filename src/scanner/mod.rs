@@ -4,8 +4,8 @@ pub mod ciphers;
 pub mod groups;
 pub mod hello;
 pub mod http;
-pub mod legacy;
 pub mod probe;
+pub mod raw;
 pub mod runner;
 pub mod sni;
 
@@ -21,7 +21,7 @@ use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio::time::timeout;
 use tokio_rustls::{rustls, TlsConnector};
-use tracing::{debug, info};
+use tracing::info;
 
 use crate::model::cert::CertificateInfo;
 use crate::model::errors::ScannerError;
@@ -331,7 +331,7 @@ impl SslScanner {
                     self.test_rustls_protocol(version).await
                 }
                 TlsVersion::Ssl2 => {
-                    crate::scanner::legacy::test_sslv2(
+                    crate::scanner::raw::sslv2::probe(
                         self.config.target,
                         &self.config.hostname,
                         self.config.timeout,
@@ -339,10 +339,11 @@ impl SslScanner {
                     .await
                 }
                 TlsVersion::Ssl3 | TlsVersion::Tls10 | TlsVersion::Tls11 => {
-                    // Backend priority: OpenSSL (legacy-probes) > native-tls
-                    // (native-legacy) > "not probed" placeholder. The two
-                    // backend cfg branches are mutually exclusive so the
-                    // else-branch only kicks in when neither feature is on.
+                    // SSLv3/TLS1.0/TLS1.1 route exclusively through the
+                    // vendored OpenSSL backend; `--no-default-features`
+                    // builds surface a `legacy_feature_disabled`
+                    // placeholder so consumers can tell the difference
+                    // from "probed and rejected".
                     #[cfg(feature = "legacy-probes")]
                     {
                         use crate::scanner::backends::{
@@ -377,23 +378,14 @@ impl SslScanner {
                             error: None,
                         }
                     }
-                    #[cfg(all(feature = "native-legacy", not(feature = "legacy-probes")))]
-                    {
-                        let legacy_scanner = crate::scanner::legacy::LegacyScanner::new(
-                            self.config.target,
-                            self.config.hostname.clone(),
-                            self.config.timeout,
-                        );
-                        legacy_scanner.test_legacy_protocol(version).await
-                    }
-                    #[cfg(not(any(feature = "legacy-probes", feature = "native-legacy")))]
+                    #[cfg(not(feature = "legacy-probes"))]
                     {
                         ProtocolSupport {
                             version,
                             supported: false,
                             error: Some(
                                 "legacy_feature_disabled: rebuild with \
-                                 --features legacy-probes or native-legacy to probe \
+                                 --features legacy-probes to probe \
                                  SSLv3/TLS1.0/TLS1.1"
                                     .to_string(),
                             ),
@@ -463,144 +455,18 @@ impl SslScanner {
         }
     }
 
-    async fn check_tls_version_support(&self, version: TlsVersion) -> bool {
-        let result = self.test_rustls_protocol(version).await;
-        result.supported
-    }
-
-    async fn test_heartbleed(&self, results: &mut ScanResults) -> Option<bool> {
-        // Observation: does the server echo an oversized heartbeat payload?
-        // Raw wire signal — downstream rule engines interpret its meaning.
-
+    async fn test_heartbleed(&self, _results: &mut ScanResults) -> Option<bool> {
+        // Delegate to the raw-socket probe. Technique per testssl.sh:
+        // vulnerable OpenSSL processes heartbeat records before
+        // encryption is established, so the probe exploits the flaw
+        // over plaintext with no session-key derivation required.
         info!("Probing heartbeat oversized-payload echo");
-
-        // Only probe on TLS 1.2 and below, as TLS 1.3 doesn't support heartbeat
-        let supports_tls12 = self.check_tls_version_support(TlsVersion::Tls12).await;
-        let supports_tls11 = self.check_tls_version_support(TlsVersion::Tls11).await;
-        let supports_tls10 = self.check_tls_version_support(TlsVersion::Tls10).await;
-
-        if !supports_tls12 && !supports_tls11 && !supports_tls10 {
-            // Not applicable — no pre-1.3 protocol available to heartbeat over
-            return Some(false);
-        }
-
-        match self.perform_heartbleed_test().await {
-            Ok(vulnerable) => Some(vulnerable),
-            Err(e) => {
-                debug!("heartbeat probe error: {}", e);
-                results.scan_errors.push(e);
-                None
-            }
-        }
-    }
-
-    async fn perform_heartbleed_test(&self) -> Result<bool, ScannerError> {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-        let mut stream =
-            match timeout(self.config.timeout, TcpStream::connect(&self.config.target)).await {
-                Err(_) => return Err(ScannerError::connection_timeout("heartbleed tcp connect")),
-                Ok(Err(e)) => return Err(ScannerError::from_io("heartbleed tcp connect", e)),
-                Ok(Ok(s)) => s,
-            };
-
-        // Perform basic TLS handshake first to establish encryption
-        // We need to get to a state where we can send heartbeat messages
-
-        // For a proper Heartbleed test, we would need to:
-        // 1. Complete TLS handshake
-        // 2. Send a heartbeat request with length > actual payload
-        // 3. Check if server responds with more data than sent
-
-        // This is a simplified implementation that demonstrates the concept
-        // In practice, you'd need to implement the full TLS handshake manually
-        // or use a low-level TLS library that allows heartbeat manipulation
-
-        // Send a malformed heartbeat request
-        let heartbeat_request = self.craft_heartbleed_payload();
-
-        match stream.write_all(&heartbeat_request).await {
-            Ok(_) => {
-                // Try to read response
-                let mut buffer = vec![0u8; 1024];
-                match timeout(Duration::from_secs(2), stream.read(&mut buffer)).await {
-                    Ok(Ok(bytes_read)) => {
-                        // Analyze response for signs of Heartbleed
-                        Ok(self.analyze_heartbleed_response(&buffer[..bytes_read]))
-                    }
-                    _ => {
-                        // No response or timeout - likely not vulnerable
-                        Ok(false)
-                    }
-                }
-            }
-            Err(_) => {
-                // Failed to send - connection likely closed
-                Ok(false)
-            }
-        }
-    }
-
-    fn craft_heartbleed_payload(&self) -> Vec<u8> {
-        // Craft a TLS heartbeat request with malformed length
-        // This is a simplified version for demonstration
-
-        // TLS Record Header:
-        // - Content Type: Heartbeat (24 = 0x18)
-        // - Version: TLS 1.2 (0x0303)
-        // - Length: 8 bytes
-
-        // Heartbeat Message:
-        // - Type: Request (1)
-        // - Payload Length: 65535 (0xFFFF) - malformed, much larger than actual payload
-        // - Payload: 3 bytes "ABC"
-        // - Padding: None
-
-        let mut payload = Vec::new();
-
-        // TLS Record Header
-        payload.push(0x18); // Content Type: Heartbeat
-        payload.extend_from_slice(&[0x03, 0x03]); // Version: TLS 1.2
-        payload.extend_from_slice(&[0x00, 0x08]); // Length: 8 bytes
-
-        // Heartbeat Request
-        payload.push(0x01); // Type: Request
-        payload.extend_from_slice(&[0xFF, 0xFF]); // Payload Length: 65535 (malformed!)
-        payload.extend_from_slice(b"ABC"); // Actual payload: only 3 bytes
-
-        payload
-    }
-
-    fn analyze_heartbleed_response(&self, response: &[u8]) -> bool {
-        // Analyze the response to determine if Heartbleed vulnerability exists
-
-        if response.is_empty() {
-            return false;
-        }
-
-        // Check if this looks like a TLS record
-        if response.len() < 5 {
-            return false;
-        }
-
-        // Check for heartbeat response (content type 0x18)
-        if response[0] == 0x18 {
-            // Extract the length from TLS record header
-            let record_length = u16::from_be_bytes([response[3], response[4]]) as usize;
-
-            // If the response length is significantly larger than our payload,
-            // it might indicate Heartbleed vulnerability
-            if record_length > 100 {
-                // Our payload was only 3 bytes
-                debug!(
-                    "Potential Heartbleed response detected: {} bytes",
-                    record_length
-                );
-                return true;
-            }
-        }
-
-        false
+        crate::scanner::raw::heartbleed::probe(
+            self.config.target,
+            &self.config.hostname,
+            self.config.timeout,
+        )
+        .await
     }
 }
 
