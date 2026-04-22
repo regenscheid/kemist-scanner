@@ -81,7 +81,8 @@
         "renegotiation_behavior",
         "session_resumption",
         "signature_algorithm_policy_probe",
-        "channel_binding"
+        "channel_binding",
+        "alpn_probe"
       ],
       "properties": {
         "versions_offered": {
@@ -323,6 +324,24 @@
           },
           "additionalProperties": false,
           "description": "RFC 9266 tls-exporter (TLS 1.3 only) and RFC 5929 §4 tls-server-end-point (SHA-256 of leaf cert DER)."
+        },
+        "alpn_probe": {
+          "type": "array",
+          "description": "Per-ALPN-protocol probe matrix. One entry per probed token (h2, http/1.1, http/1.0). Complements `negotiated.alpn` — records which ALPNs the server accepts when offered alone, not just what it prefers when several are offered.",
+          "items": {
+            "type": "object",
+            "required": ["protocol", "supported", "method"],
+            "properties": {
+              "protocol": { "type": "string" },
+              "supported": { "type": ["boolean", "null"] },
+              "method": { "$ref": "#/$defs/method" },
+              "reason": {
+                "type": "string",
+                "description": "Populated on `supported: false` or `method: error`. Canonical values: `no_application_protocol_alert` (RFC 7301 rejection), `server_returned_mismatched_alpn:<name>` (server picked a different ALPN than offered), `server_did_not_select_any_alpn`, `tls_alert_<name>` (unrelated alert), transport-level categories."
+              }
+            },
+            "additionalProperties": false
+          }
         }
       },
       "additionalProperties": false

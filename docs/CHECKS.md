@@ -336,6 +336,30 @@ Computed post-handshake from the characterization handshake's state
 Feeds SP 800-63B AAL3 verifier-impersonation-resistance rules and
 RFC 7677 / RFC 5802 SCRAM-PLUS channel-binding requirements.
 
+## ALPN probe matrix
+
+Per-protocol ALPN handshake. One TLS 1.3 handshake per target token
+in [src/scanner/alpn_matrix.rs](../src/scanner/alpn_matrix.rs) (`h2`,
+`http/1.1`, `http/1.0`), each advertising exactly one protocol in
+the `ALPN` extension. Classifies on the server's response:
+
+| Outcome | `supported` | `reason` | Meaning |
+|---|---|---|---|
+| Handshake complete, ALPN echoed | `true` | — | Server accepts this protocol |
+| RFC 7301 `no_application_protocol` alert | `false` | `no_application_protocol_alert` | Strict-spec rejection |
+| Handshake complete, no ALPN returned | `false` | `server_did_not_select_any_alpn` | Common non-strict behavior |
+| Handshake complete, different ALPN returned | `false` | `server_returned_mismatched_alpn:<proto>` | Protocol-violation-ish |
+| Other TLS alert | `false` | `tls_alert_<name>` | Unrelated handshake failure |
+| Transport failure | `null` (method: error) | category string | DNS / TCP / timeout |
+
+Permissive cert verifier (no validation) — ALPN negotiation
+observation is independent of chain trust. Feeds `tls.alpn_probe` in
+schema. Cost: +3 handshakes per target.
+
+Complements `negotiated.alpn` which records the server's preference
+when multiple ALPNs are offered together; this matrix records per-
+ALPN acceptance in isolation.
+
 ## SNI behavior probe
 
 [scanner/sni.rs](../src/scanner/sni.rs). One extra rustls handshake

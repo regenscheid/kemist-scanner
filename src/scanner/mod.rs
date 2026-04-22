@@ -1,3 +1,4 @@
+pub mod alpn_matrix;
 pub mod backends;
 pub mod cert;
 pub mod ciphers;
@@ -127,6 +128,11 @@ pub struct ScanResults {
     /// `--tls-version` pinned to a higher version).
     #[serde(skip_serializing)]
     pub sslv2_observation: Option<crate::scanner::raw::sslv2::SslV2Observation>,
+    /// Per-ALPN-protocol probe matrix — one handshake per target
+    /// ALPN token. Feeds `tls.alpn_probe` in schema. `None` when the
+    /// probe didn't run.
+    #[serde(skip_serializing)]
+    pub alpn_matrix: Option<crate::scanner::alpn_matrix::AlpnMatrixOutput>,
     /// HTTP-layer observations (HSTS / security.txt / preload list).
     /// Feeds the top-level `http` field in schema.
     #[serde(skip_serializing)]
@@ -180,6 +186,7 @@ impl SslScanner {
             hello_observed: None,
             hrr_observed: None,
             sslv2_observation: None,
+            alpn_matrix: None,
             http_observations: None,
             #[cfg(feature = "legacy-probes")]
             openssl_observations: None,
@@ -323,6 +330,21 @@ impl SslScanner {
         // ServerHello random against the RFC 8446 §4.1.3 sentinel.
         results.hrr_observed = Some(
             probe_hello_retry_request(
+                self.config.target,
+                &self.config.hostname,
+                self.config.timeout,
+                self.config.timeout,
+            )
+            .await,
+        );
+        pause().await;
+
+        // Per-ALPN-protocol probe matrix. One handshake per target
+        // token (h2 / http/1.1 / http/1.0) — records which ALPNs the
+        // server would accept independently, not just what it picks
+        // when both are offered.
+        results.alpn_matrix = Some(
+            crate::scanner::alpn_matrix::probe_alpn_matrix(
                 self.config.target,
                 &self.config.hostname,
                 self.config.timeout,

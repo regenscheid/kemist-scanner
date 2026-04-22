@@ -191,6 +191,28 @@ pub struct Tls {
     /// RFC 5929 §4 (tls-server-end-point). Feeds SP 800-63B AAL3
     /// verifier-impersonation-resistance rules.
     pub channel_binding: ChannelBinding,
+    /// Per-ALPN-protocol probe matrix. One entry per probed token —
+    /// `h2`, `http/1.1`, `http/1.0` today. Each entry records whether
+    /// the server accepts that protocol when offered alone.
+    /// Complements `negotiated.alpn` (which records the preference
+    /// when multiple are offered).
+    pub alpn_probe: Vec<AlpnProbeEntry>,
+}
+
+/// Per-protocol ALPN probe result.
+#[derive(Serialize, Debug, Clone)]
+pub struct AlpnProbeEntry {
+    /// Protocol token offered (e.g. `"h2"`, `"http/1.1"`).
+    pub protocol: String,
+    /// `Some(true)` — handshake completed with the server echoing
+    /// this protocol. `Some(false)` — rejected (RFC 7301
+    /// `no_application_protocol` alert, or handshake completed with
+    /// a different / absent ALPN; see `reason`). `None` — probe
+    /// errored at the transport or TLS layer.
+    pub supported: Option<bool>,
+    pub method: Method,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 /// Per-constraint outcomes for the sig-alg policy probe.

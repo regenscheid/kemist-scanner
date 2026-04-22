@@ -63,6 +63,7 @@ fn fixture_results() -> ScanResults {
         hello_observed: None,
         hrr_observed: None,
         sslv2_observation: None,
+        alpn_matrix: None,
         http_observations: None,
         #[cfg(feature = "legacy-probes")]
         openssl_observations: None,

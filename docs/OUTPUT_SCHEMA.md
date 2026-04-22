@@ -393,6 +393,40 @@ Rule-engine note: `rsa_pkcs1_only` returning `handshake_failure` is
 the modern-posture "good" signal — the server is refusing PKCS#1
 v1.5 signatures.
 
+### `tls.alpn_probe`
+```
+[
+  {protocol: "h2",       supported: true|false|null, method: Method, reason?: string},
+  {protocol: "http/1.1", ...},
+  {protocol: "http/1.0", ...}
+]
+```
+
+Per-protocol ALPN probe matrix. One entry per token in
+[`ALPN_PROBE_LIST`](../src/scanner/alpn_matrix.rs) (`h2`,
+`http/1.1`, `http/1.0`). Each entry is its own handshake advertising
+exactly that one protocol. Complements `negotiated.alpn` — which
+tells you what the server *prefers* when multiple are offered, not
+what it *supports* in isolation.
+
+Outcomes:
+- **`supported: true`** — handshake completed AND server echoed the
+  offered ALPN back.
+- **`supported: false`** with `reason: "no_application_protocol_alert"`
+  — server strictly refused per RFC 7301 §3.2 (rare but spec-compliant).
+- **`supported: false`** with `reason: "server_did_not_select_any_alpn"`
+  — server completed the handshake without selecting an ALPN. Common
+  on servers that don't implement RFC 7301's alert path strictly.
+- **`supported: false`** with `reason: "server_returned_mismatched_alpn:<proto>"`
+  — server completed the handshake but picked a different protocol
+  than offered. Protocol-violation-ish; surfaces the substituted value.
+- **`supported: false`** with `reason: "tls_alert_<name>"` — an
+  unrelated TLS alert killed the handshake.
+- **`supported: null`**, `method: "error"` — transport-level failure.
+
+Cost: +3 handshakes per target. Each handshake uses a permissive
+cert verifier; no cert validation is performed.
+
 ### `tls.sni_behavior`
 ```
 {

@@ -206,7 +206,44 @@ fn build_tls(results: &ScanResults, ctx: &JsonEmitContext) -> Tls {
         signature_algorithm_policy_probe: build_sigalg_policy(results),
         client_auth_request: build_client_auth_request(results),
         channel_binding: build_channel_binding(results),
+        alpn_probe: build_alpn_probe(results),
     }
+}
+
+/// Build the per-ALPN probe matrix. Maps each
+/// [`crate::scanner::alpn_matrix::AlpnProbeOutcome`] onto the
+/// `{supported, method, reason}` envelope used throughout the schema.
+fn build_alpn_probe(results: &ScanResults) -> Vec<crate::model::scan_result::AlpnProbeEntry> {
+    use crate::model::scan_result::AlpnProbeEntry;
+    use crate::scanner::alpn_matrix::AlpnProbeOutcome;
+
+    let Some(matrix) = results.alpn_matrix.as_ref() else {
+        return Vec::new();
+    };
+    matrix
+        .results
+        .iter()
+        .map(|r| match &r.outcome {
+            AlpnProbeOutcome::Supported => AlpnProbeEntry {
+                protocol: r.protocol.clone(),
+                supported: Some(true),
+                method: Method::Probe,
+                reason: None,
+            },
+            AlpnProbeOutcome::NotSupported { reason } => AlpnProbeEntry {
+                protocol: r.protocol.clone(),
+                supported: Some(false),
+                method: Method::Probe,
+                reason: Some(reason.clone()),
+            },
+            AlpnProbeOutcome::Error { reason } => AlpnProbeEntry {
+                protocol: r.protocol.clone(),
+                supported: None,
+                method: Method::Error,
+                reason: Some(reason.clone()),
+            },
+        })
+        .collect()
 }
 
 /// Build the [`ChannelBinding`] slot from fields captured during the
