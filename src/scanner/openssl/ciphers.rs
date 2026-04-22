@@ -329,6 +329,53 @@ pub fn inventory_entries() -> Vec<(u16, &'static str, TlsVersion)> {
         .collect()
 }
 
+/// Probe a single cipher identified by `(iana_code, version)`. Thin
+/// wrapper over `probe_single_suite_blocking` that looks up the
+/// matching `TARGETS` row and runs the probe on a `spawn_blocking`
+/// thread. Returns `HandshakeOutcome::Error` when no row matches — a
+/// programmer error on the caller's part since inventory_entries()
+/// and this function read the same table.
+pub(crate) async fn probe_single_by_code(
+    target: SocketAddr,
+    hostname: &str,
+    iana_code: u16,
+    version: TlsVersion,
+    connect_timeout: Duration,
+    handshake_timeout: Duration,
+) -> HandshakeOutcome {
+    let Some(row) = TARGETS
+        .iter()
+        .find(|t| t.iana_code == iana_code && t.version == version)
+    else {
+        return HandshakeOutcome::Error(format!(
+            "openssl_unknown_target:0x{:04X}:{:?}",
+            iana_code, version
+        ));
+    };
+    let hostname_owned = hostname.to_string();
+    let openssl_name = row.openssl_name.to_string();
+    let version_copy = row.version;
+
+    let probe_out = tokio::task::spawn_blocking(move || {
+        probe_single_suite_blocking(
+            target,
+            &hostname_owned,
+            &openssl_name,
+            version_copy,
+            connect_timeout,
+            handshake_timeout,
+        )
+    })
+    .await
+    .unwrap_or_else(|join_err| ProbeRun {
+        outcome: HandshakeOutcome::Error(format!("spawn_blocking_panic: {join_err}")),
+        dh_snapshot: None,
+        ske_sig: None,
+    });
+
+    probe_out.outcome
+}
+
 /// Probe every suite in [`TARGETS`]. Each probe runs in `spawn_blocking` so
 /// the blocking OpenSSL handshake doesn't park a tokio worker thread.
 /// Honors `per_probe_delay` between consecutive probes.

@@ -122,7 +122,7 @@ fn to_model_version(v: &'static rustls::SupportedProtocolVersion) -> Option<TlsV
     }
 }
 
-async fn probe_single_suite(
+pub(crate) async fn probe_single_suite(
     target: SocketAddr,
     hostname: &str,
     suite: SupportedCipherSuite,

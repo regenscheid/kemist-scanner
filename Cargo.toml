@@ -55,6 +55,10 @@ foreign-types = { version = "0.3", optional = true }
 tokio = { version = "1", features = ["full"] }
 tokio-rustls = "0.26"
 futures = "0.3"
+# Used on the `TlsBackend` trait — async fn in trait objects isn't
+# object-safe in stable Rust yet, so async-trait boxes the returned
+# futures. Pulled in transitively by the tokio/rustls dep tree anyway.
+async-trait = "0.1"
 
 # CLI and output
 clap = { version = "4", features = ["derive", "color", "cargo"] }

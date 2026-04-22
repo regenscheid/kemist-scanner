@@ -154,6 +154,59 @@ pub fn inventory_entries() -> Vec<(u16, &'static str)> {
         .collect()
 }
 
+/// Probe a single group identified by `(iana_code, version)`. Looks up
+/// the matching `TARGETS` row and drives one handshake attempt on a
+/// `spawn_blocking` thread. Returns a `NotProbed` outcome for
+/// `(FFDHE, non-TLS1.2)` or `(ECDH/ML-KEM, TLS1.2)` combinations that
+/// the target table marks inapplicable.
+pub(crate) async fn probe_single_group_by_code(
+    target: SocketAddr,
+    hostname: &str,
+    iana_code: u16,
+    version: crate::model::protocol::TlsVersion,
+    connect_timeout: Duration,
+    handshake_timeout: Duration,
+) -> HandshakeOutcome {
+    use crate::model::protocol::TlsVersion;
+    let Some(row) = TARGETS.iter().find(|t| t.iana_code == iana_code) else {
+        return HandshakeOutcome::NotProbed(format!(
+            "openssl_unknown_group_target:0x{:04X}",
+            iana_code
+        ));
+    };
+    match version {
+        TlsVersion::Tls12 => {
+            if !row.tls12_applicable {
+                return HandshakeOutcome::NotProbed("tls12_not_applicable".to_string());
+            }
+            run_attempt(
+                target,
+                hostname,
+                row,
+                SslVersion::TLS1_2,
+                connect_timeout,
+                handshake_timeout,
+            )
+            .await
+        }
+        TlsVersion::Tls13 => {
+            run_attempt(
+                target,
+                hostname,
+                row,
+                SslVersion::TLS1_3,
+                connect_timeout,
+                handshake_timeout,
+            )
+            .await
+        }
+        other => HandshakeOutcome::NotProbed(format!(
+            "openssl_group_probe_version_out_of_scope:{:?}",
+            other
+        )),
+    }
+}
+
 /// Probe every target group at TLS 1.2 (FFDHE only) and TLS 1.3. Each
 /// attempt runs in `spawn_blocking` so the blocking OpenSSL handshake
 /// cooperates with the tokio runtime. Honors `per_probe_delay` between

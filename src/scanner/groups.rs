@@ -171,7 +171,7 @@ pub async fn probe_kx_groups(
     GroupProbeOutput { results }
 }
 
-async fn probe_single_group(
+pub(crate) async fn probe_single_group(
     target: SocketAddr,
     hostname: &str,
     group: &'static dyn SupportedKxGroup,

@@ -1,18 +1,39 @@
 //! Backend abstraction scaffolding.
 //!
-//! Stage 0 of the TLS backend refactor: introduces `BackendInventory`,
-//! a declaration of which codepoints a given TLS library can probe.
-//! Later stages build the `TlsBackend` trait + `BackendRegistry` on top
-//! so the orchestrator routes probes by codepoint instead of by
-//! hand-wired branches per call site.
+//! Stage 0-2 of the TLS backend refactor:
 //!
-//! An inventory is the single source of truth for "what can this
-//! backend see?" — both the capabilities block in schema output
-//! (`capabilities.provider_cipher_suites`, `.provider_kx_groups`) and
-//! the classification-coverage test under `tests/` consume it.
+//! - Stage 0 introduced `BackendInventory`, a declaration of which
+//!   codepoints a given TLS library can probe.
+//! - Stage 1 unified probe outcomes into `HandshakeOutcome`.
+//! - Stage 2 adds the `TlsBackend` trait + `HandshakeConstraint` +
+//!   `HandshakeResult` + concrete `rustls::RustlsBackend` /
+//!   `openssl::OpensslBackend` wrappers around the existing per-module
+//!   probe functions.
+//!
+//! Stage 3 will migrate orchestrator call sites onto `handshake()`;
+//! Stage 4 will collapse the wrapper backends into the primary
+//! implementation and delete the per-module probe functions. Until
+//! then the existing probe modules keep running alongside.
 
+use std::net::SocketAddr;
+use std::time::Duration;
+
+use async_trait::async_trait;
+
+use crate::model::cert::CertificateInfo;
 use crate::model::errors::ScannerError;
 use crate::model::protocol::TlsVersion;
+use crate::scanner::probe::NegotiatedState;
+#[cfg(feature = "legacy-probes")]
+use crate::scanner::openssl::dh_params::DhSnapshot;
+
+pub mod rustls;
+#[cfg(feature = "legacy-probes")]
+pub mod openssl;
+
+pub use self::rustls::RustlsBackend;
+#[cfg(feature = "legacy-probes")]
+pub use self::openssl::OpensslBackend;
 
 /// Outcome of a single probe handshake. Unifies the per-probe-family
 /// outcome enums that used to live alongside each probe (`ProbeOutcome`,
@@ -86,15 +107,17 @@ pub struct BackendInventory {
 /// matches the legacy inline build in `src/output/json.rs` so the
 /// capabilities block stays byte-identical through Stage 0.
 pub fn rustls_inventory() -> BackendInventory {
+    // Fully-qualified `::rustls::` disambiguates from the sibling
+    // `backends::rustls` submodule declared below.
     let mut cipher_codepoints = Vec::new();
     let mut cipher_names = Vec::new();
-    for s in rustls::crypto::aws_lc_rs::ALL_CIPHER_SUITES {
+    for s in ::rustls::crypto::aws_lc_rs::ALL_CIPHER_SUITES {
         cipher_codepoints.push(s.suite().into());
         cipher_names.push(format!("{:?}", s.suite()));
     }
     let mut group_codepoints = Vec::new();
     let mut group_names = Vec::new();
-    for g in rustls::crypto::aws_lc_rs::ALL_KX_GROUPS {
+    for g in ::rustls::crypto::aws_lc_rs::ALL_KX_GROUPS {
         group_codepoints.push(g.name().into());
         group_names.push(format!("{:?}", g.name()));
     }
@@ -157,4 +180,195 @@ pub fn all_inventories() -> Vec<BackendInventory> {
     #[cfg(feature = "legacy-probes")]
     v.push(openssl_inventory());
     v
+}
+
+/// Per-scan context threaded through every `handshake()` call: the
+/// target socket + hostname (for SNI) + timeout budgets. Stage 4 will
+/// relocate this to `src/scanner/probe_context.rs`; for now it lives
+/// alongside the trait that consumes it.
+#[derive(Debug, Clone)]
+pub struct ProbeContext {
+    pub target: SocketAddr,
+    pub hostname: String,
+    pub connect_timeout: Duration,
+    pub handshake_timeout: Duration,
+}
+
+/// Constraints applied to a single probe handshake. Empty defaults mean
+/// "no restriction" for each axis — the backend emits whatever its
+/// library-default ClientHello negotiates. Callers pin the axes that
+/// identify what they're probing (single cipher, single group, single
+/// version, etc.).
+#[derive(Debug, Clone, Default)]
+pub struct HandshakeConstraint {
+    /// Inclusive `(min, max)` TLS version range to offer. `None` lets
+    /// the backend offer whatever versions its library default allows.
+    pub version_range: Option<(TlsVersion, TlsVersion)>,
+    /// Restrict the ClientHello cipher list to these IANA codepoints.
+    /// `None` lets the backend's library default stand.
+    pub cipher_suites: Option<Vec<u16>>,
+    /// Restrict `supported_groups` / TLS 1.3 `key_share` to these
+    /// IANA codepoints. `None` lets the backend's library default stand.
+    pub groups: Option<Vec<u16>>,
+    /// Restrict the TLS 1.2 `signature_algorithms` (and TLS 1.3
+    /// equivalents) to these IANA codepoints. OpenSSL-only today.
+    pub sigalgs: Option<Vec<u16>>,
+    /// ALPN identifiers to advertise, in order. `None` offers nothing.
+    pub alpn: Option<Vec<Vec<u8>>>,
+    /// Add `TLS_FALLBACK_SCSV` (0x5600) to the ClientHello cipher list.
+    /// OpenSSL-only.
+    pub send_fallback_scsv: bool,
+    /// Invoke `SSL_CTX_set_security_level(0)` so legacy primitives
+    /// (3DES, RC4, MD5-signed certs) don't get pre-filtered. OpenSSL-only.
+    pub seclevel_zero: bool,
+}
+
+impl HandshakeConstraint {
+    /// Constrain to one TLS version only (min == max).
+    pub fn version_only(v: TlsVersion) -> Self {
+        Self {
+            version_range: Some((v, v)),
+            ..Self::default()
+        }
+    }
+
+    /// Constrain the ClientHello cipher list to a single IANA
+    /// codepoint. No version constraint — the backend infers the
+    /// applicable TLS version from the suite.
+    pub fn single_cipher(code: u16) -> Self {
+        Self {
+            cipher_suites: Some(vec![code]),
+            ..Self::default()
+        }
+    }
+
+    /// Constrain the ClientHello cipher list to a single codepoint at
+    /// a specific TLS version.
+    pub fn single_cipher_at(code: u16, v: TlsVersion) -> Self {
+        Self {
+            version_range: Some((v, v)),
+            cipher_suites: Some(vec![code]),
+            ..Self::default()
+        }
+    }
+
+    /// Constrain `supported_groups`/`key_share` to a single IANA
+    /// codepoint at a specific TLS version.
+    pub fn single_group_at(code: u16, v: TlsVersion) -> Self {
+        Self {
+            version_range: Some((v, v)),
+            groups: Some(vec![code]),
+            ..Self::default()
+        }
+    }
+}
+
+/// All observations produced by one probe handshake. Most fields are
+/// `Option` because not every backend surfaces every datum — e.g. DH
+/// parameter snapshots only come from OpenSSL handshakes involving
+/// ephemeral DH, and OCSP bytes only come from a characterization
+/// handshake rustls can verify.
+#[derive(Debug, Clone)]
+pub struct HandshakeResult {
+    pub outcome: HandshakeOutcome,
+    pub negotiated: Option<NegotiatedState>,
+    pub cert_chain_der: Vec<Vec<u8>>,
+    /// Parsed certificate chain, when a characterization-style handshake
+    /// exposed it. Reuses [`CertificateInfo`] for schema compatibility.
+    pub cert_chain: Vec<CertificateInfo>,
+    pub alpn_negotiated: Option<Vec<u8>>,
+    /// Normalized alert category string when the handshake failed at
+    /// the wire level (e.g. `"tls_alert_handshake_failure"`).
+    pub alert: Option<String>,
+    /// DH parameter snapshot from a completed DHE handshake. OpenSSL
+    /// only; rustls does not expose the peer `tmp_key` API.
+    #[cfg(feature = "legacy-probes")]
+    pub dh_parameters: Option<DhSnapshot>,
+    /// TLS 1.2 ServerKeyExchange signature algorithm name, or TLS 1.3
+    /// CertificateVerify sigalg. Surfaced by whichever backend ran the
+    /// handshake and could read it.
+    pub ske_signature_name: Option<String>,
+    /// Raw OCSP response bytes delivered in the TLS extension.
+    pub ocsp_response_bytes: Option<Vec<u8>>,
+    /// Signature scheme observed on the handshake (rustls path captures
+    /// this via the verifier callback; OpenSSL exposes it via
+    /// `SSL_get_peer_signature_name`).
+    pub signature_scheme_observed: Option<String>,
+}
+
+impl HandshakeResult {
+    /// Construct a minimal result carrying only the handshake outcome.
+    /// Used by the single-codepoint probe paths that currently report
+    /// only outcome; observer fields will be populated in later stages
+    /// as the orchestrator migrates onto `handshake()`.
+    pub fn outcome_only(outcome: HandshakeOutcome) -> Self {
+        Self {
+            outcome,
+            negotiated: None,
+            cert_chain_der: Vec::new(),
+            cert_chain: Vec::new(),
+            alpn_negotiated: None,
+            alert: None,
+            #[cfg(feature = "legacy-probes")]
+            dh_parameters: None,
+            ske_signature_name: None,
+            ocsp_response_bytes: None,
+            signature_scheme_observed: None,
+        }
+    }
+}
+
+/// Returned from `handshake()` when the backend cannot honor the
+/// combination of constraints supplied. The orchestrator translates
+/// this into a schema `method: not_probed, reason: <reason>` entry —
+/// never silently drops the probe.
+#[derive(Debug, Clone)]
+pub struct UnsatisfiableConstraint {
+    pub reason: String,
+}
+
+impl UnsatisfiableConstraint {
+    pub fn new(reason: impl Into<String>) -> Self {
+        Self {
+            reason: reason.into(),
+        }
+    }
+}
+
+/// Which `HandshakeConstraint` axes a backend can honor. Lets the
+/// orchestrator check feasibility cheaply without catching errors from
+/// every `handshake()` call.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ConstraintCapabilities {
+    pub version_range: bool,
+    pub cipher_suites: bool,
+    pub groups: bool,
+    pub sigalgs: bool,
+    pub alpn: bool,
+    pub send_fallback_scsv: bool,
+    pub seclevel_zero: bool,
+}
+
+/// The abstraction every TLS library plugs into. Backends own their
+/// inventory and their handshake primitive; routing between them lives
+/// in the orchestrator (Stage 3+).
+#[async_trait]
+pub trait TlsBackend: Send + Sync {
+    /// Short stable identifier — matches `BackendInventory::id`.
+    fn id(&self) -> &'static str;
+
+    fn inventory(&self) -> &BackendInventory;
+
+    fn constraint_capabilities(&self) -> ConstraintCapabilities;
+
+    /// Drive exactly one handshake attempt with the supplied constraints
+    /// applied to the ClientHello. Returns `Err(UnsatisfiableConstraint)`
+    /// when the backend cannot honor the constraint combination (e.g.
+    /// rustls asked to set `seclevel_zero`). Does not retry on transient
+    /// failures — that's a caller concern.
+    async fn handshake(
+        &self,
+        constraint: HandshakeConstraint,
+        ctx: &ProbeContext,
+    ) -> Result<HandshakeResult, UnsatisfiableConstraint>;
 }
