@@ -391,6 +391,245 @@ pub fn is_pqc_oid(oid_str: &str) -> bool {
     pqc_oid_map().contains_key(oid_str)
 }
 
+/// Classify a PQC signature OID into its FIPS-assigned family.
+/// Returns `"ml_dsa"` for FIPS 204 codepoints,
+/// `"slh_dsa"` for FIPS 205, `"composite"` for IETF LAMPS composite
+/// signature codepoints (when added), and `None` for classical
+/// signatures or OIDs not in the PQC table. Lets rule engines
+/// distinguish stateless-hash-based sigs (SLH-DSA) from lattice sigs
+/// (ML-DSA) without re-implementing an OID table.
+pub fn pqc_family_of_oid(oid_str: &str) -> Option<&'static str> {
+    // ML-DSA — FIPS 204 (CSOR 2.16.840.1.101.3.4.3.{17,18,19})
+    if matches!(
+        oid_str,
+        "2.16.840.1.101.3.4.3.17" | "2.16.840.1.101.3.4.3.18" | "2.16.840.1.101.3.4.3.19"
+    ) {
+        return Some("ml_dsa");
+    }
+    // SLH-DSA — FIPS 205 (CSOR 2.16.840.1.101.3.4.3.{20..=31}; SHA2
+    // family 20-25, SHAKE family 26-31).
+    if let Some(suffix) = oid_str.strip_prefix("2.16.840.1.101.3.4.3.") {
+        if let Ok(n) = suffix.parse::<u32>() {
+            if (20..=31).contains(&n) {
+                return Some("slh_dsa");
+            }
+        }
+    }
+    None
+}
+
+/// Canonical hash family name extracted from a signature-algorithm
+/// OID, or `None` when the algorithm handles hashing internally
+/// (Ed25519, Ed448, ML-DSA, SLH-DSA pure variants). Returns the RFC
+/// 6931 hash name for classical sigs and an algorithm-specific
+/// hint for SLH-DSA variants (they're named by their hash family,
+/// though the hashing is internal to the signature scheme).
+fn hash_of_sig_oid(oid_str: &str) -> Option<&'static str> {
+    match oid_str {
+        // RSA PKCS#1 v1.5
+        "1.2.840.113549.1.1.5" => Some("sha1"),
+        "1.2.840.113549.1.1.11" => Some("sha256"),
+        "1.2.840.113549.1.1.12" => Some("sha384"),
+        "1.2.840.113549.1.1.13" => Some("sha512"),
+        // ECDSA
+        "1.2.840.10045.4.1" => Some("sha1"),
+        "1.2.840.10045.4.3.2" => Some("sha256"),
+        "1.2.840.10045.4.3.3" => Some("sha384"),
+        "1.2.840.10045.4.3.4" => Some("sha512"),
+        _ => None,
+    }
+}
+
+/// Canonical algorithm-family name (lower-case, RFC 5912 / IANA-style)
+/// for a signature-algorithm OID. Used by the structured
+/// `signature_algorithm_structured.algorithm` field so rule engines
+/// can key on a stable short name without reparsing OIDs.
+fn algorithm_family_of_sig_oid(oid_str: &str) -> &'static str {
+    // PKCS#1 v1.5 + unparameterized RSA
+    if matches!(
+        oid_str,
+        "1.2.840.113549.1.1.5"
+            | "1.2.840.113549.1.1.11"
+            | "1.2.840.113549.1.1.12"
+            | "1.2.840.113549.1.1.13"
+    ) {
+        return "rsa";
+    }
+    if oid_str == "1.2.840.113549.1.1.10" {
+        return "rsa_pss";
+    }
+    if matches!(
+        oid_str,
+        "1.2.840.10045.4.1" | "1.2.840.10045.4.3.2" | "1.2.840.10045.4.3.3" | "1.2.840.10045.4.3.4"
+    ) {
+        return "ecdsa";
+    }
+    if oid_str == "1.3.101.112" {
+        return "ed25519";
+    }
+    if oid_str == "1.3.101.113" {
+        return "ed448";
+    }
+    // PQC — return the family-specific FIPS name. Uses the same
+    // table as the human-readable resolver so naming stays in sync.
+    if let Some(name) = pqc_oid_map().get(oid_str) {
+        // Translate the FIPS-style name to a canonical snake-case
+        // identifier: "ML-DSA-65" → "ml_dsa_65",
+        // "SLH-DSA-SHA2-128s" → "slh_dsa_sha2_128s".
+        return match *name {
+            "ML-DSA-44" => "ml_dsa_44",
+            "ML-DSA-65" => "ml_dsa_65",
+            "ML-DSA-87" => "ml_dsa_87",
+            "SLH-DSA-SHA2-128s" => "slh_dsa_sha2_128s",
+            "SLH-DSA-SHA2-128f" => "slh_dsa_sha2_128f",
+            "SLH-DSA-SHA2-192s" => "slh_dsa_sha2_192s",
+            "SLH-DSA-SHA2-192f" => "slh_dsa_sha2_192f",
+            "SLH-DSA-SHA2-256s" => "slh_dsa_sha2_256s",
+            "SLH-DSA-SHA2-256f" => "slh_dsa_sha2_256f",
+            "SLH-DSA-SHAKE-128s" => "slh_dsa_shake_128s",
+            "SLH-DSA-SHAKE-128f" => "slh_dsa_shake_128f",
+            "SLH-DSA-SHAKE-192s" => "slh_dsa_shake_192s",
+            "SLH-DSA-SHAKE-192f" => "slh_dsa_shake_192f",
+            "SLH-DSA-SHAKE-256s" => "slh_dsa_shake_256s",
+            "SLH-DSA-SHAKE-256f" => "slh_dsa_shake_256f",
+            _ => "unknown",
+        };
+    }
+    "unknown"
+}
+
+/// Structured decomposition of an X.509 signature-algorithm
+/// identifier, independent of the human-readable name string and the
+/// raw OID. Lets rule engines key on `(hash, algorithm)` pairs
+/// without parsing OIDs themselves.
+pub fn signature_algorithm_structured(
+    oid: &Oid,
+    params_der: Option<&[u8]>,
+) -> crate::model::scan_result::SignatureAlgorithmStructured {
+    let oid_str = oid.to_id_string();
+    let algorithm = algorithm_family_of_sig_oid(&oid_str).to_string();
+
+    // RSA-PSS — hash lives inside the parameters SEQUENCE, not in the
+    // outer OID. Parse the parameters DER if available; default to
+    // SHA-1 per RFC 4055 §3.1 when absent (the spec's default).
+    if oid_str == "1.2.840.113549.1.1.10" {
+        let (hash_name, params_summary) = parse_rsa_pss_params(params_der);
+        return crate::model::scan_result::SignatureAlgorithmStructured {
+            hash: Some(hash_name.to_string()),
+            algorithm,
+            parameters: params_summary,
+        };
+    }
+
+    let hash = hash_of_sig_oid(&oid_str).map(|s| s.to_string());
+    crate::model::scan_result::SignatureAlgorithmStructured {
+        hash,
+        algorithm,
+        parameters: None,
+    }
+}
+
+/// Best-effort RSA-PSS parameter parser. Walks the outer SEQUENCE
+/// looking for the `hashAlgorithm` context-tag `[0]`, extracts the
+/// inner OID, and maps to a canonical hash name. Returns
+/// `(hash_name, parameter_summary)`. Summary is a short
+/// human-readable string rule engines can log; the definitive data
+/// is `hash`.
+///
+/// Not a full parser — if the DER is malformed or a context tag is
+/// missing, falls back to the RFC 4055 §3.1 default of SHA-1.
+fn parse_rsa_pss_params(params_der: Option<&[u8]>) -> (&'static str, Option<String>) {
+    let Some(der) = params_der else {
+        return ("sha1", Some("rfc4055_defaults".to_string()));
+    };
+    // RSASSA-PSS-params ::= SEQUENCE {
+    //   hashAlgorithm      [0] HashAlgorithm       DEFAULT sha1,
+    //   maskGenAlgorithm   [1] MaskGenAlgorithm    DEFAULT mgf1SHA1,
+    //   saltLength         [2] INTEGER             DEFAULT 20,
+    //   trailerField       [3] TrailerField        DEFAULT trailerFieldBC
+    // }
+    // Walk the SEQUENCE body looking for `[0]` (0xA0) and extract the
+    // inner AlgorithmIdentifier's OID. Anything more is structured
+    // parsing we don't need for the observation surface.
+    if der.len() < 2 || der[0] != 0x30 {
+        return ("sha1", Some("rfc4055_defaults".to_string()));
+    }
+    let (body, _) = match der_body(der) {
+        Some(b) => b,
+        None => return ("sha1", Some("rfc4055_defaults".to_string())),
+    };
+    // Look for context-tag [0].
+    let mut p = 0usize;
+    while p + 2 <= body.len() {
+        let tag = body[p];
+        let (elem_body, total) = match der_body(&body[p..]) {
+            Some(b) => b,
+            None => break,
+        };
+        if tag == 0xA0 {
+            // Inner AlgorithmIdentifier: SEQUENCE { OID, params? }
+            if let Some((inner, _)) = der_body(elem_body) {
+                if !inner.is_empty() && inner[0] == 0x06 {
+                    if let Some((oid_bytes, _)) = der_body(inner) {
+                        if let Ok((_, oid)) = der_parser::der::parse_der_oid(&[
+                            &[0x06, oid_bytes.len() as u8][..],
+                            oid_bytes,
+                        ].concat()) {
+                            let oid_str = oid
+                                .as_oid()
+                                .map(|o| o.to_id_string())
+                                .unwrap_or_default();
+                            let name = match oid_str.as_str() {
+                                "2.16.840.1.101.3.4.2.1" => "sha256",
+                                "2.16.840.1.101.3.4.2.2" => "sha384",
+                                "2.16.840.1.101.3.4.2.3" => "sha512",
+                                "1.3.14.3.2.26" => "sha1",
+                                _ => "unknown",
+                            };
+                            return (name, Some(format!("mgf1-{}", name)));
+                        }
+                    }
+                }
+            }
+            return ("sha1", Some("rfc4055_defaults".to_string()));
+        }
+        p += total;
+    }
+    ("sha1", Some("rfc4055_defaults".to_string()))
+}
+
+/// Extract the DER body (value bytes) and total element length (tag+len+value)
+/// from a DER-encoded element. Returns `None` on malformed length
+/// encodings. Handles short-form and long-form length octets.
+fn der_body(data: &[u8]) -> Option<(&[u8], usize)> {
+    if data.len() < 2 {
+        return None;
+    }
+    let first_len_byte = data[1];
+    if first_len_byte < 0x80 {
+        let len = first_len_byte as usize;
+        let total = 2 + len;
+        if data.len() < total {
+            return None;
+        }
+        Some((&data[2..total], total))
+    } else {
+        let n = (first_len_byte & 0x7f) as usize;
+        if n == 0 || n > 4 || data.len() < 2 + n {
+            return None;
+        }
+        let mut len: usize = 0;
+        for i in 0..n {
+            len = (len << 8) | (data[2 + i] as usize);
+        }
+        let total = 2 + n + len;
+        if data.len() < total {
+            return None;
+        }
+        Some((&data[2 + n..total], total))
+    }
+}
+
 /// Human-readable signature algorithm name. Falls back to the OID string
 /// when the OID isn't in our known list — never fails, never None.
 pub fn resolve_signature_algorithm(oid: &Oid) -> String {
@@ -567,6 +806,78 @@ mod tests {
         assert!(!is_pqc_oid("1.2.840.113549.1.1.11")); // sha256WithRSA
         assert!(!is_pqc_oid("1.2.840.10045.4.3.2")); // ecdsa-with-SHA256
         assert!(!is_pqc_oid("")); // empty
+    }
+
+    #[test]
+    fn pqc_family_splits_ml_dsa_from_slh_dsa() {
+        // FIPS 204 codepoints — ML-DSA family
+        assert_eq!(pqc_family_of_oid("2.16.840.1.101.3.4.3.17"), Some("ml_dsa"));
+        assert_eq!(pqc_family_of_oid("2.16.840.1.101.3.4.3.18"), Some("ml_dsa"));
+        assert_eq!(pqc_family_of_oid("2.16.840.1.101.3.4.3.19"), Some("ml_dsa"));
+        // FIPS 205 codepoints — SLH-DSA family
+        assert_eq!(pqc_family_of_oid("2.16.840.1.101.3.4.3.20"), Some("slh_dsa")); // SHA2-128s
+        assert_eq!(pqc_family_of_oid("2.16.840.1.101.3.4.3.25"), Some("slh_dsa")); // SHA2-256f
+        assert_eq!(pqc_family_of_oid("2.16.840.1.101.3.4.3.26"), Some("slh_dsa")); // SHAKE-128s
+        assert_eq!(pqc_family_of_oid("2.16.840.1.101.3.4.3.31"), Some("slh_dsa")); // SHAKE-256f
+    }
+
+    #[test]
+    fn pqc_family_none_for_classical_and_out_of_range() {
+        assert_eq!(pqc_family_of_oid("1.2.840.113549.1.1.11"), None); // RSA
+        assert_eq!(pqc_family_of_oid("1.2.840.10045.4.3.2"), None); // ECDSA
+        // Arc with no subidentifier suffix.
+        assert_eq!(pqc_family_of_oid("2.16.840.1.101.3.4.3"), None);
+        // OID in the same arc but outside the FIPS-assigned range (e.g.
+        // KEM OIDs on 2.16.840.1.101.3.4.4.*).
+        assert_eq!(pqc_family_of_oid("2.16.840.1.101.3.4.3.16"), None);
+        assert_eq!(pqc_family_of_oid("2.16.840.1.101.3.4.3.32"), None);
+    }
+
+    #[test]
+    fn algorithm_family_of_sig_oid_maps_rsa_ecdsa_ed() {
+        assert_eq!(algorithm_family_of_sig_oid("1.2.840.113549.1.1.11"), "rsa"); // sha256WithRSA
+        assert_eq!(algorithm_family_of_sig_oid("1.2.840.113549.1.1.10"), "rsa_pss");
+        assert_eq!(algorithm_family_of_sig_oid("1.2.840.10045.4.3.2"), "ecdsa");
+        assert_eq!(algorithm_family_of_sig_oid("1.3.101.112"), "ed25519");
+        assert_eq!(algorithm_family_of_sig_oid("1.3.101.113"), "ed448");
+        assert_eq!(algorithm_family_of_sig_oid("2.16.840.1.101.3.4.3.18"), "ml_dsa_65");
+        assert_eq!(algorithm_family_of_sig_oid("2.16.840.1.101.3.4.3.20"), "slh_dsa_sha2_128s");
+        assert_eq!(algorithm_family_of_sig_oid("1.2.3.4.999"), "unknown");
+    }
+
+    #[test]
+    fn hash_of_sig_oid_extracts_hash_family() {
+        assert_eq!(hash_of_sig_oid("1.2.840.113549.1.1.11"), Some("sha256"));
+        assert_eq!(hash_of_sig_oid("1.2.840.10045.4.3.3"), Some("sha384"));
+        // Ed25519, ML-DSA, SLH-DSA hash internally — no hash family knowable from OID.
+        assert_eq!(hash_of_sig_oid("1.3.101.112"), None);
+        assert_eq!(hash_of_sig_oid("2.16.840.1.101.3.4.3.18"), None);
+    }
+
+    #[test]
+    fn rsa_pss_params_default_to_rfc4055_sha1() {
+        // Absent parameters → SHA-1 default per RFC 4055 §3.1.
+        let (hash, summary) = parse_rsa_pss_params(None);
+        assert_eq!(hash, "sha1");
+        assert_eq!(summary.as_deref(), Some("rfc4055_defaults"));
+    }
+
+    #[test]
+    fn rsa_pss_params_extracts_sha256_hash() {
+        // RSASSA-PSS-params ::= SEQUENCE {
+        //   hashAlgorithm [0] AlgorithmIdentifier DEFAULT sha1, ... }
+        // Structured:
+        //   30 0F                                 SEQUENCE (len 15)
+        //     A0 0D                               [0] EXPLICIT (len 13)
+        //       30 0B                             AlgorithmIdentifier (len 11)
+        //         06 09 60 86 48 01 65 03 04 02 01  OID 2.16.840.1.101.3.4.2.1 (sha256)
+        let der = [
+            0x30, 0x0F, 0xA0, 0x0D, 0x30, 0x0B, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03,
+            0x04, 0x02, 0x01,
+        ];
+        let (hash, summary) = parse_rsa_pss_params(Some(&der));
+        assert_eq!(hash, "sha256");
+        assert_eq!(summary.as_deref(), Some("mgf1-sha256"));
     }
 
     #[test]

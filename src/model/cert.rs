@@ -29,11 +29,20 @@ pub struct CertificateInfo {
     /// Raw signature algorithm OID string (e.g. `"1.2.840.113549.1.1.11"`).
     /// Downstream rule engines key off this — never a human-friendly name.
     pub signature_algorithm_oid: String,
-    /// True when `signature_algorithm_oid` is a known PQC OID (ML-DSA,
-    /// SLH-DSA). Raw OID match — not a security judgment.
-    pub is_pqc_signature: bool,
+    /// Structured decomposition of the signature algorithm — hash
+    /// family + algorithm family + RSA-PSS parameters. Flows into
+    /// `certificates.*.signature_algorithm_structured`.
+    pub signature_algorithm_structured:
+        crate::model::scan_result::SignatureAlgorithmStructured,
+    /// PQC family classification — `"ml_dsa"` (FIPS 204), `"slh_dsa"`
+    /// (FIPS 205), `"composite"` (IETF LAMPS drafts), or `None` for
+    /// classical signatures.
+    pub pqc_signature_family: Option<String>,
     pub public_key_algorithm: String,
     pub public_key_size: usize,
+    /// RSA public exponent — populated only for RSA keys. See
+    /// [`crate::model::scan_result::PublicKey::rsa_exponent`].
+    pub rsa_exponent: Option<u64>,
     pub ecc_curve_name: Option<String>,
     /// RFC 5480 named-curve OID as dotted decimal (e.g.
     /// `"1.2.840.10045.3.1.7"` for secp256r1). Separate from
@@ -71,7 +80,21 @@ impl CertificateInfo {
         let sig_oid_str = cert.signature_algorithm.algorithm.to_id_string();
         let sig_alg =
             crate::scanner::cert::resolve_signature_algorithm(&cert.signature_algorithm.algorithm);
-        let is_pqc_signature = crate::scanner::cert::is_pqc_oid(&sig_oid_str);
+        let pqc_signature_family =
+            crate::scanner::cert::pqc_family_of_oid(&sig_oid_str).map(|s| s.to_string());
+        // Structured decomposition — hash + algorithm family +
+        // RSA-PSS parameters. The parameters DER bytes live on the
+        // outer AlgorithmIdentifier.
+        let sig_params_der = cert
+            .signature_algorithm
+            .parameters
+            .as_ref()
+            .map(|p| p.as_bytes());
+        let signature_algorithm_structured =
+            crate::scanner::cert::signature_algorithm_structured(
+                &cert.signature_algorithm.algorithm,
+                sig_params_der,
+            );
         let is_self_signed = cert.subject() == cert.issuer();
 
         let now = Utc::now();
@@ -83,6 +106,7 @@ impl CertificateInfo {
         let alg_name = oid_to_algorithm_name(&pki.algorithm.algorithm);
         let key_size = estimate_key_size(pki);
         let (pub_key_alg, pub_key_size) = (alg_name, key_size);
+        let rsa_exponent = extract_rsa_exponent(pki);
 
         // Extract ECC curve information
         let (ecc_curve_name, ecc_curve_oid, ecc_key_strength) = extract_ecc_info(pki);
@@ -110,9 +134,11 @@ impl CertificateInfo {
             not_after,
             signature_algorithm: sig_alg,
             signature_algorithm_oid: sig_oid_str,
-            is_pqc_signature,
+            signature_algorithm_structured,
+            pqc_signature_family,
             public_key_algorithm: pub_key_alg,
             public_key_size: pub_key_size,
+            rsa_exponent,
             ecc_curve_name,
             ecc_curve_oid,
             ecc_key_strength,
@@ -162,6 +188,33 @@ fn oid_to_algorithm_name(oid: &Oid) -> String {
         _ => &oid_str,
     }
     .to_string()
+}
+
+/// Extract the RSA public exponent `e` from a SubjectPublicKeyInfo.
+/// Returns `None` for non-RSA keys or when the exponent overflows
+/// `u64` (which would never happen with real-world certificates —
+/// `e = 65537` is the universal default; `e = 3` / `e = 17` are the
+/// only other values observed).
+fn extract_rsa_exponent(pki: &SubjectPublicKeyInfo) -> Option<u64> {
+    let Ok(parsed) = pki.parsed() else {
+        return None;
+    };
+    let x509_parser::public_key::PublicKey::RSA(rsa) = parsed else {
+        return None;
+    };
+    // x509-parser exposes `exponent` as a byte slice of the DER
+    // INTEGER's magnitude (big-endian, sign-stripped). Convert up to
+    // 8 bytes into a u64; anything longer is an exotic case we
+    // simply don't capture numerically.
+    let bytes = rsa.exponent;
+    if bytes.is_empty() || bytes.len() > 8 {
+        return None;
+    }
+    let mut out: u64 = 0;
+    for &b in bytes {
+        out = (out << 8) | b as u64;
+    }
+    Some(out)
 }
 
 fn estimate_key_size(pki: &SubjectPublicKeyInfo) -> usize {

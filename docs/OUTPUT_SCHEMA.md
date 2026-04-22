@@ -444,8 +444,9 @@ RFC 7677 / RFC 5802 SCRAM channel-binding requirements.
 | `validity_days` | `int` | `not_after - not_before` in days |
 | `signature_algorithm_oid` | `string` | Raw OID (`"1.2.840.113549.1.1.11"`) |
 | `signature_algorithm_name` | `string` | Resolved human name (`"sha256WithRSAEncryption"`, `"ML-DSA-65"`, or fallback to OID) |
-| `is_pqc_signature` | `bool` | OID matches ML-DSA/SLH-DSA table — **raw match, not a judgment** |
-| `public_key` | `{algorithm, size_bits, curve?, curve_oid?}` | `curve_oid` carries the named-curve OID (e.g. `"1.2.840.10045.3.1.7"` for secp256r1) — parsed from `AlgorithmIdentifier.parameters`, not byte-length matched. Lets rule engines distinguish brainpool/secp256k1 from NIST P-curves |
+| `signature_algorithm_structured` | `{hash?, algorithm, parameters?}` | Structured decomposition of the signature AlgorithmIdentifier. `hash` is the canonical hash family (`"sha256"`, `"sha384"`, `"sha512"`, `"sha1"`); absent when the scheme hashes internally (Ed25519, Ed448, ML-DSA, SLH-DSA). `algorithm` is the family name: `"rsa"`, `"rsa_pss"`, `"ecdsa"`, `"ed25519"`, `"ed448"`, `"ml_dsa_44"` / `"ml_dsa_65"` / `"ml_dsa_87"`, `"slh_dsa_sha2_128s"` etc. `parameters` carries `"mgf1-<hash>"` for RSA-PSS (or `"rfc4055_defaults"` when PSS parameters were absent). |
+| `pqc_signature_family` | `string?` | `"ml_dsa"` (FIPS 204) / `"slh_dsa"` (FIPS 205) / `"composite"` (IETF LAMPS) when the signature OID is PQC; absent otherwise. Replaces the earlier `is_pqc_signature: bool` — `has_pqc = pqc_signature_family !== undefined` recovers the old semantics. |
+| `public_key` | `{algorithm, size_bits, curve?, curve_oid?, rsa_exponent?}` | `curve_oid` carries the named-curve OID (e.g. `"1.2.840.10045.3.1.7"` for secp256r1) — parsed from `AlgorithmIdentifier.parameters`, not byte-length matched. `rsa_exponent` populated for RSA keys only (values observed: 3, 17, 65537); lets rule engines flag small-exponent keys. |
 | `embedded_scts` | `int` | Count from extension 1.3.6.1.4.1.11129.2.4.2 |
 | `fingerprint_sha256` | `string` | Hex |
 | `fingerprint_sha1` | `string` | Hex |
@@ -556,6 +557,9 @@ rejecting the record.
 | `ocsp_stapling.delivery_path` | `tls1_2`, `tls1_3` |
 | `downgrade_signaling.tls13_downgrade_sentinel` | `tls12`, `lte_tls11`, `none` |
 | `dh_parameters[].classification` | `ffdhe2048`, `ffdhe3072`, `ffdhe4096`, `ffdhe6144`, `ffdhe8192`, `modp1024`, `modp1536`, `modp2048`, `modp3072`, `custom` |
+| `certificates.*.pqc_signature_family` | `ml_dsa`, `slh_dsa`, `composite` (absent for classical signatures) |
+| `certificates.*.signature_algorithm_structured.algorithm` | `rsa`, `rsa_pss`, `ecdsa`, `ed25519`, `ed448`, `ml_dsa_44`, `ml_dsa_65`, `ml_dsa_87`, `slh_dsa_sha2_{128,192,256}{s,f}`, `slh_dsa_shake_{128,192,256}{s,f}`, `unknown` |
+| `certificates.*.signature_algorithm_structured.hash` | `sha1`, `sha256`, `sha384`, `sha512` (absent when the scheme hashes internally) |
 
 For `category` and `response_status`, the `<name>` / `<n>` suffix
 pattern is the permanent shape; new alert names or OCSP-status codes

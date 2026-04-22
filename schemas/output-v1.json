@@ -526,7 +526,7 @@
         "validity_days",
         "signature_algorithm_oid",
         "signature_algorithm_name",
-        "is_pqc_signature",
+        "signature_algorithm_structured",
         "public_key",
         "embedded_scts",
         "fingerprint_sha256",
@@ -544,7 +544,22 @@
         "validity_days": { "type": "integer" },
         "signature_algorithm_oid": { "type": "string" },
         "signature_algorithm_name": { "type": "string" },
-        "is_pqc_signature": { "type": "boolean" },
+        "signature_algorithm_structured": {
+          "type": "object",
+          "required": ["algorithm"],
+          "properties": {
+            "hash": { "type": "string" },
+            "algorithm": { "type": "string" },
+            "parameters": { "type": "string" }
+          },
+          "additionalProperties": false,
+          "description": "Structured decomposition of the signature-algorithm identifier. `hash` is the canonical hash family (`sha256`, etc.) or absent for schemes that hash internally. `algorithm` is the family (`rsa`, `rsa_pss`, `ecdsa`, `ed25519`, `ml_dsa_65`, `slh_dsa_sha2_128s`, ...)."
+        },
+        "pqc_signature_family": {
+          "type": "string",
+          "enum": ["ml_dsa", "slh_dsa", "composite"],
+          "description": "Present when the signature OID is PQC. Replaces the earlier `is_pqc_signature: bool` — a boolean `has_pqc = pqc_signature_family !== undefined` recovers the old semantics."
+        },
         "public_key": {
           "type": "object",
           "required": ["algorithm", "size_bits"],
@@ -552,7 +567,12 @@
             "algorithm": { "type": "string" },
             "size_bits": { "type": "integer", "minimum": 0 },
             "curve": { "type": "string" },
-            "curve_oid": { "type": "string" }
+            "curve_oid": { "type": "string" },
+            "rsa_exponent": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "RSA public exponent. Present only for RSA keys; values observed in practice are 3, 17, or 65537."
+            }
           },
           "additionalProperties": false
         },

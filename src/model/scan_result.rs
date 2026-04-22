@@ -7,7 +7,7 @@
 //! emitted as plain scalars, never wrapped.
 
 use chrono::{DateTime, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 pub use crate::model::errors::ScannerError;
@@ -728,7 +728,20 @@ pub struct CertificateFacts {
     pub validity_days: i64,
     pub signature_algorithm_oid: String,
     pub signature_algorithm_name: String,
-    pub is_pqc_signature: bool,
+    /// Structured decomposition of the signature-algorithm
+    /// identifier. Lets rule engines key on `(hash, algorithm)`
+    /// pairs without re-implementing an OID table or parsing the
+    /// human-readable `signature_algorithm_name` string.
+    pub signature_algorithm_structured: SignatureAlgorithmStructured,
+    /// Family classification when the signature OID is PQC. One of
+    /// `"ml_dsa"` (FIPS 204), `"slh_dsa"` (FIPS 205), `"composite"`
+    /// (IETF LAMPS composite drafts). `None` for classical
+    /// signatures (RSA/ECDSA/EdDSA) or OIDs outside the recognized
+    /// PQC table. Replaces the earlier `is_pqc_signature: bool` —
+    /// rule engines wanting the old semantics can use
+    /// `pqc_signature_family.is_some()`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pqc_signature_family: Option<String>,
     pub public_key: PublicKey,
     pub embedded_scts: u32,
     pub fingerprint_sha256: String,
@@ -756,6 +769,42 @@ pub struct PublicKey {
     /// updates) should consume this field.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub curve_oid: Option<String>,
+    /// RSA public exponent `e` (RFC 8017 §3.1). Populated only for
+    /// RSA keys. `u64` covers every exponent observed in practice
+    /// (`e = 3`, `e = 17`, `e = 65537`); exotic exponents would
+    /// overflow but are vanishingly rare. Lets rule engines flag
+    /// small-exponent keys (CVE-2006-4339 / Bleichenbacher-flavored
+    /// weaknesses on `e = 3`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rsa_exponent: Option<u64>,
+}
+
+/// Structured decomposition of an X.509 signature-algorithm
+/// identifier (the `AlgorithmIdentifier` at the end of a
+/// TBSCertificate). Emitted alongside
+/// `signature_algorithm_oid` / `signature_algorithm_name` so rule
+/// engines can key on the family + hash without parsing OIDs.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct SignatureAlgorithmStructured {
+    /// Canonical hash family name keyed on the signature OID: one
+    /// of `"sha1"`, `"sha256"`, `"sha384"`, `"sha512"`. `None` when
+    /// the signature scheme handles hashing internally (Ed25519,
+    /// Ed448) or when the hash family isn't determinable from OID
+    /// alone (ML-DSA / SLH-DSA — the scheme name encodes the hash).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hash: Option<String>,
+    /// Canonical algorithm-family name: `"rsa"`, `"rsa_pss"`,
+    /// `"ecdsa"`, `"ed25519"`, `"ed448"`, `"ml_dsa_44"` /
+    /// `"ml_dsa_65"` / `"ml_dsa_87"`, `"slh_dsa_sha2_128s"` etc.
+    /// `"unknown"` for OIDs outside the recognized set.
+    pub algorithm: String,
+    /// Algorithm-specific parameter summary. Populated today for
+    /// RSA-PSS: `"mgf1-sha256"` / `"mgf1-sha384"` / `"mgf1-sha512"`
+    /// / `"rfc4055_defaults"` (when params absent, meaning the RFC
+    /// 4055 §3.1 defaults of SHA-1 + MGF1-SHA1 + 20-byte salt).
+    /// `None` for algorithms without parameterization.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parameters: Option<String>,
 }
 
 /// Trust-relevant observations, kept separate from X.509 facts so wrong-host and

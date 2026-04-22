@@ -771,6 +771,7 @@ fn cert_to_facts(c: &CertificateInfo) -> CertificateFacts {
         size_bits: c.public_key_size,
         curve: c.ecc_curve_name.clone(),
         curve_oid: c.ecc_curve_oid.clone(),
+        rsa_exponent: c.rsa_exponent,
     };
     CertificateFacts {
         subject_cn: extract_cn(&c.subject),
@@ -784,7 +785,8 @@ fn cert_to_facts(c: &CertificateInfo) -> CertificateFacts {
         validity_days: (c.not_after - c.not_before).num_days(),
         signature_algorithm_oid: c.signature_algorithm_oid.clone(),
         signature_algorithm_name: c.signature_algorithm.clone(),
-        is_pqc_signature: c.is_pqc_signature,
+        signature_algorithm_structured: c.signature_algorithm_structured.clone(),
+        pqc_signature_family: c.pqc_signature_family.clone(),
         public_key,
         embedded_scts: c.embedded_scts,
         fingerprint_sha256: c.fingerprint_sha256.clone(),

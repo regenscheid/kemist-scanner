@@ -186,6 +186,22 @@ From [scanner/cert.rs](../src/scanner/cert.rs) and
 - `not_before` / `not_after` as ISO 8601
 - `signature_algorithm_oid` — raw OID string
 - `signature_algorithm_name` — resolved name, falls back to OID for unknowns
+- `signature_algorithm_structured` — decomposition of the signature
+  AlgorithmIdentifier into `{hash, algorithm, parameters}`.
+  `algorithm` is the family in canonical snake-case (`rsa`,
+  `rsa_pss`, `ecdsa`, `ed25519`, `ml_dsa_65`,
+  `slh_dsa_sha2_128s`...). `hash` is the hash family
+  (`sha256` / `sha384` / `sha512` / `sha1`), absent when the scheme
+  hashes internally (Ed25519, Ed448, ML-DSA, SLH-DSA). For RSA-PSS
+  the hash is extracted from the outer `AlgorithmIdentifier.parameters`
+  SEQUENCE (context tag `[0]`); `parameters` field renders
+  `mgf1-<hash>` on success or `rfc4055_defaults` when PSS parameters
+  were omitted (RFC 4055 §3.1 defaults: SHA-1 + MGF1-SHA1).
+- `pqc_signature_family` — present only when the signature OID is
+  PQC. `ml_dsa` for FIPS 204 codepoints
+  (`2.16.840.1.101.3.4.3.{17,18,19}`); `slh_dsa` for FIPS 205
+  codepoints (`.{20..31}` — SHA2 family 20-25, SHAKE family 26-31);
+  `composite` reserved for IETF LAMPS composite-signature drafts.
 - `public_key.curve` / `public_key.curve_oid` — for EC/EdDSA keys,
   the named-curve OID is parsed from `AlgorithmIdentifier.parameters`
   (not inferred from point-length). Distinguishes secp256r1 from
@@ -195,6 +211,10 @@ From [scanner/cert.rs](../src/scanner/cert.rs) and
   authoritative field. Ed25519 / Ed448 use distinct algorithm OIDs
   (`1.3.101.{112,113}`) rather than `id-ecPublicKey + parameters`,
   handled via the algorithm field.
+- `public_key.rsa_exponent` — the RSA public exponent `e` (RFC
+  8017 §3.1), populated only for RSA keys. `u64`-encoded; values
+  observed in practice are `3`, `17`, `65537`. Lets rule engines
+  flag weak small-exponent keys without re-parsing SPKI bytes.
 - `is_pqc_signature` — bool, OID matches ML-DSA (FIPS 204) or SLH-DSA
   (FIPS 205) table. 15-entry OID map in [scanner/cert.rs](../src/scanner/cert.rs).
   Composite/hybrid sig OIDs stubbed for future IETF draft codepoints.

@@ -219,18 +219,18 @@ fn render_certificates(r: &ScanResult) {
     if let Some(cn) = &leaf.issuer_cn {
         kv("issuer_cn", cn);
     }
-    let sig_line = if leaf.is_pqc_signature {
-        format!(
-            "{} ({})  {}",
+    let sig_line = match &leaf.pqc_signature_family {
+        Some(family) => format!(
+            "{} ({})  {} ({})",
             leaf.signature_algorithm_name,
             leaf.signature_algorithm_oid,
-            "PQC".cyan().bold()
-        )
-    } else {
-        format!(
+            "PQC".cyan().bold(),
+            family
+        ),
+        None => format!(
             "{} ({})",
             leaf.signature_algorithm_name, leaf.signature_algorithm_oid
-        )
+        ),
     };
     kv("signature", &sig_line);
     let pk = &leaf.public_key;
