@@ -5,11 +5,15 @@ pub mod groups;
 pub mod hello;
 pub mod http;
 pub mod legacy;
-#[cfg(feature = "legacy-probes")]
-pub mod openssl;
 pub mod probe;
 pub mod runner;
 pub mod sni;
+
+// Backwards-compatible name for the pre-Stage-4d module layout. Existing
+// `crate::scanner::openssl::X` paths resolve through this alias; the
+// entire subsystem now lives under `backends::openssl`.
+#[cfg(feature = "legacy-probes")]
+pub use self::backends::openssl;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
