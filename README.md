@@ -229,22 +229,51 @@ Warnings:
 
 ## 🏗️ Architecture
 
-TLSferret uses a hybrid approach combining two TLS libraries:
+kemist uses a hybrid approach combining two TLS libraries behind a
+unified `TlsBackend` trait:
 
-- **rustls 0.23**: Modern TLS 1.2/1.3 with aws-lc-rs crypto provider and post-quantum support
-- **native-tls 0.2**: Legacy SSL3/TLS 1.0/1.1 support for comprehensive coverage
+- **rustls 0.23 + aws-lc-rs**: modern TLS 1.2/1.3, classical + PQC
+  named groups (X25519MLKEM768, MLKEM768, etc.).
+- **OpenSSL 3.5 LTS (vendored)**: legacy protocol versions
+  (SSLv3/TLS1.0/1.1), legacy cipher suites (RSA-kex, RC4, 3DES,
+  NULL, anon-DH), FFDHE groups, post-handshake probes (renegotiation,
+  session resumption, CertificateRequest, TLS 1.3 EncryptedExtensions).
+  Gated by the `legacy-probes` feature (default on).
+
+A `BackendRegistry` routes each probed codepoint to the single backend
+responsible for it via an explicit per-codepoint priority table. SSLv2
+and Heartbleed are handled separately via raw-socket probes that bypass
+both libraries. See [docs/BACKENDS.md](docs/BACKENDS.md) for how the
+abstraction works and how to plug in a third backend.
 
 ### Project Structure
 ```
 src/
-├── main.rs           # CLI interface and application entry point
-├── scanner.rs        # Core scanning orchestration
-├── legacy_scanner.rs # Legacy protocol support (SSL3, TLS 1.0/1.1)
-├── starttls.rs       # STARTTLS protocol implementations
-├── protocol.rs       # TLS protocol definitions and enums
-├── cipher.rs         # Cipher suite analysis and strength grading
-├── certificate.rs    # X.509 certificate parsing and validation
-└── output.rs         # Result formatting (text, JSON, XML)
+├── main.rs               # CLI entry point + output formatting
+├── lib.rs                # Public API re-exports
+├── model/                # Schema types + TLS enums
+├── output/
+│   └── json.rs           # Schema-v1 JSON emitter
+└── scanner/
+    ├── mod.rs            # SslScanner + scan() orchestration
+    ├── runner.rs         # Multi-target concurrency
+    ├── probe.rs          # Characterization handshake + NegotiatedState
+    ├── cert.rs           # X.509 parsing
+    ├── ciphers.rs        # Rustls per-cipher probe loop
+    ├── groups.rs         # Rustls per-group probe loop
+    ├── hello.rs          # Byte-level ServerHello extension observer
+    ├── http.rs           # HSTS / security.txt / preload list
+    ├── sni.rs            # SNI-omitted comparison probe
+    ├── backends/         # TlsBackend abstraction + concrete backends
+    │   ├── mod.rs        # Trait, HandshakeConstraint, HandshakeResult,
+    │   │                 # BackendInventory, BackendRegistry glue
+    │   ├── registry.rs   # Per-codepoint priority routing
+    │   ├── rustls/       # aws-lc-rs backend
+    │   └── openssl/      # Vendored OpenSSL backend + all legacy
+    │                     # probes, observers, and post-handshake actions
+    └── raw/              # Probes that bypass TLS libraries
+        ├── sslv2.rs      # Hand-crafted SSL 2.0 CLIENT-HELLO
+        └── heartbleed.rs # CVE-2014-0160 via pre-handshake heartbeat
 ```
 
 ## 🔧 Development

@@ -8,8 +8,8 @@ evaluation lives in downstream projects.
 
 | Version | How | Source |
 |---|---|---|
-| SSL 2.0 | Raw TCP + hand-crafted SSL 2.0 CLIENT-HELLO (legacy msg format) | [scanner/legacy.rs::test_sslv2](../src/scanner/legacy.rs) |
-| SSL 3.0 | OpenSSL 3.5 with `min/max = SSL3`, legacy provider + seclevel 0 (with `legacy-probes`). Falls back to native-tls pinned protocol when only `native-legacy` is enabled. | [scanner/openssl/protocol_versions.rs](../src/scanner/openssl/protocol_versions.rs) / [scanner/legacy.rs::test_legacy_protocol](../src/scanner/legacy.rs) |
+| SSL 2.0 | Raw TCP + hand-crafted SSL 2.0 CLIENT-HELLO (legacy msg format) | [scanner/raw/sslv2.rs::probe](../src/scanner/raw/sslv2.rs) |
+| SSL 3.0 | OpenSSL 3.5 with `min/max = SSL3`, legacy provider + seclevel 0 (gated on `legacy-probes`). Dispatched via `BackendRegistry::route_version(Ssl3)` → `OpensslBackend::handshake(version_only)`. | [backends/openssl/protocol_versions.rs](../src/scanner/backends/openssl/protocol_versions.rs) |
 | TLS 1.0 | same path as SSL 3.0 | same |
 | TLS 1.1 | same path as SSL 3.0 | same |
 | TLS 1.2 | rustls with `with_protocol_versions(&[&TLS12])` | [scanner/mod.rs::test_rustls_protocol](../src/scanner/mod.rs) |
@@ -69,19 +69,19 @@ run against a vendored OpenSSL 3.5 LTS (`openssl-src = "=300.5.5"`).
 
 | Observation | How | Output field | Source |
 |---|---|---|---|
-| Legacy cipher suite probe | Per-suite handshake with single-suite cipher list + SECLEVEL=0 + version pinned | `tls.cipher_suites.{tls1_0, tls1_1, tls1_2}[]` entries with `provider: "openssl"` | [openssl/ciphers.rs](../src/scanner/openssl/ciphers.rs) |
-| DH parameter capture | `SSL_get_peer_tmp_key` after every successful DHE handshake; SHA-256 of prime classified against RFC 7919 | `tls.dh_parameters[]` | [openssl/dh_params.rs](../src/scanner/openssl/dh_params.rs) |
-| SKE / CertificateVerify signature | `SSL_ctrl(SSL_CTRL_GET_PEER_SIGNATURE_NAME, …)` post-handshake | `tls.server_key_exchange_signatures[]` | [openssl/ske_sig.rs](../src/scanner/openssl/ske_sig.rs) |
-| Named-group probe (FFDHE + aws-lc-rs gaps) | `set_groups_list(<name>)` × `{TLS 1.2 + DHE cipher list (FFDHE only), TLS 1.3}`; FFDHE rows cross-check observed prime against advertised codepoint. Also covers TLS 1.3 groups aws-lc-rs does not ship: `X448`, `secp521r1`, `MLKEM512`, `MLKEM1024`, `secp384r1MLKEM1024` — those slots override aws-lc-rs `not_probed` with a real observation. | `tls.groups.{tls1_2, tls1_3}.*` entries with `provider: "openssl"` | [openssl/kx_groups.rs](../src/scanner/openssl/kx_groups.rs) |
-| TLS_FALLBACK_SCSV enforcement | Characterize server max → probe one step below with `SslMode::SEND_FALLBACK_SCSV`; expect `inappropriate_fallback` alert | `tls.downgrade_signaling.fallback_scsv_enforced` | [openssl/fallback_scsv.rs](../src/scanner/openssl/fallback_scsv.rs) |
-| Client-initiated renegotiation | TLS 1.2 handshake → `SSL_renegotiate` → `SSL_do_handshake`; observe alert / close / success | `tls.renegotiation_behavior` | [openssl/renegotiation.rs](../src/scanner/openssl/renegotiation.rs) |
-| CertificateRequest capture | `SSL_CTX_set_msg_callback` (via `SSL_CTX_callback_ctrl`) intercepting msg_type 13; parse TLS 1.2 and TLS 1.3 shapes | `tls.client_auth_request` | [openssl/client_auth.rs](../src/scanner/openssl/client_auth.rs) |
-| TLS 1.3 EncryptedExtensions capture | `SSL_CTX_set_msg_callback` intercepts msg_type 8; parser extracts `record_size_limit` (RFC 8449) and `compress_certificate` (RFC 8879). See caveat below. | `tls.extensions.record_size_limit`, `tls.extensions.compress_certificate_algorithms` | [openssl/tls13_extensions.rs](../src/scanner/openssl/tls13_extensions.rs) |
-| Session resumption — TLS 1.2 ticket + rotation | Two sequential TLS 1.2 handshakes with session cache mode `CLIENT`; compare `SSL_SESSION_get_id` across handshakes for rotation proxy | `tls.session_resumption.tls1_2.*` | [openssl/tickets.rs](../src/scanner/openssl/tickets.rs) |
-| Signature-algorithm policy probe | Four constrained handshakes with `SSL_CTX_set1_sigalgs_list` pinned to each constraint family; capture outcome + selected sigalg | `tls.signature_algorithm_policy_probe.*` | [openssl/sigalg_policy.rs](../src/scanner/openssl/sigalg_policy.rs) |
+| Legacy cipher suite probe | Per-suite handshake with single-suite cipher list + SECLEVEL=0 + version pinned | `tls.cipher_suites.{tls1_0, tls1_1, tls1_2}[]` entries with `provider: "openssl"` | [openssl/ciphers.rs](../src/scanner/backends/openssl/ciphers.rs) |
+| DH parameter capture | `SSL_get_peer_tmp_key` after every successful DHE handshake; SHA-256 of prime classified against RFC 7919 | `tls.dh_parameters[]` | [openssl/dh_params.rs](../src/scanner/backends/openssl/dh_params.rs) |
+| SKE / CertificateVerify signature | `SSL_ctrl(SSL_CTRL_GET_PEER_SIGNATURE_NAME, …)` post-handshake | `tls.server_key_exchange_signatures[]` | [openssl/ske_sig.rs](../src/scanner/backends/openssl/ske_sig.rs) |
+| Named-group probe (FFDHE + aws-lc-rs gaps) | `set_groups_list(<name>)` × `{TLS 1.2 + DHE cipher list (FFDHE only), TLS 1.3}`; FFDHE rows cross-check observed prime against advertised codepoint. Also covers TLS 1.3 groups aws-lc-rs does not ship: `X448`, `secp521r1`, `MLKEM512`, `MLKEM1024`, `secp384r1MLKEM1024` — those slots override aws-lc-rs `not_probed` with a real observation. | `tls.groups.{tls1_2, tls1_3}.*` entries with `provider: "openssl"` | [openssl/kx_groups.rs](../src/scanner/backends/openssl/kx_groups.rs) |
+| TLS_FALLBACK_SCSV enforcement | Characterize server max → probe one step below with `SslMode::SEND_FALLBACK_SCSV`; expect `inappropriate_fallback` alert | `tls.downgrade_signaling.fallback_scsv_enforced` | [openssl/fallback_scsv.rs](../src/scanner/backends/openssl/fallback_scsv.rs) |
+| Client-initiated renegotiation | TLS 1.2 handshake → `SSL_renegotiate` → `SSL_do_handshake`; observe alert / close / success | `tls.renegotiation_behavior` | [openssl/renegotiation.rs](../src/scanner/backends/openssl/renegotiation.rs) |
+| CertificateRequest capture | `SSL_CTX_set_msg_callback` (via `SSL_CTX_callback_ctrl`) intercepting msg_type 13; parse TLS 1.2 and TLS 1.3 shapes | `tls.client_auth_request` | [openssl/client_auth.rs](../src/scanner/backends/openssl/client_auth.rs) |
+| TLS 1.3 EncryptedExtensions capture | `SSL_CTX_set_msg_callback` intercepts msg_type 8; parser extracts `record_size_limit` (RFC 8449) and `compress_certificate` (RFC 8879). See caveat below. | `tls.extensions.record_size_limit`, `tls.extensions.compress_certificate_algorithms` | [openssl/tls13_extensions.rs](../src/scanner/backends/openssl/tls13_extensions.rs) |
+| Session resumption — TLS 1.2 ticket + rotation | Two sequential TLS 1.2 handshakes with session cache mode `CLIENT`; compare `SSL_SESSION_get_id` across handshakes for rotation proxy | `tls.session_resumption.tls1_2.*` | [openssl/tickets.rs](../src/scanner/backends/openssl/tickets.rs) |
+| Signature-algorithm policy probe | Four constrained handshakes with `SSL_CTX_set1_sigalgs_list` pinned to each constraint family; capture outcome + selected sigalg | `tls.signature_algorithm_policy_probe.*` | [openssl/sigalg_policy.rs](../src/scanner/backends/openssl/sigalg_policy.rs) |
 
 Error classification for every OpenSSL probe flows through
-[openssl/alerts.rs](../src/scanner/openssl/alerts.rs) — same
+[openssl/alerts.rs](../src/scanner/backends/openssl/alerts.rs) — same
 `tls_alert_<snake_name>` categories as the rustls path, so rule engines
 can key on alert categories without knowing which backend produced them.
 
@@ -152,7 +152,7 @@ Standalone ML-KEM: `MLKEM512` (0x0200), `MLKEM768` (0x0201),
 secp256r1, secp384r1, MLKEM768, X25519MLKEM768, secp256r1MLKEM768). The
 remaining five (`X448`, `secp521r1`, `MLKEM512`, `MLKEM1024`,
 `secp384r1MLKEM1024`) are filled by the OpenSSL named-group probe in
-[openssl/kx_groups.rs](../src/scanner/openssl/kx_groups.rs), which
+[openssl/kx_groups.rs](../src/scanner/backends/openssl/kx_groups.rs), which
 overrides any leftover `not_probed` slot with a real
 `supported: true | false` observation. Entries that carry
 `method: not_probed` after both paths have run identify a codepoint
@@ -249,10 +249,16 @@ itself never negotiates 1.3.
 
 ### Other extension-adjacent observations
 
-- `extensions.heartbeat_echoes_oversized_payload` — active probe from
-  the pre-kemist TLSferret code. Sends a malformed heartbeat with
-  oversized payload length; records whether the server echoed more
-  bytes than we sent. Raw wire signal (not a CVE verdict).
+- `extensions.heartbeat_echoes_oversized_payload` — active Heartbleed
+  (CVE-2014-0160) probe. Sends a raw TLS 1.2 ClientHello advertising
+  the heartbeat extension, reads ServerHello; if the server doesn't
+  echo the heartbeat extension in its reply, emits `false` (not
+  vulnerable, feature not negotiated). Otherwise injects an 8-byte
+  malformed heartbeat record (`18 03 03 00 03 01 40 00`) over
+  plaintext and classifies the response as `true` (vulnerable — server
+  echoed a heartbeat record with >16 bytes of leaked memory) or
+  `false`. `null` with `heartbeat_probe_inconclusive` only for TCP-level
+  failures. Source: [scanner/raw/heartbleed.rs](../src/scanner/raw/heartbleed.rs).
 
 ## SNI behavior probe
 
