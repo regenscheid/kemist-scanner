@@ -69,18 +69,45 @@ impl TlsBackend for OpensslBackend {
         c: HandshakeConstraint,
         ctx: &ProbeContext,
     ) -> Result<HandshakeResult, UnsatisfiableConstraint> {
-        // `sigalgs` pinning still deferred — the sigalg_policy rewrite
-        // needs an IANA-codepoint↔OpenSSL-string mapping that Stage 4b
-        // scopes out.
-        if c.sigalgs.is_some() {
-            return Err(UnsatisfiableConstraint::new(
-                "openssl_backend_sigalgs_pending",
-            ));
-        }
         if c.alpn.is_some() {
             return Err(UnsatisfiableConstraint::new(
                 "openssl_backend_alpn_not_implemented",
             ));
+        }
+
+        // Sigalgs-pinned handshake. The sigalg_policy probes drive four
+        // known codepoint sets; this branch maps them to the canonical
+        // OpenSSL sigalgs strings and wraps `sigalg_policy::probe_blocking`.
+        if let Some(codepoints) = &c.sigalgs {
+            let Some(openssl_string) = iana_sigalgs_to_openssl_string(codepoints) else {
+                return Err(UnsatisfiableConstraint::new(
+                    "openssl_backend_sigalgs_codepoint_set_unknown",
+                ));
+            };
+            let hostname_owned = ctx.hostname.clone();
+            let target = ctx.target;
+            let connect_timeout = ctx.connect_timeout;
+            let handshake_timeout = ctx.handshake_timeout;
+            let probe = tokio::task::spawn_blocking(move || {
+                crate::scanner::openssl::sigalg_policy::probe_blocking(
+                    openssl_string,
+                    target,
+                    &hostname_owned,
+                    connect_timeout,
+                    handshake_timeout,
+                )
+            })
+            .await
+            .unwrap_or_else(|e| {
+                use crate::model::scan_result::{ConstrainedProbeResult, Method, SigalgOutcome};
+                ConstrainedProbeResult {
+                    outcome: SigalgOutcome::NotProbed,
+                    method: Method::Error,
+                    reason: Some(format!("spawn_blocking_panic:{e}")),
+                    ..Default::default()
+                }
+            });
+            return Ok(sigalg_constrained_to_handshake_result(probe));
         }
         // `seclevel_zero` is always applied to the OpenSSL probes
         // already (`set_security_level(0)` is baked into the context
@@ -246,6 +273,80 @@ fn ssl_to_tls_version(v: openssl::ssl::SslVersion) -> Option<TlsVersion> {
     } else {
         None
     }
+}
+
+/// Map the four sigalg-policy IANA codepoint sets to the canonical
+/// OpenSSL sigalgs-list strings. OpenSSL's `SSL_CTX_set1_sigalgs_list`
+/// uses a custom string format (e.g. `"RSA-PSS+SHA256:ECDSA+SHA256"`)
+/// that doesn't accept raw IANA codepoints, so this helper recognizes
+/// the four sets `sigalg_policy` drives and translates. Unknown sets
+/// surface as `UnsatisfiableConstraint` — adding new sigalg families
+/// is a deliberate update rather than a silent mismatch.
+fn iana_sigalgs_to_openssl_string(codepoints: &[u16]) -> Option<&'static str> {
+    use std::collections::HashSet;
+    let set: HashSet<u16> = codepoints.iter().copied().collect();
+
+    // sha256_plus_only — RSA-PSS, RSA-PKCS1, ECDSA, all with SHA-256+.
+    let sha256_plus: HashSet<u16> = [0x0401, 0x0501, 0x0601, 0x0403, 0x0503, 0x0603, 0x0804, 0x0805, 0x0806]
+        .into_iter()
+        .collect();
+    let ecdsa_only: HashSet<u16> = [0x0403, 0x0503, 0x0603].into_iter().collect();
+    let rsa_pss_only: HashSet<u16> = [0x0804, 0x0805, 0x0806].into_iter().collect();
+    let rsa_pkcs1_only: HashSet<u16> = [0x0401, 0x0501, 0x0601].into_iter().collect();
+
+    if set == sha256_plus {
+        Some(concat!(
+            "RSA-PSS+SHA256:RSA-PSS+SHA384:RSA-PSS+SHA512:",
+            "RSA+SHA256:RSA+SHA384:RSA+SHA512:",
+            "ECDSA+SHA256:ECDSA+SHA384:ECDSA+SHA512"
+        ))
+    } else if set == ecdsa_only {
+        Some("ECDSA+SHA256:ECDSA+SHA384:ECDSA+SHA512")
+    } else if set == rsa_pss_only {
+        Some("RSA-PSS+SHA256:RSA-PSS+SHA384:RSA-PSS+SHA512")
+    } else if set == rsa_pkcs1_only {
+        Some("RSA+SHA256:RSA+SHA384:RSA+SHA512")
+    } else {
+        None
+    }
+}
+
+/// Fold the rich `ConstrainedProbeResult` produced by
+/// `sigalg_policy::probe_blocking` into a `HandshakeResult`. The
+/// `outcome` axis maps straightforwardly; the method-vs-probe
+/// distinction the old code carried in `method` / `reason` is
+/// preserved through specific Error-string prefixes that the composer
+/// pattern-matches to recover the original method. Schema-visible
+/// fields (`selected_sigalg`, `alert`) round-trip losslessly.
+fn sigalg_constrained_to_handshake_result(
+    r: crate::model::scan_result::ConstrainedProbeResult,
+) -> HandshakeResult {
+    use crate::model::scan_result::{Method, SigalgOutcome};
+    let outcome = match (&r.outcome, &r.method) {
+        (SigalgOutcome::HandshakeComplete, _) => HandshakeOutcome::Supported,
+        (SigalgOutcome::HandshakeFailure, _) | (SigalgOutcome::OtherAlert, _) => {
+            HandshakeOutcome::NotSupported
+        }
+        // Wire-level failures (tcp_connect etc.) and probe-setup failures
+        // both fold into Error here. The composer uses `method` + the
+        // reason string's prefix to recover which kind it was.
+        (SigalgOutcome::ConnectionClosed, _) | (SigalgOutcome::NotProbed, Method::Probe) => {
+            HandshakeOutcome::Error(r.reason.clone().unwrap_or_default())
+        }
+        (SigalgOutcome::NotProbed, _) => {
+            // Setup failures marked as NotProbed + Error. Tag the Error
+            // message with a `setup:` prefix so the composer can
+            // distinguish from wire-level failures.
+            HandshakeOutcome::Error(format!(
+                "setup:{}",
+                r.reason.clone().unwrap_or_default()
+            ))
+        }
+    };
+    let mut hr = HandshakeResult::outcome_only(outcome);
+    hr.alert = r.alert;
+    hr.ske_signature_name = r.selected_sigalg;
+    hr
 }
 
 /// Fold an SCSV `ProbeOutcome` into a `HandshakeResult`. The composer

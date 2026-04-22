@@ -54,7 +54,7 @@ pub async fn probe(
 
     let sha256_plus_only = run_one(
         NAME_SHA256_PLUS_ONLY,
-        sha256_plus_only_sigalgs(),
+        SHA256_PLUS_ONLY_CODEPOINTS,
         target,
         hostname,
         connect_timeout,
@@ -64,7 +64,7 @@ pub async fn probe(
     .await;
     let ecdsa_only = run_one(
         NAME_ECDSA_ONLY,
-        ecdsa_only_sigalgs(),
+        ECDSA_ONLY_CODEPOINTS,
         target,
         hostname,
         connect_timeout,
@@ -74,7 +74,7 @@ pub async fn probe(
     .await;
     let rsa_pss_only = run_one(
         NAME_RSA_PSS_ONLY,
-        rsa_pss_only_sigalgs(),
+        RSA_PSS_ONLY_CODEPOINTS,
         target,
         hostname,
         connect_timeout,
@@ -84,7 +84,7 @@ pub async fn probe(
     .await;
     let rsa_pkcs1_only = run_one(
         NAME_RSA_PKCS1_ONLY,
-        rsa_pkcs1_only_sigalgs(),
+        RSA_PKCS1_ONLY_CODEPOINTS,
         target,
         hostname,
         connect_timeout,
@@ -102,7 +102,7 @@ pub async fn probe(
 
 async fn run_one(
     name: &'static str,
-    sigalgs: &'static str,
+    codepoints: &'static [u16],
     target: SocketAddr,
     hostname: &str,
     connect_timeout: Duration,
@@ -118,27 +118,89 @@ async fn run_one(
         };
     }
 
-    let hostname_owned = hostname.to_string();
-    let result = tokio::task::spawn_blocking(move || {
-        probe_blocking(
-            sigalgs,
-            target,
-            &hostname_owned,
-            connect_timeout,
-            handshake_timeout,
-        )
-    })
-    .await;
+    // Compose the probe over `OpensslBackend::handshake(sigalgs: ...)`.
+    // The backend drives `probe_blocking` internally and folds its
+    // `ConstrainedProbeResult` into a `HandshakeResult`; this composer
+    // unfolds it back so schema-visible shape is preserved exactly.
+    use crate::model::protocol::TlsVersion;
+    use crate::scanner::backends::{
+        BackendRegistry, HandshakeConstraint, HandshakeOutcome, ProbeContext, TlsBackend,
+    };
+    let registry = BackendRegistry::new();
+    let ctx = ProbeContext {
+        target,
+        hostname: hostname.to_string(),
+        connect_timeout,
+        handshake_timeout,
+    };
+    let constraint = HandshakeConstraint {
+        sigalgs: Some(codepoints.to_vec()),
+        version_range: Some((TlsVersion::Tls12, TlsVersion::Tls13)),
+        seclevel_zero: true,
+        ..Default::default()
+    };
 
-    result.unwrap_or_else(|e| {
-        debug!("sigalg policy probe panic ({name}): {e}");
-        ConstrainedProbeResult {
+    let hr = match registry.openssl.handshake(constraint, &ctx).await {
+        Ok(r) => r,
+        Err(u) => {
+            debug!("sigalg probe unsatisfiable ({name}): {}", u.reason);
+            return ConstrainedProbeResult {
+                outcome: SigalgOutcome::NotProbed,
+                method: Method::Error,
+                reason: Some(format!("unsatisfiable:{}", u.reason)),
+                ..Default::default()
+            };
+        }
+    };
+
+    // Reverse-map HandshakeResult → ConstrainedProbeResult. The
+    // backend's forward mapping encoded the `method` distinction via
+    // an Error-string prefix (`setup:...` for probe-setup failures,
+    // raw otherwise for wire-level failures like `tcp_connect:...`).
+    match hr.outcome {
+        HandshakeOutcome::Supported => ConstrainedProbeResult {
+            outcome: SigalgOutcome::HandshakeComplete,
+            selected_sigalg: hr.ske_signature_name,
+            alert: None,
+            method: Method::Probe,
+            reason: None,
+        },
+        HandshakeOutcome::NotSupported => {
+            let cat = hr.alert.unwrap_or_default();
+            let (outcome, alert) = classify_failure(&cat);
+            ConstrainedProbeResult {
+                outcome,
+                selected_sigalg: None,
+                alert,
+                method: Method::Probe,
+                reason: Some(cat),
+            }
+        }
+        HandshakeOutcome::Error(msg) => {
+            if let Some(stripped) = msg.strip_prefix("setup:") {
+                ConstrainedProbeResult {
+                    outcome: SigalgOutcome::NotProbed,
+                    method: Method::Error,
+                    reason: Some(stripped.to_string()),
+                    ..Default::default()
+                }
+            } else {
+                // Wire-level failure — TCP connect, unexpected close.
+                ConstrainedProbeResult {
+                    outcome: SigalgOutcome::ConnectionClosed,
+                    method: Method::Probe,
+                    reason: Some(msg),
+                    ..Default::default()
+                }
+            }
+        }
+        other => ConstrainedProbeResult {
             outcome: SigalgOutcome::NotProbed,
             method: Method::Error,
-            reason: Some(format!("spawn_blocking_panic:{e}")),
+            reason: Some(format!("unexpected_handshake_outcome:{:?}", other)),
             ..Default::default()
-        }
-    })
+        },
+    }
 }
 
 /// Synchronous sigalg-pinned handshake. `pub(crate)` so
@@ -261,37 +323,29 @@ fn build_context(sigalgs: &str) -> Result<SslContext, openssl::error::ErrorStack
     Ok(builder.build())
 }
 
-/// SHA-256+ only — every sigalg in our offer has SHA-256, SHA-384, or
-/// SHA-512. This reveals servers whose cert chain signs with SHA-1
-/// (or worse) because they won't find a compatible sigalg.
-fn sha256_plus_only_sigalgs() -> &'static str {
-    concat!(
-        // RSA-PSS (RFC 8446 / RFC 8017)
-        "RSA-PSS+SHA256:RSA-PSS+SHA384:RSA-PSS+SHA512:",
-        // RSA PKCS#1 v1.5
-        "RSA+SHA256:RSA+SHA384:RSA+SHA512:",
-        // ECDSA
-        "ECDSA+SHA256:ECDSA+SHA384:ECDSA+SHA512"
-    )
-}
+// IANA signature_algorithms codepoints per RFC 8446 §4.2.3. The
+// backend's `iana_sigalgs_to_openssl_string` helper recognizes these
+// exact sets and translates to OpenSSL's `set_sigalgs_list` format.
+
+/// SHA-256+ only — RSA-PKCS1, ECDSA, and RSA-PSS (rsae) with SHA-256/384/512.
+/// Reveals servers whose cert chain signs with SHA-1 (or worse).
+const SHA256_PLUS_ONLY_CODEPOINTS: &[u16] = &[
+    0x0401, 0x0501, 0x0601, // rsa_pkcs1_sha256/384/512
+    0x0403, 0x0503, 0x0603, // ecdsa_secp{256r1,384r1,521r1}_sha{256,384,512}
+    0x0804, 0x0805, 0x0806, // rsa_pss_rsae_sha256/384/512
+];
 
 /// ECDSA-only. Reveals RSA-cert-only deployments.
-fn ecdsa_only_sigalgs() -> &'static str {
-    "ECDSA+SHA256:ECDSA+SHA384:ECDSA+SHA512"
-}
+const ECDSA_ONLY_CODEPOINTS: &[u16] = &[0x0403, 0x0503, 0x0603];
 
 /// RSA-PSS-only. Reveals servers that can't or won't sign with PSS
 /// (i.e. PKCS#1 v1.5-only servers).
-fn rsa_pss_only_sigalgs() -> &'static str {
-    "RSA-PSS+SHA256:RSA-PSS+SHA384:RSA-PSS+SHA512"
-}
+const RSA_PSS_ONLY_CODEPOINTS: &[u16] = &[0x0804, 0x0805, 0x0806];
 
 /// RSA-PKCS1v1.5-only. Reveals servers that mandate PSS (modern
 /// posture — a response of `handshake_failure` is the "good" signal
 /// for this probe).
-fn rsa_pkcs1_only_sigalgs() -> &'static str {
-    "RSA+SHA256:RSA+SHA384:RSA+SHA512"
-}
+const RSA_PKCS1_ONLY_CODEPOINTS: &[u16] = &[0x0401, 0x0501, 0x0601];
 
 #[cfg(test)]
 mod tests {
@@ -319,17 +373,18 @@ mod tests {
     }
 
     #[test]
-    fn sigalgs_strings_are_colon_separated() {
-        // Ensure each constraint string at least contains the
-        // expected algorithm family name; guards against typos in
-        // the hand-built strings.
-        assert!(sha256_plus_only_sigalgs().contains("RSA-PSS+SHA256"));
-        assert!(sha256_plus_only_sigalgs().contains("ECDSA+SHA256"));
-        assert!(ecdsa_only_sigalgs().starts_with("ECDSA+SHA256"));
-        assert!(!ecdsa_only_sigalgs().contains("RSA"));
-        assert!(rsa_pss_only_sigalgs().starts_with("RSA-PSS+SHA256"));
-        assert!(!rsa_pss_only_sigalgs().contains("ECDSA"));
-        assert!(rsa_pkcs1_only_sigalgs().starts_with("RSA+SHA256"));
-        assert!(!rsa_pkcs1_only_sigalgs().contains("RSA-PSS"));
+    fn codepoint_families_cover_expected_iana_values() {
+        // Guard against typos in the hand-coded IANA values.
+        // RFC 8446 §4.2.3 codepoint mapping.
+        assert!(SHA256_PLUS_ONLY_CODEPOINTS.contains(&0x0804)); // rsa_pss_rsae_sha256
+        assert!(SHA256_PLUS_ONLY_CODEPOINTS.contains(&0x0403)); // ecdsa_*_sha256
+        assert!(SHA256_PLUS_ONLY_CODEPOINTS.contains(&0x0401)); // rsa_pkcs1_sha256
+        assert_eq!(SHA256_PLUS_ONLY_CODEPOINTS.len(), 9);
+
+        assert_eq!(ECDSA_ONLY_CODEPOINTS, &[0x0403, 0x0503, 0x0603]);
+        assert!(ECDSA_ONLY_CODEPOINTS.iter().all(|c| (c & 0xFF) == 0x03));
+
+        assert_eq!(RSA_PSS_ONLY_CODEPOINTS, &[0x0804, 0x0805, 0x0806]);
+        assert_eq!(RSA_PKCS1_ONLY_CODEPOINTS, &[0x0401, 0x0501, 0x0601]);
     }
 }
