@@ -346,7 +346,26 @@ rustls+webpki-roots.
 - **HSTS** — `HEAD /` + parse `Strict-Transport-Security` header. Raw
   value, parsed `max-age`, `includeSubDomains`, `preload` directives.
 - **security.txt** — `GET /.well-known/security.txt`. Body emitted
-  verbatim, **not parsed**.
+  verbatim AND parsed per RFC 9116 into `contact[]`, `expires`,
+  `encryption[]`, `preferred_languages[]`, `canonical[]`, `policy[]`,
+  `hiring[]`, `acknowledgments[]`, `pgp_signed: bool`. Multiple
+  occurrences of a directive are retained in order. Comments
+  (`#`-prefixed lines) and unknown directives ignored. PGP signature
+  blocks detected by sentinel strings — no signature validation.
+- **Security headers** — piggybacks on the HEAD / request used for
+  HSTS. Raw values captured for: `Content-Security-Policy` (+
+  `-Report-Only` variant), `X-Frame-Options`, `X-Content-Type-Options`,
+  `Referrer-Policy`, `Permissions-Policy`, `Cross-Origin-Opener-Policy`
+  / `-Embedder-Policy` / `-Resource-Policy`, `Reporting-Endpoints`
+  (falls back to legacy `Report-To` when new header absent).
+  `Set-Cookie` structured into `{name, secure, http_only, same_site}`
+  per cookie; cookie **values are deliberately omitted** to avoid
+  capturing session tokens.
+- **Redirect chain** — `GET /` followed manually (not via
+  `Policy::limited`) up to 10 hops. Each hop captures the request
+  URL, HTTP status, and `Location` target. The terminal entry has a
+  non-3xx status and no `location`. A `status: 0` entry indicates a
+  transport-level failure (DNS / TCP / TLS) at that hop.
 - **Preload list** — static 12-entry lookup covering `github.com`,
   `paypal.com`, `reddit.com`, `cisa.gov`, `mozilla.org`, `wikipedia.org`,
   `twitter.com`, `gov.uk`, `example.com`, `cloudflare.com`, and two

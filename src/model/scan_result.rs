@@ -837,6 +837,17 @@ pub struct Http {
     pub preload_list_status: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub security_txt: Option<SecurityTxt>,
+    /// Security-related response headers beyond HSTS — CSP / XFO /
+    /// referrer-policy / permissions-policy / cross-origin family /
+    /// Set-Cookie flag observations. `None` when HTTP checks didn't
+    /// run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub security_headers: Option<SecurityHeadersOutput>,
+    /// Redirect chain observed via `GET /` (up to 10 hops). Each
+    /// entry carries the request URL, status, and `Location` target.
+    /// `None` when HTTP checks didn't run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub redirect_chain: Option<Vec<RedirectHopOutput>>,
 }
 
 #[derive(Serialize, Debug, Clone)]
@@ -861,4 +872,81 @@ pub struct SecurityTxt {
     pub content_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub body: Option<String>,
+    /// Structured RFC 9116 parse — fields by directive name.
+    /// `None` when the body yielded no recognized directives.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parsed: Option<SecurityTxtParsedOutput>,
+}
+
+/// Structured representation of the RFC 9116 security.txt body —
+/// each field holds the set of values observed for that directive.
+#[derive(Serialize, Debug, Clone, Default)]
+pub struct SecurityTxtParsedOutput {
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub contact: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub encryption: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub preferred_languages: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub canonical: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub policy: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub hiring: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub acknowledgments: Vec<String>,
+    pub pgp_signed: bool,
+}
+
+/// Security-related HTTP response headers. Raw values for
+/// CSP/XFO/etc.; structured for Set-Cookie (name + security flags,
+/// cookie values deliberately excluded to avoid capturing session
+/// material).
+#[derive(Serialize, Debug, Clone, Default)]
+pub struct SecurityHeadersOutput {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_security_policy: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_security_policy_report_only: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub x_frame_options: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub x_content_type_options: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub referrer_policy: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub permissions_policy: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cross_origin_opener_policy: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cross_origin_embedder_policy: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cross_origin_resource_policy: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reporting_endpoints: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub set_cookies: Vec<CookieFlagsOutput>,
+}
+
+/// Per-cookie security flag observation. Cookie value intentionally
+/// absent — see [`crate::scanner::http::CookieObservation`].
+#[derive(Serialize, Debug, Clone, Default)]
+pub struct CookieFlagsOutput {
+    pub name: String,
+    pub secure: bool,
+    pub http_only: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub same_site: Option<String>,
+}
+
+/// One hop in the observed redirect chain.
+#[derive(Serialize, Debug, Clone, Default)]
+pub struct RedirectHopOutput {
+    pub url: String,
+    pub status: u16,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub location: Option<String>,
 }

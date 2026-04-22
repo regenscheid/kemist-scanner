@@ -524,11 +524,47 @@ field as "HTTP checks not in scope for this record."
   enabled: true,
   hsts?: {header_present, raw_value?, max_age?, include_subdomains?, preload?},
   preload_list_status?: "included" | "not_included",
-  security_txt?: {present, url?, content_type?, body?}
+  security_txt?: {present, url?, content_type?, body?, parsed?},
+  security_headers?: {
+    content_security_policy?, content_security_policy_report_only?,
+    x_frame_options?, x_content_type_options?,
+    referrer_policy?, permissions_policy?,
+    cross_origin_opener_policy?, cross_origin_embedder_policy?,
+    cross_origin_resource_policy?,
+    reporting_endpoints?,
+    set_cookies: [{name, secure, http_only, same_site?}, ...]
+  },
+  redirect_chain?: [{url, status, location?}, ...]
 }
 ```
 
-`security_txt.body` is emitted verbatim — not parsed.
+**`security_txt`.** `body` is the verbatim response text (subject
+to reqwest's default text decoding). `parsed` adds an RFC 9116
+structural decomposition: `contact[]` (required by spec; one or
+more URL/email entries), `expires` (ISO 8601 string, preserved
+as-is — downstream rule engines compare against current time),
+`encryption[]`, `preferred_languages[]`, `canonical[]`, `policy[]`,
+`hiring[]`, `acknowledgments[]`, `pgp_signed: bool` (presence of a
+PGP cleartext-signature block; no signature validation).
+`parsed` is absent when the body yielded no recognized directives.
+
+**`security_headers`.** Raw header values captured from the HEAD /
+response. Absent fields mean the header wasn't sent. CSP /
+frame-options / referrer-policy etc. are raw strings so rule
+engines can apply their own directive-level policies.
+`reporting_endpoints` surfaces `Reporting-Endpoints` when present,
+falling back to the legacy `Report-To` header. `set_cookies[]`
+captures per-cookie security-flag observations (`secure`,
+`http_only`, `same_site`) — **cookie values are intentionally
+omitted** to avoid capturing session tokens or other sensitive
+material in observation output.
+
+**`redirect_chain`.** Hops observed when fetching `GET /` with
+redirect-following enabled, bounded at 10 hops. Each entry carries
+the request URL, HTTP status, and `Location` target for that hop.
+The terminal entry has a non-3xx status and `location` absent.
+A `status: 0` entry indicates a transport-level failure
+(DNS / TCP / TLS) at that hop.
 
 ### `raw_handshakes` (optional, reserved)
 Reserved for a future `--include-raw-handshake` flag that captures

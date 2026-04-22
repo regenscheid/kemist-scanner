@@ -354,7 +354,80 @@
         "enabled": { "type": "boolean" },
         "hsts": { "type": "object" },
         "preload_list_status": { "type": "string" },
-        "security_txt": { "type": "object" }
+        "security_txt": {
+          "type": "object",
+          "properties": {
+            "present": { "type": "boolean" },
+            "url": { "type": "string" },
+            "content_type": { "type": "string" },
+            "body": { "type": "string" },
+            "parsed": {
+              "type": "object",
+              "description": "Structured RFC 9116 decomposition. Each directive's values are collected in order of appearance.",
+              "properties": {
+                "contact": { "type": "array", "items": { "type": "string" } },
+                "expires": { "type": "string" },
+                "encryption": { "type": "array", "items": { "type": "string" } },
+                "preferred_languages": { "type": "array", "items": { "type": "string" } },
+                "canonical": { "type": "array", "items": { "type": "string" } },
+                "policy": { "type": "array", "items": { "type": "string" } },
+                "hiring": { "type": "array", "items": { "type": "string" } },
+                "acknowledgments": { "type": "array", "items": { "type": "string" } },
+                "pgp_signed": { "type": "boolean" }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        "security_headers": {
+          "type": "object",
+          "description": "HTTP response headers beyond HSTS — CSP, frame-options, referrer-policy, permissions-policy, cross-origin family, Set-Cookie flags. Raw values preserved; cookie values intentionally omitted (potential session-token leak).",
+          "properties": {
+            "content_security_policy": { "type": "string" },
+            "content_security_policy_report_only": { "type": "string" },
+            "x_frame_options": { "type": "string" },
+            "x_content_type_options": { "type": "string" },
+            "referrer_policy": { "type": "string" },
+            "permissions_policy": { "type": "string" },
+            "cross_origin_opener_policy": { "type": "string" },
+            "cross_origin_embedder_policy": { "type": "string" },
+            "cross_origin_resource_policy": { "type": "string" },
+            "reporting_endpoints": { "type": "string" },
+            "set_cookies": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["name", "secure", "http_only"],
+                "properties": {
+                  "name": { "type": "string" },
+                  "secure": { "type": "boolean" },
+                  "http_only": { "type": "boolean" },
+                  "same_site": {
+                    "type": "string",
+                    "description": "Canonical values: `Strict`, `Lax`, `None`. Other strings preserved as-sent."
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        "redirect_chain": {
+          "type": "array",
+          "description": "Observed redirect chain for GET /, up to 10 hops. Terminal entry has a non-3xx status and no location.",
+          "items": {
+            "type": "object",
+            "required": ["url", "status"],
+            "properties": {
+              "url": { "type": "string" },
+              "status": { "type": "integer", "minimum": 0, "maximum": 599 },
+              "location": { "type": "string" }
+            },
+            "additionalProperties": false
+          }
+        }
       },
       "additionalProperties": false
     },

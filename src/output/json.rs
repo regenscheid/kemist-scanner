@@ -88,11 +88,62 @@ fn build_http(results: &ScanResults) -> Option<Http> {
             preload: h.preload,
         }),
         preload_list_status: obs.preload_list_status.clone(),
-        security_txt: obs.security_txt.as_ref().map(|s| SecurityTxt {
-            present: s.present,
-            url: s.url.clone(),
-            content_type: s.content_type.clone(),
-            body: s.body.clone(),
+        security_txt: obs.security_txt.as_ref().map(|s| {
+            use crate::model::scan_result::SecurityTxtParsedOutput;
+            SecurityTxt {
+                present: s.present,
+                url: s.url.clone(),
+                content_type: s.content_type.clone(),
+                body: s.body.clone(),
+                parsed: s.parsed.as_ref().map(|p| SecurityTxtParsedOutput {
+                    contact: p.contact.clone(),
+                    expires: p.expires.clone(),
+                    encryption: p.encryption.clone(),
+                    preferred_languages: p.preferred_languages.clone(),
+                    canonical: p.canonical.clone(),
+                    policy: p.policy.clone(),
+                    hiring: p.hiring.clone(),
+                    acknowledgments: p.acknowledgments.clone(),
+                    pgp_signed: p.pgp_signed,
+                }),
+            }
+        }),
+        security_headers: obs.security_headers.as_ref().map(|h| {
+            use crate::model::scan_result::{CookieFlagsOutput, SecurityHeadersOutput};
+            SecurityHeadersOutput {
+                content_security_policy: h.content_security_policy.clone(),
+                content_security_policy_report_only: h
+                    .content_security_policy_report_only
+                    .clone(),
+                x_frame_options: h.x_frame_options.clone(),
+                x_content_type_options: h.x_content_type_options.clone(),
+                referrer_policy: h.referrer_policy.clone(),
+                permissions_policy: h.permissions_policy.clone(),
+                cross_origin_opener_policy: h.cross_origin_opener_policy.clone(),
+                cross_origin_embedder_policy: h.cross_origin_embedder_policy.clone(),
+                cross_origin_resource_policy: h.cross_origin_resource_policy.clone(),
+                reporting_endpoints: h.reporting_endpoints.clone(),
+                set_cookies: h
+                    .set_cookies
+                    .iter()
+                    .map(|c| CookieFlagsOutput {
+                        name: c.name.clone(),
+                        secure: c.secure,
+                        http_only: c.http_only,
+                        same_site: c.same_site.clone(),
+                    })
+                    .collect(),
+            }
+        }),
+        redirect_chain: obs.redirect_chain.as_ref().map(|hops| {
+            use crate::model::scan_result::RedirectHopOutput;
+            hops.iter()
+                .map(|h| RedirectHopOutput {
+                    url: h.url.clone(),
+                    status: h.status,
+                    location: h.location.clone(),
+                })
+                .collect()
         }),
     })
 }
