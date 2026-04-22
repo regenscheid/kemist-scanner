@@ -468,6 +468,63 @@ const TARGETS: &[Target] = &[
         iana_code: 0x0005,
         version: TlsVersion::Tls10,
     },
+    // --- SSL 3.0 per-cipher probes ---
+    // Version-level SSL3 probing lands in `protocol_versions.rs`; these
+    // entries add per-suite visibility so rule engines can distinguish
+    // "server rejects SSL3 entirely" from "server accepts SSL3 but
+    // negotiates CBC (POODLE-vulnerable cipher class)." Same driver as
+    // the TLS 1.0/1.1 rows — `probe_single_suite_blocking` passes
+    // `SslVersion::SSL3` through via `tls_version_to_ossl`, and the
+    // seclevel=0 + legacy-provider setup already applied to TLS 1.0
+    // handshakes covers these codepoints too.
+    Target {
+        iana_name: "TLS_RSA_WITH_AES_128_CBC_SHA",
+        openssl_name: "AES128-SHA",
+        iana_code: 0x002F,
+        version: TlsVersion::Ssl3,
+    },
+    Target {
+        iana_name: "TLS_RSA_WITH_AES_256_CBC_SHA",
+        openssl_name: "AES256-SHA",
+        iana_code: 0x0035,
+        version: TlsVersion::Ssl3,
+    },
+    Target {
+        iana_name: "TLS_RSA_WITH_3DES_EDE_CBC_SHA",
+        openssl_name: "DES-CBC3-SHA",
+        iana_code: 0x000A,
+        version: TlsVersion::Ssl3,
+    },
+    Target {
+        iana_name: "TLS_RSA_WITH_RC4_128_SHA",
+        openssl_name: "RC4-SHA",
+        iana_code: 0x0005,
+        version: TlsVersion::Ssl3,
+    },
+    Target {
+        iana_name: "TLS_RSA_WITH_RC4_128_MD5",
+        openssl_name: "RC4-MD5",
+        iana_code: 0x0004,
+        version: TlsVersion::Ssl3,
+    },
+    Target {
+        iana_name: "TLS_RSA_WITH_DES_CBC_SHA",
+        openssl_name: "DES-CBC-SHA",
+        iana_code: 0x0009,
+        version: TlsVersion::Ssl3,
+    },
+    Target {
+        iana_name: "TLS_RSA_EXPORT_WITH_RC4_40_MD5",
+        openssl_name: "EXP-RC4-MD5",
+        iana_code: 0x0003,
+        version: TlsVersion::Ssl3,
+    },
+    Target {
+        iana_name: "TLS_NULL_WITH_NULL_NULL",
+        openssl_name: "NULL-MD5",
+        iana_code: 0x0001,
+        version: TlsVersion::Ssl3,
+    },
 ];
 
 /// Emit this backend's cipher inventory as `(iana_code, iana_name, version)`
@@ -869,15 +926,19 @@ mod tests {
     }
 
     #[test]
-    fn target_table_restricts_versions_to_tls10_through_tls12() {
-        // This probe's scope is TLS 1.0/1.1/1.2. SSLv3 is handled by
-        // `protocol_versions.rs`; TLS 1.3 has no legacy-cipher
-        // observables that OpenSSL adds over aws-lc-rs.
+    fn target_table_restricts_versions_to_ssl3_through_tls12() {
+        // This probe's scope is SSL 3.0 / TLS 1.0 / TLS 1.1 / TLS 1.2.
+        // SSLv2 is handled by the raw-socket probe in `raw/sslv2.rs`;
+        // TLS 1.3 has no legacy-cipher observables that OpenSSL adds
+        // over aws-lc-rs.
         for t in TARGETS {
             assert!(
                 matches!(
                     t.version,
-                    TlsVersion::Tls10 | TlsVersion::Tls11 | TlsVersion::Tls12
+                    TlsVersion::Ssl3
+                        | TlsVersion::Tls10
+                        | TlsVersion::Tls11
+                        | TlsVersion::Tls12
                 ),
                 "target {} has out-of-scope version {:?}",
                 t.iana_name,

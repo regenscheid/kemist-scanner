@@ -270,9 +270,11 @@ fn build_negotiated_from_state(results: &ScanResults) -> Option<TlsNegotiated> {
 fn build_cipher_suites(results: &ScanResults) -> TlsCipherSuites {
     // One canonical place for every probed cipher suite, partitioned by
     // TLS version. aws-lc-rs modern probes land in tls1_2/tls1_3;
-    // OpenSSL legacy probes land in tls1_0/tls1_1/tls1_2 (all tagged
-    // with `provider` so consumers who care about backend attribution
-    // can filter).
+    // OpenSSL legacy probes land in ssl3/tls1_0/tls1_1/tls1_2;
+    // SSLv2 cipher specs echoed back in the raw-socket SERVER-HELLO
+    // land in ssl2. All entries carry `provider` so consumers who
+    // care about backend attribution can filter.
+    let mut ssl3 = Vec::new();
     let mut tls1_0 = Vec::new();
     let mut tls1_1 = Vec::new();
     let mut tls1_2 = Vec::new();
@@ -321,9 +323,23 @@ fn build_cipher_suites(results: &ScanResults) -> TlsCipherSuites {
 
     // OpenSSL legacy probes. Feature-gated — entirely absent when
     // `legacy-probes` is compiled off, leaving just aws-lc-rs entries.
-    merge_openssl_cipher_probes(results, &mut tls1_0, &mut tls1_1, &mut tls1_2);
+    merge_openssl_cipher_probes(
+        results,
+        &mut ssl3,
+        &mut tls1_0,
+        &mut tls1_1,
+        &mut tls1_2,
+    );
+
+    // SSLv2 SERVER-HELLO cipher specs (raw-socket probe). Populated
+    // only on servers that still answer SSLv2 — effectively zero
+    // today. Each entry is `supported: Some(true)` because SSLv2's
+    // SERVER-HELLO explicitly lists accepted ciphers from our offer.
+    let ssl2 = build_sslv2_cipher_entries(results);
 
     TlsCipherSuites {
+        ssl2,
+        ssl3,
         tls1_0,
         tls1_1,
         tls1_2,
@@ -332,8 +348,28 @@ fn build_cipher_suites(results: &ScanResults) -> TlsCipherSuites {
     }
 }
 
+fn build_sslv2_cipher_entries(results: &ScanResults) -> Vec<CipherSuiteEntry> {
+    let Some(obs) = results.sslv2_observation.as_ref() else {
+        return Vec::new();
+    };
+    obs.ciphers_observed
+        .iter()
+        .map(|c| CipherSuiteEntry {
+            classification: crate::model::cipher_classification::CipherClassification::Other,
+            name: c.name.clone(),
+            iana_code: format!("0x{:06X}", c.code),
+            supported: Some(true),
+            method: Method::Probe,
+            reason: None,
+            openssl_name: None,
+            provider: Some("raw_socket".to_string()),
+        })
+        .collect()
+}
+
 fn merge_openssl_cipher_probes(
     results: &ScanResults,
+    ssl3: &mut Vec<CipherSuiteEntry>,
     tls1_0: &mut Vec<CipherSuiteEntry>,
     tls1_1: &mut Vec<CipherSuiteEntry>,
     tls1_2: &mut Vec<CipherSuiteEntry>,
@@ -379,6 +415,7 @@ fn merge_openssl_cipher_probes(
                 provider: Some("openssl".to_string()),
             };
             match r.version {
+                TlsVersion::Ssl3 => ssl3.push(entry),
                 TlsVersion::Tls10 => tls1_0.push(entry),
                 TlsVersion::Tls11 => tls1_1.push(entry),
                 TlsVersion::Tls12 => tls1_2.push(entry),
@@ -388,7 +425,7 @@ fn merge_openssl_cipher_probes(
     }
     #[cfg(not(feature = "legacy-probes"))]
     {
-        let _ = (results, tls1_0, tls1_1, tls1_2);
+        let _ = (results, ssl3, tls1_0, tls1_1, tls1_2);
     }
 }
 

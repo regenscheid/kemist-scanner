@@ -111,8 +111,14 @@
         },
         "cipher_suites": {
           "type": "object",
-          "required": ["tls1_0", "tls1_1", "tls1_2", "tls1_3", "server_enforces_order"],
+          "required": ["ssl3", "tls1_0", "tls1_1", "tls1_2", "tls1_3", "server_enforces_order"],
           "properties": {
+            "ssl2": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/cipherSuiteEntry" },
+              "description": "SSLv2 SERVER-HELLO cipher_specs echoed back by the server. Empty on modern servers (expected)."
+            },
+            "ssl3": { "type": "array", "items": { "$ref": "#/$defs/cipherSuiteEntry" } },
             "tls1_0": { "type": "array", "items": { "$ref": "#/$defs/cipherSuiteEntry" } },
             "tls1_1": { "type": "array", "items": { "$ref": "#/$defs/cipherSuiteEntry" } },
             "tls1_2": { "type": "array", "items": { "$ref": "#/$defs/cipherSuiteEntry" } },
@@ -445,12 +451,16 @@
       "required": ["name", "iana_code", "supported", "method", "classification"],
       "properties": {
         "name": { "type": "string" },
-        "iana_code": { "type": "string", "pattern": "^0x[0-9A-Fa-f]{4}$" },
+        "iana_code": {
+          "type": "string",
+          "pattern": "^0x([0-9A-Fa-f]{4}|[0-9A-Fa-f]{6})$",
+          "description": "IANA cipher-suite codepoint. TLS 1.0+ uses 2-byte codes (`0xNNNN`); SSLv2 cipher_specs are 3-byte (`0xNNNNNN`)."
+        },
         "supported": { "type": ["boolean", "null"] },
         "method": { "$ref": "#/$defs/method" },
         "reason": { "type": "string" },
         "openssl_name": { "type": "string" },
-        "provider": { "type": "string", "enum": ["aws_lc_rs", "openssl"] },
+        "provider": { "type": "string", "enum": ["aws_lc_rs", "openssl", "raw_socket"] },
         "classification": {
           "type": "string",
           "description": "Kx + privacy family per src/model/cipher_classification.rs. Values are stable within schema v1.x; new values may be added.",

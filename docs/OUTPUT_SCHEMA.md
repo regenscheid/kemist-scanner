@@ -140,24 +140,42 @@ from rustls's post-handshake `ClientConnection` state:
 ### `tls.cipher_suites`
 ```
 {
-  tls1_0: [ CipherSuiteEntry, ... ],   # OpenSSL legacy path only
-  tls1_1: [ CipherSuiteEntry, ... ],   # OpenSSL legacy path only
-  tls1_2: [ CipherSuiteEntry, ... ],   # aws-lc-rs + OpenSSL legacy
-  tls1_3: [ CipherSuiteEntry, ... ],   # aws-lc-rs only
+  ssl2?: [ CipherSuiteEntry, ... ],   # raw-socket SSLv2 SERVER-HELLO echo; omitted when empty
+  ssl3:  [ CipherSuiteEntry, ... ],   # OpenSSL legacy path only
+  tls1_0: [ CipherSuiteEntry, ... ],  # OpenSSL legacy path only
+  tls1_1: [ CipherSuiteEntry, ... ],  # OpenSSL legacy path only
+  tls1_2: [ CipherSuiteEntry, ... ],  # aws-lc-rs + OpenSSL legacy
+  tls1_3: [ CipherSuiteEntry, ... ],  # aws-lc-rs only
   server_enforces_order: ObservationBool
 }
 
 CipherSuiteEntry = {
   name:           "TLS_RSA_WITH_AES_128_CBC_SHA",
-  iana_code:      "0x002F",
+  iana_code:      "0x002F",                    // 2-byte for TLS; 3-byte (0xNNNNNN) for SSLv2 cipher_specs
   supported:      bool | null,
   method:         Method,
   reason?:        string,
   openssl_name?:  "AES128-SHA",                // present only for openssl-backed probes
-  provider?:      "aws_lc_rs" | "openssl",     // backend that ran the probe
+  provider?:      "aws_lc_rs" | "openssl" | "raw_socket",  // backend that ran the probe
   classification: "rsa_kex"                    // kx+privacy family — always present
 }
 ```
+
+**SSLv2 special-casing.** SSLv2 predates SNI, so the probe can't
+route by hostname — whatever TCP answers at `host:port` is what we
+observe. Each `ssl2[]` entry represents a cipher spec the server
+*echoed in its SERVER-HELLO* from our offer set; `supported` is
+always `true` (the server listed it as accepted). Entry names use
+the SSLv2 `SSL_CK_*` convention; `iana_code` is a 3-byte hex value
+(`0x010080` etc.) rather than the 2-byte TLS codepoint. `provider`
+is `raw_socket` (no TLS library involvement — pure wire-format
+parsing). Empty on any modern server.
+
+**SSL 3.0 per-cipher.** Version-level SSL 3.0 probing lands in
+`versions_offered.ssl3`; per-cipher visibility in `ssl3[]` lets
+rule engines distinguish "server refuses SSL 3.0 entirely" from
+"server accepts SSL 3.0 with CBC suites (POODLE-vulnerable class)."
+Routed through the same OpenSSL legacy path as TLS 1.0/1.1.
 
 `classification` labels each suite with its kx + privacy family.
 Values: `rsa_kex`, `dhe_aead`, `dhe_cbc`, `ecdhe_aead`, `ecdhe_cbc`,
@@ -548,7 +566,7 @@ rejecting the record.
 | Field | Values |
 |---|---|
 | `cipher_suites.<ver>[].classification` | `rsa_kex`, `dhe_aead`, `dhe_cbc`, `ecdhe_aead`, `ecdhe_cbc`, `anon`, `export`, `static_dh`, `static_ecdh`, `psk`, `dhe_psk`, `ecdhe_psk`, `rsa_psk`, `null_cipher`, `other` |
-| `cipher_suites.<ver>[].provider`, `groups.<ver>.*.provider` | `aws_lc_rs`, `openssl` |
+| `cipher_suites.<ver>[].provider`, `groups.<ver>.*.provider` | `aws_lc_rs`, `openssl`, `raw_socket` (`raw_socket` only for SSLv2 cipher_specs; classical TLS versions use `aws_lc_rs` / `openssl`) |
 | `*.method` (every `{value, method, reason?}` envelope) | `probe`, `not_probed`, `not_applicable`, `error`, `connection_state` |
 | `errors[].category` | `dns_resolution_failed`, `network_unreachable`, `connection_refused`, `connection_timeout`, `handshake_timeout`, `tls_alert_<name>`, `cert_parse_error`, `extension_parse_error`, `http_error`, `internal_scanner_error` |
 | `signature_algorithm_policy_probe.*.outcome` | `handshake_complete`, `handshake_failure`, `connection_closed`, `other_alert`, `not_probed` |

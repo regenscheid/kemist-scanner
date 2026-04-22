@@ -120,6 +120,13 @@ pub struct ScanResults {
     /// `tls.extensions.hello_retry_request` in schema.
     #[serde(skip_serializing)]
     pub hrr_observed: Option<HelloRetryRequestObservation>,
+    /// SSLv2 SERVER-HELLO observation. When the server answered
+    /// SSLv2, the observation carries the cipher_specs list echoed
+    /// in its response; feeds `tls.cipher_suites.ssl2` in the JSON
+    /// emitter. `None` when the SSLv2 probe didn't run (e.g.
+    /// `--tls-version` pinned to a higher version).
+    #[serde(skip_serializing)]
+    pub sslv2_observation: Option<crate::scanner::raw::sslv2::SslV2Observation>,
     /// HTTP-layer observations (HSTS / security.txt / preload list).
     /// Feeds the top-level `http` field in schema.
     #[serde(skip_serializing)]
@@ -172,6 +179,7 @@ impl SslScanner {
             sni_behavior: None,
             hello_observed: None,
             hrr_observed: None,
+            sslv2_observation: None,
             http_observations: None,
             #[cfg(feature = "legacy-probes")]
             openssl_observations: None,
@@ -189,7 +197,10 @@ impl SslScanner {
         };
 
         match self.test_protocol_support().await {
-            Ok(v) => results.protocol_support = v,
+            Ok((v, sslv2)) => {
+                results.protocol_support = v;
+                results.sslv2_observation = sslv2;
+            }
             Err(e) => results.scan_errors.push(e),
         }
         pause().await;
@@ -338,7 +349,15 @@ impl SslScanner {
         results
     }
 
-    async fn test_protocol_support(&self) -> Result<Vec<ProtocolSupport>, ScannerError> {
+    async fn test_protocol_support(
+        &self,
+    ) -> Result<
+        (
+            Vec<ProtocolSupport>,
+            Option<crate::scanner::raw::sslv2::SslV2Observation>,
+        ),
+        ScannerError,
+    > {
         let versions = if let Some(version) = self.config.tls_version {
             vec![version]
         } else {
@@ -346,6 +365,7 @@ impl SslScanner {
         };
 
         let mut protocol_results = Vec::new();
+        let mut captured_sslv2: Option<crate::scanner::raw::sslv2::SslV2Observation> = None;
 
         for version in versions {
             info!("Testing {} support", version);
@@ -356,12 +376,21 @@ impl SslScanner {
                     self.test_rustls_protocol(version).await
                 }
                 TlsVersion::Ssl2 => {
-                    crate::scanner::raw::sslv2::probe(
+                    // Rich observation — carries both the version
+                    // probe's supported/error AND the SERVER-HELLO
+                    // cipher_specs echo. Stash the full value on the
+                    // accumulator so the JSON emitter can populate
+                    // `tls.cipher_suites.ssl2` separately from the
+                    // `versions_offered` entry.
+                    let obs = crate::scanner::raw::sslv2::probe(
                         self.config.target,
                         &self.config.hostname,
                         self.config.timeout,
                     )
-                    .await
+                    .await;
+                    let ps = obs.to_protocol_support();
+                    captured_sslv2 = Some(obs);
+                    ps
                 }
                 TlsVersion::Ssl3 | TlsVersion::Tls10 | TlsVersion::Tls11 => {
                     // SSLv3/TLS1.0/TLS1.1 route exclusively through the
@@ -422,7 +451,7 @@ impl SslScanner {
             protocol_results.push(result);
         }
 
-        Ok(protocol_results)
+        Ok((protocol_results, captured_sslv2))
     }
 
     async fn test_rustls_protocol(&self, version: TlsVersion) -> ProtocolSupport {

@@ -401,6 +401,17 @@ pub struct CipherSuiteEntry {
 
 #[derive(Serialize, Debug, Clone)]
 pub struct TlsCipherSuites {
+    /// SSLv2 cipher specs the server echoed in its SERVER-HELLO.
+    /// Populated only when the SSLv2 probe got a parseable response
+    /// (i.e. the server spoke SSLv2 at all). Each entry's `supported`
+    /// is `Some(true)` because SSLv2's SERVER-HELLO lists exactly
+    /// the ciphers the server accepts from the client's offer set.
+    /// Empty on modern servers (the expected case).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ssl2: Vec<CipherSuiteEntry>,
+    /// SSL 3.0 per-cipher probe results. Populated by the OpenSSL
+    /// legacy-probe path; empty on `--no-default-features` builds.
+    pub ssl3: Vec<CipherSuiteEntry>,
     pub tls1_0: Vec<CipherSuiteEntry>,
     pub tls1_1: Vec<CipherSuiteEntry>,
     pub tls1_2: Vec<CipherSuiteEntry>,

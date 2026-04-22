@@ -19,6 +19,18 @@ Each version is a distinct handshake attempt. Success → `offered: true,
 method: probe`. Server-level rejection → `offered: false, method: probe`.
 Network failure → `offered: null, method: error`.
 
+**SSLv2 SERVER-HELLO cipher_specs.** The raw-socket SSLv2 probe
+doesn't just return `supported: bool`; when the server answers with
+a SERVER-HELLO, the probe parses the `cipher_specs` list (3-byte
+codes) the server echoed from our offer set, maps each to its
+canonical `SSL_CK_*` name, and surfaces them as entries in
+`tls.cipher_suites.ssl2[]`. Each entry is `supported: true` (by
+definition — the server listed it as accepted). SSLv2 predates SNI,
+so the probe reaches whatever TCP answers at `host:port` regardless
+of vhost; for SNI-routed servers, a `supported: true` observation
+here reflects the default-backend's SSLv2 state, not the SNI'd
+vhost's.
+
 ## Cipher suites
 
 **Coverage: aws-lc-rs's `ALL_CIPHER_SUITES`** — typically 9 suites at
@@ -69,7 +81,7 @@ run against a vendored OpenSSL 3.5 LTS (`openssl-src = "=300.5.5"`).
 
 | Observation | How | Output field | Source |
 |---|---|---|---|
-| Legacy cipher suite probe | Per-suite handshake with single-suite cipher list + SECLEVEL=0 + version pinned | `tls.cipher_suites.{tls1_0, tls1_1, tls1_2}[]` entries with `provider: "openssl"` | [openssl/ciphers.rs](../src/scanner/backends/openssl/ciphers.rs) |
+| Legacy cipher suite probe | Per-suite handshake with single-suite cipher list + SECLEVEL=0 + version pinned. Covers SSL 3.0 (classic RSA-kex suites incl. RC4/3DES/CBC/export/NULL — for POODLE-era CBC visibility) through TLS 1.2. | `tls.cipher_suites.{ssl3, tls1_0, tls1_1, tls1_2}[]` entries with `provider: "openssl"` | [openssl/ciphers.rs](../src/scanner/backends/openssl/ciphers.rs) |
 | DH parameter capture | `SSL_get_peer_tmp_key` after every successful DHE handshake; SHA-256 of prime classified against RFC 7919 FFDHE (`ffdhe{2048,3072,4096,6144,8192}`) and RFC 2409/3526 MODP Oakley groups (`modp{1024,1536,2048,3072}`). Unknown primes → `custom` with `prime_bits` preserved | `tls.dh_parameters[]` | [openssl/dh_params.rs](../src/scanner/backends/openssl/dh_params.rs) |
 | SKE / CertificateVerify signature | `SSL_ctrl(SSL_CTRL_GET_PEER_SIGNATURE_NAME, …)` post-handshake | `tls.server_key_exchange_signatures[]` | [openssl/ske_sig.rs](../src/scanner/backends/openssl/ske_sig.rs) |
 | Named-group probe (FFDHE + aws-lc-rs gaps + non-NIST curves) | `set_groups_list(<name>)` × `{TLS 1.2 + DHE cipher list (FFDHE only), TLS 1.3}`; FFDHE rows cross-check observed prime against advertised codepoint. Also covers TLS 1.3 groups aws-lc-rs does not ship: `X448`, `secp521r1`, `MLKEM{512,1024}`, `secp384r1MLKEM1024`, `brainpoolP{256,384,512}r1`. Deprecated/non-NIST curves that OpenSSL 3.5 accepts by name but refuses at handshake-build time (`secp192r1`, `secp224r1`, `secp256k1`) surface as `{method: not_probed, reason: "openssl_3x_group_not_available:<name>"}` — a backend-capability signal, not a server observation. | `tls.groups.{tls1_2, tls1_3}.*` entries with `provider: "openssl"` | [openssl/kx_groups.rs](../src/scanner/backends/openssl/kx_groups.rs) |
