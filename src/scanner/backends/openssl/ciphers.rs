@@ -154,6 +154,154 @@ const TARGETS: &[Target] = &[
         iana_code: 0x0067,
         version: TlsVersion::Tls12,
     },
+    // --- DHE-RSA AEAD (FFDHE forward-secret GCM, RFC 5288) ---
+    // Required for some FIPS profiles that mandate FFDHE + AEAD. The
+    // CBC-mode DHE-RSA probes above exercise the same key-exchange
+    // path but not the AEAD record layer.
+    Target {
+        iana_name: "TLS_DHE_RSA_WITH_AES_128_GCM_SHA256",
+        openssl_name: "DHE-RSA-AES128-GCM-SHA256",
+        iana_code: 0x009E,
+        version: TlsVersion::Tls12,
+    },
+    Target {
+        iana_name: "TLS_DHE_RSA_WITH_AES_256_GCM_SHA384",
+        openssl_name: "DHE-RSA-AES256-GCM-SHA384",
+        iana_code: 0x009F,
+        version: TlsVersion::Tls12,
+    },
+    // --- ECDHE CBC-mode (RFC 4492 + RFC 5289) ---
+    // Forward-secret but CBC record layer; 800-52r2 §3.3.1.1 still
+    // lists some of these, deployments supporting legacy clients
+    // continue to offer them. Closes the `EcdheCbc` classification
+    // gap — without these rows, a rule engine checking
+    // "no CBC in TLS 1.2" can't see them as `supported: true/false`,
+    // only as `not_probed`.
+    Target {
+        iana_name: "TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA",
+        openssl_name: "ECDHE-RSA-AES128-SHA",
+        iana_code: 0xC013,
+        version: TlsVersion::Tls12,
+    },
+    Target {
+        iana_name: "TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA",
+        openssl_name: "ECDHE-RSA-AES256-SHA",
+        iana_code: 0xC014,
+        version: TlsVersion::Tls12,
+    },
+    Target {
+        iana_name: "TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256",
+        openssl_name: "ECDHE-RSA-AES128-SHA256",
+        iana_code: 0xC027,
+        version: TlsVersion::Tls12,
+    },
+    Target {
+        iana_name: "TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA384",
+        openssl_name: "ECDHE-RSA-AES256-SHA384",
+        iana_code: 0xC028,
+        version: TlsVersion::Tls12,
+    },
+    Target {
+        iana_name: "TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA",
+        openssl_name: "ECDHE-ECDSA-AES128-SHA",
+        iana_code: 0xC009,
+        version: TlsVersion::Tls12,
+    },
+    Target {
+        iana_name: "TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA",
+        openssl_name: "ECDHE-ECDSA-AES256-SHA",
+        iana_code: 0xC00A,
+        version: TlsVersion::Tls12,
+    },
+    Target {
+        iana_name: "TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA256",
+        openssl_name: "ECDHE-ECDSA-AES128-SHA256",
+        iana_code: 0xC023,
+        version: TlsVersion::Tls12,
+    },
+    Target {
+        iana_name: "TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA384",
+        openssl_name: "ECDHE-ECDSA-AES256-SHA384",
+        iana_code: 0xC024,
+        version: TlsVersion::Tls12,
+    },
+    // --- AES-CCM (RFC 6655 + RFC 7251) ---
+    // IoT / constrained-device profiles (RFC 7925) mandate AES-CCM.
+    // OpenSSL 3.x ships CCM in the default provider; if `openssl-src`
+    // is rebuilt with `no-camellia no-seed` the CCM entries stay,
+    // only the earlier two families are affected.
+    Target {
+        iana_name: "TLS_RSA_WITH_AES_128_CCM",
+        openssl_name: "AES128-CCM",
+        iana_code: 0xC09C,
+        version: TlsVersion::Tls12,
+    },
+    Target {
+        iana_name: "TLS_RSA_WITH_AES_256_CCM",
+        openssl_name: "AES256-CCM",
+        iana_code: 0xC09D,
+        version: TlsVersion::Tls12,
+    },
+    Target {
+        iana_name: "TLS_RSA_WITH_AES_128_CCM_8",
+        openssl_name: "AES128-CCM8",
+        iana_code: 0xC0A0,
+        version: TlsVersion::Tls12,
+    },
+    Target {
+        iana_name: "TLS_RSA_WITH_AES_256_CCM_8",
+        openssl_name: "AES256-CCM8",
+        iana_code: 0xC0A1,
+        version: TlsVersion::Tls12,
+    },
+    Target {
+        iana_name: "TLS_DHE_RSA_WITH_AES_128_CCM",
+        openssl_name: "DHE-RSA-AES128-CCM",
+        iana_code: 0xC09E,
+        version: TlsVersion::Tls12,
+    },
+    Target {
+        iana_name: "TLS_DHE_RSA_WITH_AES_256_CCM",
+        openssl_name: "DHE-RSA-AES256-CCM",
+        iana_code: 0xC09F,
+        version: TlsVersion::Tls12,
+    },
+    Target {
+        iana_name: "TLS_DHE_RSA_WITH_AES_128_CCM_8",
+        openssl_name: "DHE-RSA-AES128-CCM8",
+        iana_code: 0xC0A2,
+        version: TlsVersion::Tls12,
+    },
+    Target {
+        iana_name: "TLS_DHE_RSA_WITH_AES_256_CCM_8",
+        openssl_name: "DHE-RSA-AES256-CCM8",
+        iana_code: 0xC0A3,
+        version: TlsVersion::Tls12,
+    },
+    Target {
+        iana_name: "TLS_ECDHE_ECDSA_WITH_AES_128_CCM",
+        openssl_name: "ECDHE-ECDSA-AES128-CCM",
+        iana_code: 0xC0AC,
+        version: TlsVersion::Tls12,
+    },
+    Target {
+        iana_name: "TLS_ECDHE_ECDSA_WITH_AES_256_CCM",
+        openssl_name: "ECDHE-ECDSA-AES256-CCM",
+        iana_code: 0xC0AD,
+        version: TlsVersion::Tls12,
+    },
+    Target {
+        iana_name: "TLS_ECDHE_ECDSA_WITH_AES_128_CCM_8",
+        openssl_name: "ECDHE-ECDSA-AES128-CCM8",
+        iana_code: 0xC0AE,
+        version: TlsVersion::Tls12,
+    },
+    Target {
+        iana_name: "TLS_ECDHE_ECDSA_WITH_AES_256_CCM_8",
+        openssl_name: "ECDHE-ECDSA-AES256-CCM8",
+        iana_code: 0xC0AF,
+        version: TlsVersion::Tls12,
+    },
     // --- PSK family ---
     // Without a pre-shared secret the scanner can't complete a PSK
     // handshake. On most servers these probes alert

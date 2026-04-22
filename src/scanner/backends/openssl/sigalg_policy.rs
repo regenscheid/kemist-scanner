@@ -41,6 +41,7 @@ const NAME_SHA256_PLUS_ONLY: &str = "sha256_plus_only";
 const NAME_ECDSA_ONLY: &str = "ecdsa_only";
 const NAME_RSA_PSS_ONLY: &str = "rsa_pss_only";
 const NAME_RSA_PKCS1_ONLY: &str = "rsa_pkcs1_only";
+const NAME_EDDSA_ONLY: &str = "eddsa_only";
 
 /// Run every non-skipped constraint probe, serially.
 pub async fn probe(
@@ -92,11 +93,22 @@ pub async fn probe(
         skip,
     )
     .await;
+    let eddsa_only = run_one(
+        NAME_EDDSA_ONLY,
+        EDDSA_ONLY_CODEPOINTS,
+        target,
+        hostname,
+        connect_timeout,
+        handshake_timeout,
+        skip,
+    )
+    .await;
     SignatureAlgorithmPolicyProbe {
         sha256_plus_only,
         ecdsa_only,
         rsa_pss_only,
         rsa_pkcs1_only,
+        eddsa_only,
     }
 }
 
@@ -347,6 +359,12 @@ const RSA_PSS_ONLY_CODEPOINTS: &[u16] = &[0x0804, 0x0805, 0x0806];
 /// for this probe).
 const RSA_PKCS1_ONLY_CODEPOINTS: &[u16] = &[0x0401, 0x0501, 0x0601];
 
+/// EdDSA-only (Ed25519 + Ed448 per RFC 8446 §4.2.3 / IANA registry).
+/// A server that completes this probe runs on an EdDSA-authenticated
+/// cert chain; `handshake_failure` means the server doesn't support
+/// EdDSA at all (common today outside PQC migration pilots).
+const EDDSA_ONLY_CODEPOINTS: &[u16] = &[0x0807, 0x0808];
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -386,5 +404,6 @@ mod tests {
 
         assert_eq!(RSA_PSS_ONLY_CODEPOINTS, &[0x0804, 0x0805, 0x0806]);
         assert_eq!(RSA_PKCS1_ONLY_CODEPOINTS, &[0x0401, 0x0501, 0x0601]);
+        assert_eq!(EDDSA_ONLY_CODEPOINTS, &[0x0807, 0x0808]);
     }
 }

@@ -235,7 +235,8 @@ a specific reason — never `supported: false` without a real probe.
   supported_point_formats_echoed: [...],
   max_fragment_length?: string,             // "2^9".."2^12" or "0xNN"
   record_size_limit?: int,                  // RFC 8449 (see caveat)
-  compress_certificate_algorithms: [...]    // RFC 8879 (see caveat)
+  compress_certificate_algorithms: [...],   // RFC 8879 (see caveat)
+  grease_echoed: ObservationBool            // RFC 8701
 }
 ```
 
@@ -265,6 +266,12 @@ Notes:
   ServerHello via the byte-level hello probe. Client offers both
   extensions to elicit server echoes (without actually negotiating
   them — probe bails after ServerHello).
+- **`grease_echoed`** — RFC 8701 conformance observation. The
+  byte-level hello probe injects a GREASE extension codepoint
+  (`0x0A0A`) in the ClientHello. A correctly-behaving server
+  ignores unknown extensions; an echo is a protocol violation.
+  `{value: false}` = ignored (correct); `{value: true}` = echo
+  detected.
 
 See [CHECKS.md](CHECKS.md) for how each observation is obtained.
 
@@ -331,7 +338,8 @@ implement them.
   sha256_plus_only: ConstrainedProbeResult,
   ecdsa_only:       ConstrainedProbeResult,
   rsa_pss_only:     ConstrainedProbeResult,
-  rsa_pkcs1_only:   ConstrainedProbeResult
+  rsa_pkcs1_only:   ConstrainedProbeResult,
+  eddsa_only:       ConstrainedProbeResult
 }
 
 ConstrainedProbeResult = {
@@ -343,9 +351,13 @@ ConstrainedProbeResult = {
 }
 ```
 
-Four active handshakes with restricted `signature_algorithms`
+Five active handshakes with restricted `signature_algorithms`
 offers; see [CHECKS.md](CHECKS.md#signature-algorithm-policy-probe)
-for the exact sigalgs list per constraint.
+for the exact sigalgs list per constraint. `eddsa_only` offers
+`ed25519` (0x0807) + `ed448` (0x0808) and surfaces the server's
+EdDSA-only posture — the fifth probe lets rule engines distinguish
+"server supports EdDSA as one of many" from "server is configured
+EdDSA-only."
 
 The CLI flag `--sigalg-probe-skip=<csv>` opts out individual probes;
 skipped slots emit `method: not_probed, reason: cli_skipped`.
@@ -390,7 +402,7 @@ handshake and a second handshake with SNI omitted (via `ServerName::IpAddress`).
 | `signature_algorithm_oid` | `string` | Raw OID (`"1.2.840.113549.1.1.11"`) |
 | `signature_algorithm_name` | `string` | Resolved human name (`"sha256WithRSAEncryption"`, `"ML-DSA-65"`, or fallback to OID) |
 | `is_pqc_signature` | `bool` | OID matches ML-DSA/SLH-DSA table — **raw match, not a judgment** |
-| `public_key` | `{algorithm, size_bits, curve?}` | |
+| `public_key` | `{algorithm, size_bits, curve?, curve_oid?}` | `curve_oid` carries the named-curve OID (e.g. `"1.2.840.10045.3.1.7"` for secp256r1) — parsed from `AlgorithmIdentifier.parameters`, not byte-length matched. Lets rule engines distinguish brainpool/secp256k1 from NIST P-curves |
 | `embedded_scts` | `int` | Count from extension 1.3.6.1.4.1.11129.2.4.2 |
 | `fingerprint_sha256` | `string` | Hex |
 | `fingerprint_sha1` | `string` | Hex |
@@ -500,6 +512,7 @@ rejecting the record.
 | `ocsp_stapling.content.response_status` | `successful`, `malformedRequest`, `internalError`, `tryLater`, `sigRequired`, `unauthorized`, `unknown_<n>` |
 | `ocsp_stapling.delivery_path` | `tls1_2`, `tls1_3` |
 | `downgrade_signaling.tls13_downgrade_sentinel` | `tls12`, `lte_tls11`, `none` |
+| `dh_parameters[].classification` | `ffdhe2048`, `ffdhe3072`, `ffdhe4096`, `ffdhe6144`, `ffdhe8192`, `modp1024`, `modp1536`, `modp2048`, `modp3072`, `custom` |
 
 For `category` and `response_status`, the `<name>` / `<n>` suffix
 pattern is the permanent shape; new alert names or OCSP-status codes

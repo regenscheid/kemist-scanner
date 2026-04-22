@@ -196,6 +196,11 @@ pub struct SignatureAlgorithmPolicyProbe {
     pub ecdsa_only: ConstrainedProbeResult,
     pub rsa_pss_only: ConstrainedProbeResult,
     pub rsa_pkcs1_only: ConstrainedProbeResult,
+    /// EdDSA-only constraint (Ed25519 + Ed448). A
+    /// `handshake_complete` here means the server's cert chain is
+    /// EdDSA-signed; `handshake_failure` is the common outcome for
+    /// RSA/ECDSA-authenticated servers.
+    pub eddsa_only: ConstrainedProbeResult,
 }
 
 /// Result of one constrained-sigalg handshake attempt.
@@ -495,6 +500,12 @@ pub struct TlsExtensions {
     /// empty otherwise.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub compress_certificate_algorithms: Vec<String>,
+    /// RFC 8701 GREASE echo-detection. `true` = server echoed an
+    /// unknown extension (protocol violation signal). `false` =
+    /// server correctly ignored the GREASE extension we injected.
+    /// `not_probed` when the byte-level hello probe didn't produce
+    /// a ServerHello.
+    pub grease_echoed: ObservationBool,
 }
 
 #[derive(Serialize, Debug, Clone)]
@@ -677,8 +688,19 @@ pub struct CertificateFacts {
 pub struct PublicKey {
     pub algorithm: String,
     pub size_bits: usize,
+    /// Human-readable named-curve label (e.g. `"secp256r1"`,
+    /// `"brainpoolP256r1"`, `"Ed25519"`). Derived from
+    /// `curve_oid` where available.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub curve: Option<String>,
+    /// Raw named-curve OID (RFC 5480 §2.1.1), e.g.
+    /// `"1.2.840.10045.3.1.7"` for secp256r1. Populated for EC keys
+    /// whose SubjectPublicKeyInfo carries a named-curve OID, plus
+    /// EdDSA algorithm OIDs. Rule engines keying on a stable OID
+    /// (rather than a human name that may shift across upstream
+    /// updates) should consume this field.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub curve_oid: Option<String>,
 }
 
 /// Trust-relevant observations, kept separate from X.509 facts so wrong-host and

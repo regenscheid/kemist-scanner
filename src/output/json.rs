@@ -553,6 +553,16 @@ fn build_extensions(results: &ScanResults, ctx: &JsonEmitContext) -> TlsExtensio
     let max_fragment_length = hello.and_then(|h| h.max_fragment_length.clone());
     let (record_size_limit, compress_certificate_algorithms) = build_tls13_ee_observations(results);
 
+    // RFC 8701 GREASE echo. `true` = server echoed an unknown
+    // extension (protocol violation); `false` = server correctly
+    // ignored our GREASE offer. `not_probed` when the byte-level
+    // hello probe didn't parse a ServerHello.
+    let grease_echoed = if hello_ok {
+        ObservationBool::probe(hello.and_then(|h| h.grease_echoed).unwrap_or(false))
+    } else {
+        ObservationBool::not_probed(&format!("hello_probe_failed:{hello_fail_reason}"))
+    };
+
     TlsExtensions {
         ems,
         secure_renegotiation,
@@ -575,6 +585,7 @@ fn build_extensions(results: &ScanResults, ctx: &JsonEmitContext) -> TlsExtensio
         max_fragment_length,
         record_size_limit,
         compress_certificate_algorithms,
+        grease_echoed,
     }
 }
 
@@ -684,6 +695,7 @@ fn cert_to_facts(c: &CertificateInfo) -> CertificateFacts {
         algorithm: c.public_key_algorithm.clone(),
         size_bits: c.public_key_size,
         curve: c.ecc_curve_name.clone(),
+        curve_oid: c.ecc_curve_oid.clone(),
     };
     CertificateFacts {
         subject_cn: extract_cn(&c.subject),
@@ -1026,6 +1038,7 @@ fn build_sigalg_policy(
         ecdsa_only: slot(),
         rsa_pss_only: slot(),
         rsa_pkcs1_only: slot(),
+        eddsa_only: slot(),
     }
 }
 

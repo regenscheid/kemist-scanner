@@ -464,6 +464,7 @@ fn iana_sigalgs_to_openssl_string(codepoints: &[u16]) -> Option<&'static str> {
     let ecdsa_only: HashSet<u16> = [0x0403, 0x0503, 0x0603].into_iter().collect();
     let rsa_pss_only: HashSet<u16> = [0x0804, 0x0805, 0x0806].into_iter().collect();
     let rsa_pkcs1_only: HashSet<u16> = [0x0401, 0x0501, 0x0601].into_iter().collect();
+    let eddsa_only: HashSet<u16> = [0x0807, 0x0808].into_iter().collect();
 
     if set == sha256_plus {
         Some(concat!(
@@ -477,6 +478,8 @@ fn iana_sigalgs_to_openssl_string(codepoints: &[u16]) -> Option<&'static str> {
         Some("RSA-PSS+SHA256:RSA-PSS+SHA384:RSA-PSS+SHA512")
     } else if set == rsa_pkcs1_only {
         Some("RSA+SHA256:RSA+SHA384:RSA+SHA512")
+    } else if set == eddsa_only {
+        Some("Ed25519:Ed448")
     } else {
         None
     }

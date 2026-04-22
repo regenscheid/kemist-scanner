@@ -70,15 +70,15 @@ run against a vendored OpenSSL 3.5 LTS (`openssl-src = "=300.5.5"`).
 | Observation | How | Output field | Source |
 |---|---|---|---|
 | Legacy cipher suite probe | Per-suite handshake with single-suite cipher list + SECLEVEL=0 + version pinned | `tls.cipher_suites.{tls1_0, tls1_1, tls1_2}[]` entries with `provider: "openssl"` | [openssl/ciphers.rs](../src/scanner/backends/openssl/ciphers.rs) |
-| DH parameter capture | `SSL_get_peer_tmp_key` after every successful DHE handshake; SHA-256 of prime classified against RFC 7919 | `tls.dh_parameters[]` | [openssl/dh_params.rs](../src/scanner/backends/openssl/dh_params.rs) |
+| DH parameter capture | `SSL_get_peer_tmp_key` after every successful DHE handshake; SHA-256 of prime classified against RFC 7919 FFDHE (`ffdhe{2048,3072,4096,6144,8192}`) and RFC 2409/3526 MODP Oakley groups (`modp{1024,1536,2048,3072}`). Unknown primes → `custom` with `prime_bits` preserved | `tls.dh_parameters[]` | [openssl/dh_params.rs](../src/scanner/backends/openssl/dh_params.rs) |
 | SKE / CertificateVerify signature | `SSL_ctrl(SSL_CTRL_GET_PEER_SIGNATURE_NAME, …)` post-handshake | `tls.server_key_exchange_signatures[]` | [openssl/ske_sig.rs](../src/scanner/backends/openssl/ske_sig.rs) |
-| Named-group probe (FFDHE + aws-lc-rs gaps) | `set_groups_list(<name>)` × `{TLS 1.2 + DHE cipher list (FFDHE only), TLS 1.3}`; FFDHE rows cross-check observed prime against advertised codepoint. Also covers TLS 1.3 groups aws-lc-rs does not ship: `X448`, `secp521r1`, `MLKEM512`, `MLKEM1024`, `secp384r1MLKEM1024` — those slots override aws-lc-rs `not_probed` with a real observation. | `tls.groups.{tls1_2, tls1_3}.*` entries with `provider: "openssl"` | [openssl/kx_groups.rs](../src/scanner/backends/openssl/kx_groups.rs) |
+| Named-group probe (FFDHE + aws-lc-rs gaps + non-NIST curves) | `set_groups_list(<name>)` × `{TLS 1.2 + DHE cipher list (FFDHE only), TLS 1.3}`; FFDHE rows cross-check observed prime against advertised codepoint. Also covers TLS 1.3 groups aws-lc-rs does not ship: `X448`, `secp521r1`, `MLKEM{512,1024}`, `secp384r1MLKEM1024`, `brainpoolP{256,384,512}r1`. Deprecated/non-NIST curves that OpenSSL 3.5 accepts by name but refuses at handshake-build time (`secp192r1`, `secp224r1`, `secp256k1`) surface as `{method: not_probed, reason: "openssl_3x_group_not_available:<name>"}` — a backend-capability signal, not a server observation. | `tls.groups.{tls1_2, tls1_3}.*` entries with `provider: "openssl"` | [openssl/kx_groups.rs](../src/scanner/backends/openssl/kx_groups.rs) |
 | TLS_FALLBACK_SCSV enforcement | Characterize server max → probe one step below with `SslMode::SEND_FALLBACK_SCSV`; expect `inappropriate_fallback` alert | `tls.downgrade_signaling.fallback_scsv_enforced` | [openssl/fallback_scsv.rs](../src/scanner/backends/openssl/fallback_scsv.rs) |
 | Client-initiated renegotiation | TLS 1.2 handshake → `SSL_renegotiate` → `SSL_do_handshake`; observe alert / close / success | `tls.renegotiation_behavior` | [openssl/renegotiation.rs](../src/scanner/backends/openssl/renegotiation.rs) |
 | CertificateRequest capture | `SSL_CTX_set_msg_callback` (via `SSL_CTX_callback_ctrl`) intercepting msg_type 13; parse TLS 1.2 and TLS 1.3 shapes | `tls.client_auth_request` | [openssl/client_auth.rs](../src/scanner/backends/openssl/client_auth.rs) |
 | TLS 1.3 EncryptedExtensions capture | `SSL_CTX_set_msg_callback` intercepts msg_type 8; parser extracts `record_size_limit` (RFC 8449) and `compress_certificate` (RFC 8879). See caveat below. | `tls.extensions.record_size_limit`, `tls.extensions.compress_certificate_algorithms` | [openssl/tls13_extensions.rs](../src/scanner/backends/openssl/tls13_extensions.rs) |
 | Session resumption — TLS 1.2 ticket + rotation | Two sequential TLS 1.2 handshakes with session cache mode `CLIENT`; compare `SSL_SESSION_get_id` across handshakes for rotation proxy | `tls.session_resumption.tls1_2.*` | [openssl/tickets.rs](../src/scanner/backends/openssl/tickets.rs) |
-| Signature-algorithm policy probe | Four constrained handshakes with `SSL_CTX_set1_sigalgs_list` pinned to each constraint family; capture outcome + selected sigalg | `tls.signature_algorithm_policy_probe.*` | [openssl/sigalg_policy.rs](../src/scanner/backends/openssl/sigalg_policy.rs) |
+| Signature-algorithm policy probe | Five constrained handshakes with `SSL_CTX_set1_sigalgs_list` pinned to each constraint family (`sha256_plus_only`, `ecdsa_only`, `rsa_pss_only`, `rsa_pkcs1_only`, `eddsa_only`); capture outcome + selected sigalg | `tls.signature_algorithm_policy_probe.*` | [openssl/sigalg_policy.rs](../src/scanner/backends/openssl/sigalg_policy.rs) |
 
 Error classification for every OpenSSL probe flows through
 [openssl/alerts.rs](../src/scanner/backends/openssl/alerts.rs) — same
@@ -126,7 +126,7 @@ resumption + 0-RTT (`early_data_accepted`) are plumbed as
 `not_probed` pending a follow-up workstream; both require a
 post-handshake read dance + `SSL_write_early_data` handling.
 
-**Sigalg policy probe — cost + CLI skip.** +4 handshakes per
+**Sigalg policy probe — cost + CLI skip.** +5 handshakes per
 target by default. `--sigalg-probe-skip=<csv>` opts out individual
 constraints; skipped slots emit
 `method: not_probed, reason: cli_skipped`. Interpretation:
@@ -134,13 +134,28 @@ constraints; skipped slots emit
 signal (server refuses PKCS#1 v1.5 signatures);
 `sha256_plus_only → handshake_failure` flags SHA-1-signed cert
 chains; `ecdsa_only → handshake_failure` flags RSA-only
-deployments.
+deployments; `eddsa_only → handshake_failure` flags servers
+without EdDSA (Ed25519/Ed448) support, vs
+`handshake_complete` meaning an EdDSA-capable deployment.
 
 ## Key exchange groups
 
-**Target list.** 12 hardcoded entries ([scanner/groups.rs](../src/scanner/groups.rs)):
+**Target list.** Hardcoded inventory in
+[scanner/groups.rs](../src/scanner/groups.rs) (aws-lc-rs side) plus
+the OpenSSL-backed extensions in
+[openssl/kx_groups.rs](../src/scanner/backends/openssl/kx_groups.rs):
 
-Classical: `X25519`, `X448`, `secp256r1`, `secp384r1`, `secp521r1`
+Classical (NIST + djb): `X25519`, `X448`, `secp256r1`, `secp384r1`,
+`secp521r1`
+
+Non-NIST curves (eIDAS / BSI profiles): `brainpoolP256r1` (0x001F),
+`brainpoolP384r1` (0x0020), `brainpoolP512r1` (0x0021)
+
+Deprecated / non-TLS-exported curves (listed for inventory, always
+`method: not_probed`): `secp192r1` (0x0013), `secp224r1` (0x0015),
+`secp256k1` (0x0016)
+
+FFDHE (RFC 7919): `ffdhe2048`..`ffdhe8192`
 
 PQC hybrids: `X25519MLKEM768` (0x11EC), `secp256r1MLKEM768` (0x11EB),
 `secp384r1MLKEM1024` (0x11ED)
@@ -148,15 +163,12 @@ PQC hybrids: `X25519MLKEM768` (0x11EC), `secp256r1MLKEM768` (0x11EB),
 Standalone ML-KEM: `MLKEM512` (0x0200), `MLKEM768` (0x0201),
 `MLKEM1024` (0x0202)
 
-**Coverage.** aws-lc-rs ships ~6 of the 11 (typically X25519,
-secp256r1, secp384r1, MLKEM768, X25519MLKEM768, secp256r1MLKEM768). The
-remaining five (`X448`, `secp521r1`, `MLKEM512`, `MLKEM1024`,
-`secp384r1MLKEM1024`) are filled by the OpenSSL named-group probe in
-[openssl/kx_groups.rs](../src/scanner/backends/openssl/kx_groups.rs), which
-overrides any leftover `not_probed` slot with a real
-`supported: true | false` observation. Entries that carry
-`method: not_probed` after both paths have run identify a codepoint
-neither backend ships.
+**Coverage.** aws-lc-rs ships a subset (typically X25519,
+secp256r1, secp384r1, MLKEM768, X25519MLKEM768, secp256r1MLKEM768).
+The rest are filled by the OpenSSL named-group probe, which overrides
+any leftover `not_probed` slot with a real `supported: true | false`
+observation. Entries that carry `method: not_probed` after both paths
+have run identify a codepoint neither backend ships.
 
 **Mechanism.** Per-group TLS 1.3 handshake with that single group in
 `kx_groups`. Outcomes classify identically to cipher probes.
@@ -174,6 +186,15 @@ From [scanner/cert.rs](../src/scanner/cert.rs) and
 - `not_before` / `not_after` as ISO 8601
 - `signature_algorithm_oid` — raw OID string
 - `signature_algorithm_name` — resolved name, falls back to OID for unknowns
+- `public_key.curve` / `public_key.curve_oid` — for EC/EdDSA keys,
+  the named-curve OID is parsed from `AlgorithmIdentifier.parameters`
+  (not inferred from point-length). Distinguishes secp256r1 from
+  brainpoolP256r1 / secp256k1, which share a 65-byte uncompressed
+  point length — byte-length heuristics silently misclassify them.
+  `curve` carries the human-readable name; `curve_oid` is the
+  authoritative field. Ed25519 / Ed448 use distinct algorithm OIDs
+  (`1.3.101.{112,113}`) rather than `id-ecPublicKey + parameters`,
+  handled via the algorithm field.
 - `is_pqc_signature` — bool, OID matches ML-DSA (FIPS 204) or SLH-DSA
   (FIPS 205) table. 15-entry OID map in [scanner/cert.rs](../src/scanner/cert.rs).
   Composite/hybrid sig OIDs stubbed for future IETF draft codepoints.
@@ -233,6 +254,7 @@ ServerHello bytes.
 | `tls.extensions.npn` | 13172 (Google pre-ALPN, deprecated) |
 | `tls.extensions.supported_point_formats_echoed` | 11 (RFC 4492 §5.1.2) — parsed canonical names |
 | `tls.extensions.max_fragment_length` | 1 (RFC 6066 §4) — server-echoed code mapped to `2^9`..`2^12` |
+| `tls.extensions.grease_echoed` | RFC 8701 conformance — ClientHello injects a GREASE ext codepoint (`0x0A0A`); probe walks ServerHello extensions looking for any echoed GREASE value |
 | `tls.downgrade_protection.tls13_downgrade_sentinel` | Last 8 bytes of ServerRandom per RFC 8446 §4.1.3 |
 
 **The byte probe is a TLS 1.2 probe.** When the server only speaks TLS

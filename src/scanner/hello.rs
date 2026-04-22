@@ -60,6 +60,14 @@ const EXT_EXTENDED_MASTER_SECRET: u16 = 23;
 const EXT_NPN: u16 = 13172; // Google's pre-ALPN protocol negotiation.
 const EXT_RENEGOTIATION_INFO: u16 = 0xff01;
 
+/// GREASE codepoint we inject as an extension_type (RFC 8701).
+/// Any codepoint of the form `0xXA, 0xXA` (both bytes equal with low
+/// nibble A) is a GREASE value servers must ignore. We pick one
+/// specific value and check whether the ServerHello echoes it —
+/// echoing is a protocol violation ("server returned an extension
+/// not offered by client" per RFC 8446 §4.2).
+const GREASE_EXT_TYPE: u16 = 0x0A0A;
+
 /// `max_fragment_length` code we advertise — 4 == 2^12 (4096 bytes), the
 /// largest legal value. We don't actually negotiate a smaller record; we
 /// bail after ServerHello. Offering this lets us record whether the
@@ -116,6 +124,11 @@ pub struct HelloExtensionsObserved {
     /// negotiated TLS 1.1 or lower), or `"none"` (no sentinel match).
     /// `None` when we never got a parseable ServerHello.
     pub tls13_downgrade_sentinel: Option<String>,
+    /// Whether the server echoed the GREASE extension we injected
+    /// (RFC 8701). A conforming server silently ignores unknown
+    /// extensions (`false`); a misbehaving middlebox or buggy server
+    /// echoes it back (`true`). `None` when no ServerHello parsed.
+    pub grease_echoed: Option<bool>,
     /// Human-readable failure reason when `server_hello_parsed` is false.
     pub error: Option<String>,
 }
@@ -316,6 +329,7 @@ fn parse_server_hello(bytes: &[u8], out: &mut HelloExtensionsObserved) {
         out.secure_renegotiation = Some(false);
         out.truncated_hmac = Some(false);
         out.npn = Some(false);
+        out.grease_echoed = Some(false);
         return;
     }
 
@@ -339,6 +353,11 @@ fn parse_server_hello(bytes: &[u8], out: &mut HelloExtensionsObserved) {
     out.sct_via_tls_extension = seen.contains_key(&EXT_SIGNED_CERT_TIMESTAMP);
     out.truncated_hmac = Some(seen.contains_key(&EXT_TRUNCATED_HMAC));
     out.npn = Some(seen.contains_key(&EXT_NPN));
+    // GREASE echo-detection: true iff the server echoed ANY codepoint
+    // in the `0x?A0?A` family (both bytes `0x?A`), not just the one
+    // we injected. Catches both the literal echo and broader buggy
+    // behavior that reflects unknown extensions back.
+    out.grease_echoed = Some(seen.keys().any(|&ty| is_grease_codepoint(ty)));
 
     if let Some(body) = seen.get(&EXT_SUPPORTED_POINT_FORMATS) {
         out.supported_point_formats_echoed = parse_point_formats(body);
@@ -348,6 +367,18 @@ fn parse_server_hello(bytes: &[u8], out: &mut HelloExtensionsObserved) {
             out.max_fragment_length = Some(max_fragment_length_name(code));
         }
     }
+}
+
+/// RFC 8701 GREASE codepoint predicate. GREASE reserves values of
+/// the form `{0xXA, 0xXA}` where both bytes are equal and the low
+/// nibble is `A` — e.g. `0x0A0A`, `0x1A1A`, `0x2A2A`, ... `0xFA FA`.
+/// A correctly-behaving server treats these as unknown and ignores
+/// them; echoing ANY such codepoint in ServerHello extensions is a
+/// protocol violation.
+fn is_grease_codepoint(v: u16) -> bool {
+    let hi = (v >> 8) as u8;
+    let lo = (v & 0xff) as u8;
+    hi == lo && (lo & 0x0f) == 0x0a
 }
 
 /// Map the `max_fragment_length` single-byte value to its RFC 6066 §4
@@ -504,6 +535,12 @@ fn build_tls12_client_hello(sni: &str) -> Vec<u8> {
         EXT_MAX_FRAGMENT_LENGTH,
         &[MAX_FRAGMENT_LENGTH_OFFER],
     );
+    // GREASE probe (RFC 8701). Inject a known GREASE extension type;
+    // conforming servers MUST ignore unknown extensions. If the
+    // ServerHello echoes this extension back, the server is violating
+    // the TLS spec — a rule engine signal that the target sits behind
+    // a broken middlebox or has a nonconforming stack.
+    append_extension(&mut exts, GREASE_EXT_TYPE, &[]);
 
     ch.extend_from_slice(&(exts.len() as u16).to_be_bytes());
     ch.extend_from_slice(&exts);
@@ -601,6 +638,48 @@ mod tests {
         let rec_len = u16::from_be_bytes([ch[3], ch[4]]) as usize;
         assert_eq!(rec_len, ch.len() - 5);
         assert_eq!(ch[5], 0x01); // ClientHello
+    }
+
+    #[test]
+    fn grease_codepoints_recognized() {
+        // Full RFC 8701 GREASE table.
+        for hi in [0x0, 0x1, 0x2, 0x3, 0x4, 0x5, 0x6, 0x7, 0x8, 0x9, 0xA, 0xB, 0xC, 0xD, 0xE, 0xF] {
+            let byte = (hi << 4) | 0x0A;
+            let code = u16::from_be_bytes([byte, byte]);
+            assert!(
+                is_grease_codepoint(code),
+                "{:#06X} should be GREASE",
+                code
+            );
+        }
+    }
+
+    #[test]
+    fn non_grease_codepoints_rejected() {
+        // Common real extension codepoints must never register as GREASE.
+        for code in [0x0000u16, 0x000a, 0x000d, 0x0017, 0x001d, 0x002b, 0xff01, 0x0A0B, 0x0A1A] {
+            assert!(
+                !is_grease_codepoint(code),
+                "{:#06X} should NOT be GREASE",
+                code
+            );
+        }
+    }
+
+    #[test]
+    fn client_hello_includes_grease_extension() {
+        let ch = build_tls12_client_hello("example.com");
+        // The two GREASE bytes 0x0A 0x0A should appear somewhere in the
+        // record — specifically in the extensions block we build.
+        let mut found = false;
+        for window in ch.windows(4) {
+            if window[0] == 0x0A && window[1] == 0x0A && window[2] == 0x00 && window[3] == 0x00 {
+                // extension_type=0x0A0A + length=0x0000
+                found = true;
+                break;
+            }
+        }
+        assert!(found, "ClientHello missing GREASE extension (0x0A0A, len=0)");
     }
 
     #[test]

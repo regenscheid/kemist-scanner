@@ -141,6 +141,67 @@ const TARGETS: &[KxGroupTarget] = &[
         tls12_applicable: false,
         ffdhe_cross_check: None,
     },
+    // Brainpool curves (RFC 5639 / RFC 7027 / RFC 8734). Offered for
+    // eIDAS / German regulatory profiles that prefer non-NIST curves.
+    // OpenSSL 3.2+ uses the `-tls13` suffix for the TLS-1.3-specific
+    // variants per RFC 8734; OpenSSL's `set_groups_list` accepts both
+    // forms and normalizes internally — probing via the base name
+    // also covers the tls13 codepoint as long as the server supports
+    // the curve at all.
+    KxGroupTarget {
+        openssl_name: "brainpoolP256r1tls13",
+        display_name: "brainpoolP256r1",
+        iana_code: 0x001F,
+        tls12_applicable: false,
+        ffdhe_cross_check: None,
+    },
+    KxGroupTarget {
+        openssl_name: "brainpoolP384r1tls13",
+        display_name: "brainpoolP384r1",
+        iana_code: 0x0020,
+        tls12_applicable: false,
+        ffdhe_cross_check: None,
+    },
+    KxGroupTarget {
+        openssl_name: "brainpoolP512r1tls13",
+        display_name: "brainpoolP512r1",
+        iana_code: 0x0021,
+        tls12_applicable: false,
+        ffdhe_cross_check: None,
+    },
+    // Deprecated NIST curves. 800-52r2 §3.3.1.2 forbids <224-bit
+    // curves; probing these explicitly tells rule engines whether
+    // the server actually rejects them vs "we didn't look." The
+    // vendored OpenSSL 3.5 build accepts the names via
+    // `set_groups_list` but emits `SSL_R_NO_SUITABLE_GROUPS` at
+    // handshake-build time — the probe then reports `NotProbed` with
+    // reason `openssl_3x_group_not_available`, a concrete backend-
+    // capability signal (not a server observation).
+    KxGroupTarget {
+        openssl_name: "P-224",
+        display_name: "secp224r1",
+        iana_code: 0x0015,
+        tls12_applicable: false,
+        ffdhe_cross_check: None,
+    },
+    KxGroupTarget {
+        openssl_name: "P-192",
+        display_name: "secp192r1",
+        iana_code: 0x0013,
+        tls12_applicable: false,
+        ffdhe_cross_check: None,
+    },
+    // Koblitz curve — not a NIST curve, supported by OpenSSL's EC
+    // library but not as a TLS named group in 3.x. Same NotProbed
+    // path as the deprecated NIST curves; listed so the inventory
+    // surfaces the codepoint for downstream rule engines.
+    KxGroupTarget {
+        openssl_name: "secp256k1",
+        display_name: "secp256k1",
+        iana_code: 0x0016,
+        tls12_applicable: false,
+        ffdhe_cross_check: None,
+    },
 ];
 
 /// Emit this backend's group inventory as `(iana_code, display_name)`
@@ -380,6 +441,22 @@ fn probe_blocking(
             None => HandshakeOutcome::Supported,
         },
         Err(HandshakeError::Failure(mid)) => {
+            // Client-side "no suitable groups" (SSL_R_NO_SUITABLE_GROUPS,
+            // reason_code 295) means OpenSSL's TLS layer accepted the
+            // name via `set_groups_list` but rejected it at handshake
+            // build time — the vendored OpenSSL 3.x build doesn't
+            // expose this curve as a usable TLS named group. Applies to
+            // secp192r1, secp224r1, secp256k1 on OpenSSL 3.5. Surface
+            // as `NotProbed` with a deterministic reason rather than
+            // `error:internal_scanner_error`, since no wire traffic
+            // happened and the outcome reflects our backend's
+            // capabilities, not the server's.
+            if openssl_rejected_group_client_side(mid.error()) {
+                return HandshakeOutcome::NotProbed(format!(
+                    "openssl_3x_group_not_available:{}",
+                    t.display_name
+                ));
+            }
             let se = alerts::classify_openssl_error("kx group handshake", mid.error());
             classify_scanner_error(se)
         }
@@ -390,6 +467,24 @@ fn probe_blocking(
             HandshakeOutcome::Error("openssl_would_block".to_string())
         }
     }
+}
+
+/// True when the error stack carries OpenSSL's
+/// `SSL_R_NO_SUITABLE_GROUPS` (reason_code 295, reason string `"no
+/// suitable groups"`). Emitted client-side before any bytes hit the
+/// wire when the TLS layer can't assemble a usable group list — i.e.
+/// the group was registered via `set_groups_list` but isn't actually
+/// compiled in as a TLS named group in this OpenSSL build.
+fn openssl_rejected_group_client_side(err: &openssl::ssl::Error) -> bool {
+    let Some(stack) = err.ssl_error() else {
+        return false;
+    };
+    stack.errors().iter().any(|e| {
+        e.reason_code() == 295
+            || e.reason()
+                .map(|r| r.eq_ignore_ascii_case("no suitable groups"))
+                .unwrap_or(false)
+    })
 }
 
 fn build_context(

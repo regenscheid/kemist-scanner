@@ -35,6 +35,11 @@ pub struct CertificateInfo {
     pub public_key_algorithm: String,
     pub public_key_size: usize,
     pub ecc_curve_name: Option<String>,
+    /// RFC 5480 named-curve OID as dotted decimal (e.g.
+    /// `"1.2.840.10045.3.1.7"` for secp256r1). Separate from
+    /// `ecc_curve_name` so rule engines can key on a raw OID
+    /// identifier independent of the human-readable name.
+    pub ecc_curve_oid: Option<String>,
     pub ecc_key_strength: Option<u16>,
     pub san: Vec<String>,
     pub is_self_signed: bool,
@@ -80,7 +85,7 @@ impl CertificateInfo {
         let (pub_key_alg, pub_key_size) = (alg_name, key_size);
 
         // Extract ECC curve information
-        let (ecc_curve_name, ecc_key_strength) = extract_ecc_info(pki);
+        let (ecc_curve_name, ecc_curve_oid, ecc_key_strength) = extract_ecc_info(pki);
 
         // Extract SANs
         let san = extract_san_names(&cert);
@@ -109,6 +114,7 @@ impl CertificateInfo {
             public_key_algorithm: pub_key_alg,
             public_key_size: pub_key_size,
             ecc_curve_name,
+            ecc_curve_oid,
             ecc_key_strength,
             san,
             is_self_signed,
@@ -236,27 +242,171 @@ fn extract_san_names(cert: &X509Certificate) -> Vec<String> {
     names
 }
 
-/// Extract ECC curve information from public key
-fn extract_ecc_info(pki: &SubjectPublicKeyInfo) -> (Option<String>, Option<u16>) {
-    let oid_str = pki.algorithm.algorithm.to_id_string();
+/// Extract ECC curve information from the SubjectPublicKeyInfo.
+///
+/// Returns `(curve_name, curve_oid, curve_strength_bits)`.
+///
+/// The named curve lives in `AlgorithmIdentifier.parameters` per
+/// RFC 5480 §2.1.1, not in the key-bytes length. Previous versions
+/// of this function bucketed by `subject_public_key.data.len()` —
+/// that worked for the three NIST P-curves that ship on ~95% of web
+/// certificates today (65 / 97 / 133 bytes for P-256 / 384 / 521)
+/// but **false-matched** secp256k1 (65 bytes) and brainpoolP256r1
+/// (65 bytes) as P-256. The OID parse fixes that ambiguity.
+///
+/// Ed25519 and Ed448 use distinct *algorithm* OIDs (`1.3.101.112` /
+/// `1.3.101.113`) rather than the EC public-key OID
+/// (`1.2.840.10045.2.1`) with curve parameters, so they're matched
+/// on the algorithm field, not via `.parameters`.
+fn extract_ecc_info(pki: &SubjectPublicKeyInfo) -> (Option<String>, Option<String>, Option<u16>) {
+    let alg_oid = pki.algorithm.algorithm.to_id_string();
 
-    if oid_str == "1.2.840.10045.2.1" {
-        // EC public key OID
-        // Try to determine curve from key size or parameters
-        let key_size = pki.subject_public_key.data.len();
+    // EdDSA first — not "EC" in the RFC 5480 sense; no curve-OID parameters.
+    if let Some((name, strength)) = eddsa_curve_from_alg_oid(&alg_oid) {
+        return (Some(name.to_string()), Some(alg_oid), Some(strength));
+    }
 
-        // Common ECC curves and their approximate sizes
-        let (curve_name, strength) = match key_size {
-            65 => ("secp256r1", 256),                  // P-256
-            97 => ("secp384r1", 384),                  // P-384
-            133 => ("secp521r1", 521),                 // P-521
-            _ => ("Unknown ECC", key_size as u16 * 4), // Rough estimate
-        };
+    if alg_oid != "1.2.840.10045.2.1" {
+        // Not EC at all (likely RSA, DSA, PQC, etc.).
+        return (None, None, None);
+    }
 
-        (Some(curve_name.to_string()), Some(strength))
-    } else {
-        // Not an ECC key
-        (None, None)
+    // EC — decode the named-curve OID from algorithm.parameters.
+    let curve_oid = pki
+        .algorithm
+        .parameters
+        .as_ref()
+        .and_then(|p| p.as_oid().ok())
+        .map(|o| o.to_id_string());
+
+    match curve_oid.as_deref().and_then(ec_curve_from_oid) {
+        Some((name, strength)) => (Some(name.to_string()), curve_oid, Some(strength)),
+        None => {
+            // Unknown / missing curve OID — fall back to byte-length hint
+            // for strength but label the curve as unknown so rule engines
+            // don't misread it as a known NIST curve. Raw OID (if any)
+            // stays queryable via the returned `curve_oid`.
+            let len = pki.subject_public_key.data.len();
+            let approx = match len {
+                65 => 256,
+                97 => 384,
+                133 => 521,
+                _ => (len as u16) * 4,
+            };
+            (Some("unknown_ec_curve".to_string()), curve_oid, Some(approx))
+        }
+    }
+}
+
+/// Map an EdDSA *algorithm* OID (RFC 8410) to its curve name + security
+/// strength. EdDSA doesn't use `AlgorithmIdentifier.parameters` the way
+/// ECDSA does; the curve is encoded via the algorithm OID itself.
+fn eddsa_curve_from_alg_oid(alg_oid: &str) -> Option<(&'static str, u16)> {
+    match alg_oid {
+        "1.3.101.112" => Some(("Ed25519", 255)),
+        "1.3.101.113" => Some(("Ed448", 448)),
+        _ => None,
+    }
+}
+
+/// Map an RFC 5480 named-curve OID to its canonical curve name + the
+/// curve's bit-strength (order of the base point ≈ bits of security ×
+/// 2). Covers NIST P-curves, Koblitz secp256k1, brainpool twisted
+/// curves, and the legacy prime192v* aliases still seen in the wild.
+fn ec_curve_from_oid(oid: &str) -> Option<(&'static str, u16)> {
+    Some(match oid {
+        "1.2.840.10045.3.1.7" => ("secp256r1", 256),
+        "1.3.132.0.34" => ("secp384r1", 384),
+        "1.3.132.0.35" => ("secp521r1", 521),
+        "1.3.132.0.10" => ("secp256k1", 256),
+        "1.3.132.0.33" => ("secp224r1", 224),
+        "1.3.132.0.30" => ("secp192r1", 192),
+        "1.3.36.3.3.2.8.1.1.7" => ("brainpoolP256r1", 256),
+        "1.3.36.3.3.2.8.1.1.11" => ("brainpoolP384r1", 384),
+        "1.3.36.3.3.2.8.1.1.13" => ("brainpoolP512r1", 512),
+        "1.2.840.10045.3.1.1" => ("secp192r1", 192), // prime192v1 alias
+        "1.2.840.10045.3.1.2" => ("prime192v2", 192),
+        "1.2.840.10045.3.1.3" => ("prime192v3", 192),
+        _ => return None,
+    })
+}
+
+#[cfg(test)]
+mod ecc_tests {
+    use super::{ec_curve_from_oid, eddsa_curve_from_alg_oid};
+
+    #[test]
+    fn oid_to_curve_covers_nist_p_curves() {
+        assert_eq!(
+            ec_curve_from_oid("1.2.840.10045.3.1.7"),
+            Some(("secp256r1", 256))
+        );
+        assert_eq!(
+            ec_curve_from_oid("1.3.132.0.34"),
+            Some(("secp384r1", 384))
+        );
+        assert_eq!(
+            ec_curve_from_oid("1.3.132.0.35"),
+            Some(("secp521r1", 521))
+        );
+    }
+
+    #[test]
+    fn oid_to_curve_distinguishes_secp256k1_from_p256() {
+        // Both have 65-byte uncompressed points; without OID parsing
+        // the old byte-length heuristic mis-labeled secp256k1 as P-256.
+        let p256 = ec_curve_from_oid("1.2.840.10045.3.1.7").unwrap();
+        let k1 = ec_curve_from_oid("1.3.132.0.10").unwrap();
+        assert_eq!(p256.0, "secp256r1");
+        assert_eq!(k1.0, "secp256k1");
+        assert_ne!(p256.0, k1.0);
+    }
+
+    #[test]
+    fn oid_to_curve_covers_brainpool() {
+        assert_eq!(
+            ec_curve_from_oid("1.3.36.3.3.2.8.1.1.7"),
+            Some(("brainpoolP256r1", 256))
+        );
+        assert_eq!(
+            ec_curve_from_oid("1.3.36.3.3.2.8.1.1.11"),
+            Some(("brainpoolP384r1", 384))
+        );
+        assert_eq!(
+            ec_curve_from_oid("1.3.36.3.3.2.8.1.1.13"),
+            Some(("brainpoolP512r1", 512))
+        );
+    }
+
+    #[test]
+    fn oid_to_curve_covers_short_secp_variants() {
+        assert_eq!(
+            ec_curve_from_oid("1.3.132.0.33"),
+            Some(("secp224r1", 224))
+        );
+        assert_eq!(
+            ec_curve_from_oid("1.3.132.0.30"),
+            Some(("secp192r1", 192))
+        );
+    }
+
+    #[test]
+    fn unknown_oid_returns_none() {
+        assert!(ec_curve_from_oid("1.2.3.4.5").is_none());
+        assert!(ec_curve_from_oid("").is_none());
+    }
+
+    #[test]
+    fn eddsa_alg_oids_map_to_curves() {
+        assert_eq!(
+            eddsa_curve_from_alg_oid("1.3.101.112"),
+            Some(("Ed25519", 255))
+        );
+        assert_eq!(
+            eddsa_curve_from_alg_oid("1.3.101.113"),
+            Some(("Ed448", 448))
+        );
+        assert!(eddsa_curve_from_alg_oid("1.3.101.114").is_none());
     }
 }
 

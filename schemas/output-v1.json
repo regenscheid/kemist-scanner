@@ -149,7 +149,8 @@
             "compression_offered",
             "truncated_hmac",
             "npn",
-            "supported_point_formats_echoed"
+            "supported_point_formats_echoed",
+            "grease_echoed"
           ],
           "properties": {
             "ems": { "$ref": "#/$defs/observationBool" },
@@ -209,7 +210,8 @@
               "type": "array",
               "items": { "type": "string" },
               "description": "RFC 8879 — server-advertised certificate compression algorithms. Populated via the OpenSSL EncryptedExtensions probe."
-            }
+            },
+            "grease_echoed": { "$ref": "#/$defs/observationBool" }
           },
           "additionalProperties": false
         },
@@ -512,7 +514,8 @@
           "properties": {
             "algorithm": { "type": "string" },
             "size_bits": { "type": "integer", "minimum": 0 },
-            "curve": { "type": "string" }
+            "curve": { "type": "string" },
+            "curve_oid": { "type": "string" }
           },
           "additionalProperties": false
         },
@@ -663,12 +666,13 @@
     "sigalgPolicyProbe": {
       "type": "object",
       "description": "Phase G — per-constraint outcomes from restricted signature_algorithms handshakes. Every slot always present; `method: not_probed` + reason when skipped or feature-disabled.",
-      "required": ["sha256_plus_only", "ecdsa_only", "rsa_pss_only", "rsa_pkcs1_only"],
+      "required": ["sha256_plus_only", "ecdsa_only", "rsa_pss_only", "rsa_pkcs1_only", "eddsa_only"],
       "properties": {
         "sha256_plus_only": { "$ref": "#/$defs/constrainedProbeResult" },
         "ecdsa_only":       { "$ref": "#/$defs/constrainedProbeResult" },
         "rsa_pss_only":     { "$ref": "#/$defs/constrainedProbeResult" },
-        "rsa_pkcs1_only":   { "$ref": "#/$defs/constrainedProbeResult" }
+        "rsa_pkcs1_only":   { "$ref": "#/$defs/constrainedProbeResult" },
+        "eddsa_only":       { "$ref": "#/$defs/constrainedProbeResult" }
       },
       "additionalProperties": false
     },

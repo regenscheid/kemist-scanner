@@ -369,6 +369,13 @@ fn fully_populated_openssl_observations_match_schema_v1() {
             method: ScanMethod::Probe,
             reason: Some("tls_alert_handshake_failure".to_string()),
         },
+        eddsa_only: ConstrainedProbeResult {
+            outcome: SigalgOutcome::HandshakeFailure,
+            selected_sigalg: None,
+            alert: Some("tls_alert_handshake_failure".to_string()),
+            method: ScanMethod::Probe,
+            reason: Some("tls_alert_handshake_failure".to_string()),
+        },
     };
 
     let mut results = fixture_results();
@@ -687,6 +694,7 @@ fn legacy_probes_disabled_renders_empty_schema_sections() {
         "ecdsa_only",
         "rsa_pss_only",
         "rsa_pkcs1_only",
+        "eddsa_only",
     ] {
         assert_eq!(
             sap.get(name).unwrap().get("outcome").unwrap().as_str(),
