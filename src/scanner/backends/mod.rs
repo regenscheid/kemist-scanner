@@ -27,10 +27,12 @@ use crate::scanner::probe::NegotiatedState;
 #[cfg(feature = "legacy-probes")]
 use crate::scanner::openssl::dh_params::DhSnapshot;
 
+pub mod registry;
 pub mod rustls;
 #[cfg(feature = "legacy-probes")]
 pub mod openssl;
 
+pub use self::registry::BackendRegistry;
 pub use self::rustls::RustlsBackend;
 #[cfg(feature = "legacy-probes")]
 pub use self::openssl::OpensslBackend;
