@@ -341,14 +341,37 @@ impl SslScanner {
                     // else-branch only kicks in when neither feature is on.
                     #[cfg(feature = "legacy-probes")]
                     {
-                        crate::scanner::openssl::protocol_versions::probe_protocol(
-                            self.config.target,
-                            &self.config.hostname,
+                        use crate::scanner::backends::{
+                            BackendRegistry, HandshakeConstraint, HandshakeOutcome, ProbeContext,
+                        };
+                        let registry = BackendRegistry::new();
+                        let ctx = ProbeContext {
+                            target: self.config.target,
+                            hostname: self.config.hostname.clone(),
+                            connect_timeout: self.config.timeout,
+                            handshake_timeout: self.config.timeout,
+                        };
+                        // Registry routes SSLv3/TLS1.0/1.1 to the OpenSSL
+                        // backend; `handshake()` wraps the existing
+                        // `protocol_versions::probe_protocol` helper. The
+                        // error-string detail that HandshakeResult drops
+                        // is unused downstream — `build_versions_offered`
+                        // in the JSON emitter only reads `supported: bool`.
+                        let supported = match registry.route_version(version) {
+                            Some(backend) => match backend
+                                .handshake(HandshakeConstraint::version_only(version), &ctx)
+                                .await
+                            {
+                                Ok(r) => matches!(r.outcome, HandshakeOutcome::Supported),
+                                Err(_) => false,
+                            },
+                            None => false,
+                        };
+                        ProtocolSupport {
                             version,
-                            self.config.timeout,
-                            self.config.timeout,
-                        )
-                        .await
+                            supported,
+                            error: None,
+                        }
                     }
                     #[cfg(all(feature = "native-legacy", not(feature = "legacy-probes")))]
                     {
