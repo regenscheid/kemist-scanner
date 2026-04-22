@@ -8,3 +8,4 @@
 
 pub mod heartbleed;
 pub mod sslv2;
+pub mod static_dh;

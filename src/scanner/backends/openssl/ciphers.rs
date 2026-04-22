@@ -339,6 +339,12 @@ pub fn inventory_entries() -> Vec<(u16, &'static str, TlsVersion)> {
 /// thread. Returns a `ProbeRun` with `HandshakeOutcome::Error` when no
 /// row matches — a programmer error on the caller's part since
 /// `inventory_entries()` and this function read the same table.
+///
+/// Special-case: the four static-DH/ECDH cipher suites OpenSSL 3.x
+/// removed entirely (0x0030, 0x0031, 0xC004, 0xC00E) route to
+/// `raw::static_dh` instead. OpenSSL can't drive them at all, but a
+/// raw-socket ClientHello can — we just need to send one codepoint
+/// and classify the response.
 pub(crate) async fn probe_single_by_code(
     target: SocketAddr,
     hostname: &str,
@@ -347,6 +353,22 @@ pub(crate) async fn probe_single_by_code(
     connect_timeout: Duration,
     handshake_timeout: Duration,
 ) -> ProbeRun {
+    if matches!(iana_code, 0x0030 | 0x0031 | 0xC004 | 0xC00E) {
+        let outcome = crate::scanner::raw::static_dh::probe(
+            target,
+            hostname,
+            iana_code,
+            connect_timeout,
+            handshake_timeout,
+        )
+        .await;
+        return ProbeRun {
+            outcome,
+            dh_snapshot: None,
+            ske_sig: None,
+        };
+    }
+
     let Some(row) = TARGETS
         .iter()
         .find(|t| t.iana_code == iana_code && t.version == version)
