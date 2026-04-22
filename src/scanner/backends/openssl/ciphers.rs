@@ -424,9 +424,10 @@ pub async fn probe_legacy_suites(
 
     // Registry-driven per-suite probing through `OpensslBackend::handshake()`.
     // Every `TARGETS` codepoint routes back to this backend (OpenSSL
-    // claims the full legacy cipher inventory), so the indirection is
-    // semantically a no-op — its purpose is to unify the dispatch path
-    // ahead of the Stage 4 file moves that collapse the wrapper layer.
+    // claims the full legacy cipher inventory today), so the
+    // indirection is semantically a no-op — going through the
+    // registry keeps all cipher-probe dispatch on one path regardless
+    // of which backend ultimately runs the handshake.
     let registry = crate::scanner::backends::BackendRegistry::new();
     let ctx = crate::scanner::backends::ProbeContext {
         target,

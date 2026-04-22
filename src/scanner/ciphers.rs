@@ -77,11 +77,12 @@ pub async fn probe_cipher_suites(
 
     // Registry-driven per-suite probing. The registry routes each
     // cipher codepoint to the backend that claims it; for this rustls
-    // path all `ALL_CIPHER_SUITES` codepoints route to `aws_lc_rs`, so
-    // `route_cipher` always returns Some(rustls). The loop still reads
-    // `ALL_CIPHER_SUITES` directly so it can derive the spec-version
-    // and Debug-format name from the `SupportedCipherSuite` object —
-    // inventory-only iteration is a Stage 4 follow-up.
+    // path all `ALL_CIPHER_SUITES` codepoints route to `aws_lc_rs`,
+    // so `route_cipher` always returns Some(rustls). The loop iterates
+    // `ALL_CIPHER_SUITES` directly (rather than
+    // `registry.merged_cipher_codepoints()`) so it can derive the
+    // spec-version and Debug-format name from each
+    // `SupportedCipherSuite` object without a separate lookup.
     let registry = crate::scanner::backends::BackendRegistry::new();
     let ctx = crate::scanner::backends::ProbeContext {
         target,

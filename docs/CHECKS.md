@@ -292,9 +292,9 @@ hosts emit `not_included` regardless of their real Chrome status.
 
 ## STARTTLS
 
-Not supported. The original TLSferret fork had SMTP/IMAP/POP3/FTP/LDAP/
-XMPP/PostgreSQL/MySQL STARTTLS negotiation; kemist dropped it at PR 1
-per the spec's HTTPS-on-443 focus.
+Not supported. kemist scopes itself to HTTPS-on-443 (and arbitrary
+TLS-on-port); the original TLSferret fork's SMTP/IMAP/POP3/FTP/LDAP/
+XMPP/PostgreSQL/MySQL STARTTLS negotiation was dropped early on.
 
 ## User-Agent
 

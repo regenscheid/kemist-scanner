@@ -220,11 +220,10 @@ impl TlsBackend for OpensslBackend {
     }
 
     fn constraint_capabilities(&self) -> ConstraintCapabilities {
-        // `sigalgs` and `send_fallback_scsv` are advertised as supported
-        // because the OpenSSL library plumbing is there; Stage 2's
-        // `handshake()` dispatch returns `UnsatisfiableConstraint` for
-        // those shapes until Stage 3 wires them up, but callers can
-        // still check capabilities to pick the right backend.
+        // ALPN plumbing isn't wired through any of the OpenSSL probe
+        // drivers today — their cipher-list / sigalg-pinned contexts
+        // never advertise ALPN. Every other axis is honored by
+        // `handshake()`.
         ConstraintCapabilities {
             version_range: true,
             cipher_suites: true,

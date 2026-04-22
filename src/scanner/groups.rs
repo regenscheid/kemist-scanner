@@ -128,9 +128,10 @@ pub async fn probe_kx_groups(
     // Registry-driven per-group probing. Every `TARGET_GROUPS` entry
     // still appears in the output — codepoints aws-lc-rs doesn't ship
     // emit `NotProbed` here and are filled in later by the OpenSSL
-    // group probe loop via the JSON merge logic. Stage 4 will push
-    // the merge into `BackendRegistry` so this rustls-path loop can
-    // skip OpenSSL-routed codepoints instead of emitting NotProbed.
+    // group probe loop via the JSON merge logic. A follow-up could
+    // push the merge into `BackendRegistry` so this rustls-path loop
+    // skips OpenSSL-routed codepoints instead of emitting NotProbed,
+    // but that requires reshaping the downstream output merger.
     let registry = crate::scanner::backends::BackendRegistry::new();
     let ctx = crate::scanner::backends::ProbeContext {
         target,

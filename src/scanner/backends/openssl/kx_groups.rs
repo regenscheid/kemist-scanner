@@ -231,9 +231,10 @@ pub async fn probe_kx_groups(
     let mut results = Vec::with_capacity(TARGETS.len());
     let mut attempt_idx: usize = 0;
 
-    // Registry-driven dispatch. OpenSSL claims every group codepoint in
-    // `TARGETS`, so routing is deterministic — this is setup for the
-    // Stage 4 orchestrator rewrite that will iterate `merged_group_codepoints()`.
+    // Registry-driven dispatch. OpenSSL claims every group codepoint
+    // in `TARGETS`, so routing through the registry is a no-op here —
+    // going through `handshake()` keeps all group-probe dispatch on
+    // one path regardless of which backend runs it.
     let registry = crate::scanner::backends::BackendRegistry::new();
     let ctx = crate::scanner::backends::ProbeContext {
         target,

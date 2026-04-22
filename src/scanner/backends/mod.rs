@@ -1,19 +1,18 @@
-//! Backend abstraction scaffolding.
+//! Backend abstraction for the TLS probe drivers.
 //!
-//! Stage 0-2 of the TLS backend refactor:
+//! Types defined here:
+//! - `BackendInventory` — a declaration of which codepoints a given
+//!   TLS library can probe.
+//! - `HandshakeOutcome` — unified probe-outcome enum across every
+//!   probe family (cipher, group, version, sigalg, FALLBACK_SCSV).
+//! - `TlsBackend` trait + `HandshakeConstraint` + `HandshakeResult` —
+//!   the `handshake()` primitive every codepoint-driven probe
+//!   composes, plus the constraint axes the caller can pin.
+//! - `BackendRegistry` — owns every backend instance plus the
+//!   per-codepoint priority table the orchestrator dispatches through.
 //!
-//! - Stage 0 introduced `BackendInventory`, a declaration of which
-//!   codepoints a given TLS library can probe.
-//! - Stage 1 unified probe outcomes into `HandshakeOutcome`.
-//! - Stage 2 adds the `TlsBackend` trait + `HandshakeConstraint` +
-//!   `HandshakeResult` + concrete `rustls::RustlsBackend` /
-//!   `openssl::OpensslBackend` wrappers around the existing per-module
-//!   probe functions.
-//!
-//! Stage 3 will migrate orchestrator call sites onto `handshake()`;
-//! Stage 4 will collapse the wrapper backends into the primary
-//! implementation and delete the per-module probe functions. Until
-//! then the existing probe modules keep running alongside.
+//! Concrete backends live in `rustls::RustlsBackend` and
+//! `openssl::OpensslBackend`.
 
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -98,16 +97,16 @@ pub struct BackendInventory {
     pub cipher_names: Vec<String>,
     pub group_codepoints: Vec<u16>,
     pub group_names: Vec<String>,
-    /// Short strings describing what this backend cannot do. Flows into
-    /// `capabilities.probe_limitations` in later stages; Stage 0 leaves
-    /// it empty to preserve byte-identical output.
+    /// Short strings describing what this backend cannot do. Reserved
+    /// for future propagation into `capabilities.probe_limitations`;
+    /// currently populated by backends but not emitted.
     pub limitations: Vec<&'static str>,
 }
 
 /// Build the rustls / aws-lc-rs backend inventory from runtime
-/// enumeration of `ALL_CIPHER_SUITES` and `ALL_KX_GROUPS`. Formatting
-/// matches the legacy inline build in `src/output/json.rs` so the
-/// capabilities block stays byte-identical through Stage 0.
+/// enumeration of `ALL_CIPHER_SUITES` and `ALL_KX_GROUPS`. Cipher and
+/// group names use rustls's Debug formatting, matching what the
+/// capabilities emitter writes to `probed_cipher_suites`.
 pub fn rustls_inventory() -> BackendInventory {
     // Fully-qualified `::rustls::` disambiguates from the sibling
     // `backends::rustls` submodule declared below.
@@ -135,9 +134,9 @@ pub fn rustls_inventory() -> BackendInventory {
 }
 
 /// Build the OpenSSL backend inventory from the hardcoded target
-/// tables in `scanner::openssl::{ciphers, kx_groups}`. Stage 4 will
-/// relocate those tables under `backends/openssl/`; until then this
-/// function reaches into the existing modules for their canonical data.
+/// tables in `backends::openssl::{ciphers, kx_groups}`. Cipher and
+/// group names are IANA-canonical (the spec-standard form), matching
+/// what `probed_cipher_suites` emits.
 #[cfg(feature = "legacy-probes")]
 pub fn openssl_inventory() -> BackendInventory {
     let cipher_entries = crate::scanner::openssl::ciphers::inventory_entries();
@@ -185,9 +184,7 @@ pub fn all_inventories() -> Vec<BackendInventory> {
 }
 
 /// Per-scan context threaded through every `handshake()` call: the
-/// target socket + hostname (for SNI) + timeout budgets. Stage 4 will
-/// relocate this to `src/scanner/probe_context.rs`; for now it lives
-/// alongside the trait that consumes it.
+/// target socket + hostname (for SNI) + timeout budgets.
 #[derive(Debug, Clone)]
 pub struct ProbeContext {
     pub target: SocketAddr,
@@ -300,9 +297,9 @@ pub struct HandshakeResult {
 
 impl HandshakeResult {
     /// Construct a minimal result carrying only the handshake outcome.
-    /// Used by the single-codepoint probe paths that currently report
-    /// only outcome; observer fields will be populated in later stages
-    /// as the orchestrator migrates onto `handshake()`.
+    /// Used by single-codepoint probes (cipher / group enumeration)
+    /// that don't surface observer fields; callers that capture DH
+    /// params / SKE sigalg / etc. fill those slots after construction.
     pub fn outcome_only(outcome: HandshakeOutcome) -> Self {
         Self {
             outcome,
@@ -353,7 +350,7 @@ pub struct ConstraintCapabilities {
 
 /// The abstraction every TLS library plugs into. Backends own their
 /// inventory and their handshake primitive; routing between them lives
-/// in the orchestrator (Stage 3+).
+/// in `BackendRegistry` + the orchestrator.
 #[async_trait]
 pub trait TlsBackend: Send + Sync {
     /// Short stable identifier — matches `BackendInventory::id`.

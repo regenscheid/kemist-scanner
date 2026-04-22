@@ -1,14 +1,17 @@
-//! `rustls` + aws-lc-rs backend. Wraps the existing per-module probe
-//! functions in `src/scanner/ciphers.rs` / `groups.rs` until Stage 4
-//! relocates them here.
+//! `rustls` + aws-lc-rs backend. Drives every TLS 1.2 / TLS 1.3
+//! codepoint the pinned aws-lc-rs build ships.
 //!
-//! Supported constraint shapes (Stage 2):
-//! - `single_cipher` — one IANA cipher codepoint, no version pin
-//! - `single_group_at` — one IANA group codepoint at a pinned version
-//! - `version_only` — one pinned TLS version
+//! Supported `handshake()` constraint shapes:
+//! - `single_cipher(code)` — one IANA cipher codepoint, version
+//!   inferred from the suite's TLS 1.2 vs 1.3 family
+//! - `single_group_at(code, Tls13)` — one IANA group codepoint at
+//!   TLS 1.3 (rustls ties `kx_groups` to both 1.2 and 1.3 at the
+//!   provider level, but the probe semantics are TLS-1.3-native)
+//! - `version_only(v)` — one pinned TLS version
 //!
-//! Everything else returns `UnsatisfiableConstraint`; Stage 3 extends
-//! this as the orchestrator migrates additional probe types.
+//! Other constraint combinations return `UnsatisfiableConstraint`;
+//! the orchestrator translates that into `method: not_probed,
+//! reason: backend_lacks_capability`.
 
 use std::sync::Arc;
 
@@ -89,7 +92,7 @@ impl TlsBackend for RustlsBackend {
             ));
         }
 
-        // Dispatch by constraint shape. Stage 3 may add combinations.
+        // Dispatch by constraint shape.
         match (&c.cipher_suites, &c.groups, c.version_range) {
             (Some(suites), None, _) if suites.len() == 1 => {
                 probe_single_cipher_shape(suites[0], ctx).await

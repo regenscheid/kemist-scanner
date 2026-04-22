@@ -91,7 +91,7 @@ against what the scanner build was actually able to probe.
 | `openssl_version` | `string` | Pinned OpenSSL version when `legacy-probes` is on, else `"not_shipped"` |
 | `probed_cipher_suites` | `string[]` | Cipher suite names the scanner probes — union across every backend compiled in. Per-suite `provider` tag under `tls.cipher_suites.*` identifies which backend ran each probe |
 | `probed_kx_groups` | `string[]` | KX group names the scanner probes — union across every backend |
-| `config_paths` | `string[]` | Config files consulted (reserved for PR 13 extensions) |
+| `config_paths` | `string[]` | Config files consulted (reserved; currently always empty) |
 | `probe_limitations` | `string[]` | Runtime-detected probe gaps (reserved) |
 
 ### `scan`

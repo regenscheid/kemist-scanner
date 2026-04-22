@@ -9,9 +9,10 @@ pub mod raw;
 pub mod runner;
 pub mod sni;
 
-// Backwards-compatible name for the pre-Stage-4d module layout. Existing
-// `crate::scanner::openssl::X` paths resolve through this alias; the
-// entire subsystem now lives under `backends::openssl`.
+// Backwards-compatible alias. The entire OpenSSL subsystem lives
+// under `backends::openssl`; this re-export keeps
+// `crate::scanner::openssl::X` working for callers / tests that
+// haven't migrated to the new path.
 #[cfg(feature = "legacy-probes")]
 pub use self::backends::openssl;
 
