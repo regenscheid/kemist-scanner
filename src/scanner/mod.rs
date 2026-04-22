@@ -29,7 +29,10 @@ use crate::model::errors::ScannerError;
 use crate::model::protocol::{ProtocolSupport, TlsVersion};
 use crate::scanner::ciphers::{probe_cipher_suites, CipherProbeOutput};
 use crate::scanner::groups::{probe_kx_groups, GroupProbeOutput};
-use crate::scanner::hello::{probe_hello_extensions, HelloExtensionsObserved};
+use crate::scanner::hello::{
+    probe_hello_extensions, probe_hello_retry_request, HelloExtensionsObserved,
+    HelloRetryRequestObservation,
+};
 use crate::scanner::http::{probe_http, HttpObservations};
 use crate::scanner::probe::{characterize_connection, NegotiatedState, ValidationResult};
 use crate::scanner::sni::{probe_sni_omitted, SniBehaviorResult};
@@ -112,6 +115,11 @@ pub struct ScanResults {
     /// max_fragment_length, TLS 1.3 downgrade sentinel.
     #[serde(skip_serializing)]
     pub hello_observed: Option<HelloExtensionsObserved>,
+    /// TLS 1.3 HelloRetryRequest observation from a dedicated TLS 1.3
+    /// ClientHello-with-empty-key_share probe. Feeds
+    /// `tls.extensions.hello_retry_request` in schema.
+    #[serde(skip_serializing)]
+    pub hrr_observed: Option<HelloRetryRequestObservation>,
     /// HTTP-layer observations (HSTS / security.txt / preload list).
     /// Feeds the top-level `http` field in schema.
     #[serde(skip_serializing)]
@@ -163,6 +171,7 @@ impl SslScanner {
             group_probes: None,
             sni_behavior: None,
             hello_observed: None,
+            hrr_observed: None,
             http_observations: None,
             #[cfg(feature = "legacy-probes")]
             openssl_observations: None,
@@ -288,6 +297,21 @@ impl SslScanner {
         // heartbeat, renegotiation_info, compression, ext-path SCTs).
         results.hello_observed = Some(
             probe_hello_extensions(
+                self.config.target,
+                &self.config.hostname,
+                self.config.timeout,
+                self.config.timeout,
+            )
+            .await,
+        );
+        pause().await;
+
+        // TLS 1.3 HelloRetryRequest probe — separate handshake that
+        // sends a TLS 1.3 ClientHello with an empty `key_share`,
+        // forcing a spec-compliant server into HRR. Classifies the
+        // ServerHello random against the RFC 8446 §4.1.3 sentinel.
+        results.hrr_observed = Some(
+            probe_hello_retry_request(
                 self.config.target,
                 &self.config.hostname,
                 self.config.timeout,

@@ -255,6 +255,7 @@ ServerHello bytes.
 | `tls.extensions.supported_point_formats_echoed` | 11 (RFC 4492 §5.1.2) — parsed canonical names |
 | `tls.extensions.max_fragment_length` | 1 (RFC 6066 §4) — server-echoed code mapped to `2^9`..`2^12` |
 | `tls.extensions.grease_echoed` | RFC 8701 conformance — ClientHello injects a GREASE ext codepoint (`0x0A0A`); probe walks ServerHello extensions looking for any echoed GREASE value |
+| `tls.extensions.hello_retry_request` | RFC 8446 §4.1.3 — dedicated TLS 1.3 probe with empty `key_share`; ServerHello random compared to the HRR sentinel (`cf21ad74…a8339c`, SHA-256 of `"HelloRetryRequest"`) |
 | `tls.downgrade_protection.tls13_downgrade_sentinel` | Last 8 bytes of ServerRandom per RFC 8446 §4.1.3 |
 
 **The byte probe is a TLS 1.2 probe.** When the server only speaks TLS
@@ -281,6 +282,19 @@ itself never negotiates 1.3.
   echoed a heartbeat record with >16 bytes of leaked memory) or
   `false`. `null` with `heartbeat_probe_inconclusive` only for TCP-level
   failures. Source: [scanner/raw/heartbleed.rs](../src/scanner/raw/heartbleed.rs).
+
+## Channel binding
+
+Computed post-handshake from the characterization handshake's state
+— no extra round-trips.
+
+| Schema field | How | RFC |
+|---|---|---|
+| `tls.channel_binding.tls_exporter` | `ConnectionCommon::export_keying_material(label: "EXPORTER-Channel-Binding", context: None, out: &mut [u8; 32])` on the rustls `ClientConnection`. TLS-1.3-only (RFC 9266 §2); TLS 1.2 renders `not_applicable` with reason `not_defined_for_tls12`. | RFC 9266 |
+| `tls.channel_binding.tls_server_end_point` | SHA-256 of the leaf certificate DER (first entry in the collected chain). Deterministic from cert material already captured — equals `certificates.leaf.fingerprint_sha256` byte-for-byte. | RFC 5929 §4 |
+
+Feeds SP 800-63B AAL3 verifier-impersonation-resistance rules and
+RFC 7677 / RFC 5802 SCRAM-PLUS channel-binding requirements.
 
 ## SNI behavior probe
 

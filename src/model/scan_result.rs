@@ -187,6 +187,10 @@ pub struct Tls {
     /// Four independent slots per RFC 8446 §4.2.3 / RFC 8017 sigalg
     /// families. See [`SignatureAlgorithmPolicyProbe`].
     pub signature_algorithm_policy_probe: SignatureAlgorithmPolicyProbe,
+    /// Channel-binding material per RFC 9266 (tls-exporter) and
+    /// RFC 5929 §4 (tls-server-end-point). Feeds SP 800-63B AAL3
+    /// verifier-impersonation-resistance rules.
+    pub channel_binding: ChannelBinding,
 }
 
 /// Per-constraint outcomes for the sig-alg policy probe.
@@ -506,6 +510,14 @@ pub struct TlsExtensions {
     /// `not_probed` when the byte-level hello probe didn't produce
     /// a ServerHello.
     pub grease_echoed: ObservationBool,
+    /// RFC 8446 §4.1.3 HelloRetryRequest observation. `true` = the
+    /// dedicated TLS 1.3 ClientHello probe (empty `key_share`) saw a
+    /// ServerHello whose random matched the HRR sentinel. `false` =
+    /// the server responded with a regular ServerHello (either TLS 1.2
+    /// fallback, or it unexpectedly accepted the empty `key_share`).
+    /// `not_probed` / `error` — the probe did not reach a parseable
+    /// ServerHello; reason carries the failure mode.
+    pub hello_retry_request: ObservationBool,
 }
 
 #[derive(Serialize, Debug, Clone)]
@@ -563,6 +575,49 @@ pub struct SniBehavior {
     pub method: Method,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+}
+
+/// Channel-binding observations per RFC 9266 (`tls-exporter`) and
+/// RFC 5929 §4 (`tls-server-end-point`). Both are derived from the
+/// main characterization handshake; no extra network round-trips.
+#[derive(Serialize, Debug, Clone, Default)]
+pub struct ChannelBinding {
+    /// RFC 9266 `tls-exporter` channel binding. `value` is 32 bytes
+    /// of exporter output keyed with label
+    /// `"EXPORTER-Channel-Binding"` and empty context, rendered as
+    /// lower-case hex (64 chars). `method: probe` on TLS 1.3;
+    /// `not_applicable` on TLS 1.2 with reason
+    /// `not_defined_for_tls12` (RFC 9266 §2: tls-exporter is TLS
+    /// 1.3-only). `error` if the exporter call failed.
+    pub tls_exporter: ChannelBindingValue,
+    /// RFC 5929 §4 `tls-server-end-point` channel binding. `value`
+    /// is SHA-256 of the leaf certificate DER, rendered as
+    /// lower-case hex (64 chars). `method: probe` whenever a leaf
+    /// cert was delivered; `not_probed` if the characterization
+    /// handshake didn't complete or no cert arrived.
+    pub tls_server_end_point: ChannelBindingValue,
+}
+
+/// Single channel-binding value slot — hex string + tri-state method.
+#[derive(Serialize, Debug, Clone)]
+pub struct ChannelBindingValue {
+    /// Lower-case hex encoding of the channel-binding bytes.
+    /// `None` whenever `method != probe`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+    pub method: Method,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+impl Default for ChannelBindingValue {
+    fn default() -> Self {
+        Self {
+            value: None,
+            method: Method::NotProbed,
+            reason: Some("unpopulated".to_string()),
+        }
+    }
 }
 
 // ----------------------------------------------------------------------

@@ -154,6 +154,66 @@ fn build_tls(results: &ScanResults, ctx: &JsonEmitContext) -> Tls {
         session_resumption: build_session_resumption(results),
         signature_algorithm_policy_probe: build_sigalg_policy(results),
         client_auth_request: build_client_auth_request(results),
+        channel_binding: build_channel_binding(results),
+    }
+}
+
+/// Build the [`ChannelBinding`] slot from fields captured during the
+/// characterization handshake. `tls-exporter` populates only on TLS
+/// 1.3; `tls-server-end-point` populates whenever a leaf cert was
+/// delivered. Both fall through to `NotProbed` when the
+/// characterization handshake did not complete.
+fn build_channel_binding(results: &ScanResults) -> crate::model::scan_result::ChannelBinding {
+    use crate::model::scan_result::{ChannelBinding, ChannelBindingValue, Method};
+
+    let negotiated = results.negotiated.as_ref();
+    let version = negotiated.and_then(|n| n.version);
+
+    let tls_exporter = match negotiated.and_then(|n| n.channel_binding_tls_exporter.clone()) {
+        Some(hex) => ChannelBindingValue {
+            value: Some(hex),
+            method: Method::Probe,
+            reason: None,
+        },
+        None => {
+            let (method, reason) = match version {
+                Some(TlsVersion::Tls13) => (
+                    Method::Error,
+                    Some("export_keying_material_failed".to_string()),
+                ),
+                Some(_) => (
+                    Method::NotApplicable,
+                    Some("not_defined_for_tls12".to_string()),
+                ),
+                None => (
+                    Method::NotProbed,
+                    Some("characterization_handshake_failed".to_string()),
+                ),
+            };
+            ChannelBindingValue {
+                value: None,
+                method,
+                reason,
+            }
+        }
+    };
+
+    let tls_server_end_point = match negotiated.and_then(|n| n.channel_binding_server_end_point.clone()) {
+        Some(hex) => ChannelBindingValue {
+            value: Some(hex),
+            method: Method::Probe,
+            reason: None,
+        },
+        None => ChannelBindingValue {
+            value: None,
+            method: Method::NotProbed,
+            reason: Some("no_leaf_certificate".to_string()),
+        },
+    };
+
+    ChannelBinding {
+        tls_exporter,
+        tls_server_end_point,
     }
 }
 
@@ -563,6 +623,20 @@ fn build_extensions(results: &ScanResults, ctx: &JsonEmitContext) -> TlsExtensio
         ObservationBool::not_probed(&format!("hello_probe_failed:{hello_fail_reason}"))
     };
 
+    // RFC 8446 §4.1.3 HelloRetryRequest observation. Populated by a
+    // separate probe that sends a TLS 1.3 ClientHello with an empty
+    // `key_share`. `None` on the struct means the probe never ran
+    // (shouldn't happen in practice since `scan()` always invokes it).
+    let hello_retry_request = match results.hrr_observed.as_ref() {
+        Some(hrr) => match hrr.hrr_observed {
+            Some(v) => ObservationBool::probe(v),
+            None => ObservationBool::not_probed(
+                hrr.error.as_deref().unwrap_or("hrr_probe_inconclusive"),
+            ),
+        },
+        None => ObservationBool::not_probed("hrr_probe_not_run"),
+    };
+
     TlsExtensions {
         ems,
         secure_renegotiation,
@@ -586,6 +660,7 @@ fn build_extensions(results: &ScanResults, ctx: &JsonEmitContext) -> TlsExtensio
         record_size_limit,
         compress_certificate_algorithms,
         grease_echoed,
+        hello_retry_request,
     }
 }
 

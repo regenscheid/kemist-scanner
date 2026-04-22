@@ -61,6 +61,16 @@ pub struct NegotiatedState {
     /// [`crate::model::ocsp_response::parse`] or emit them verbatim
     /// as hex behind a CLI flag.
     pub ocsp_response_bytes: Option<Vec<u8>>,
+    /// RFC 9266 `tls-exporter` channel binding — 32 bytes of exporter
+    /// output with label `"EXPORTER-Channel-Binding"` and empty
+    /// context. `None` on TLS 1.2 (RFC 9266 is TLS 1.3-only) or when
+    /// the exporter call fails. Lower-case hex.
+    pub channel_binding_tls_exporter: Option<String>,
+    /// RFC 5929 §4 `tls-server-end-point` — SHA-256 of the leaf
+    /// certificate DER. Deterministic from material already captured;
+    /// always populated when a leaf cert was delivered. Lower-case
+    /// hex, 64 chars.
+    pub channel_binding_server_end_point: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -156,7 +166,29 @@ pub async fn characterize_connection(
         .alpn_protocol()
         .map(|b| String::from_utf8_lossy(b).into_owned());
 
+    // Channel-binding export (RFC 9266 + RFC 5929). Must happen BEFORE
+    // `collector.take_state()` drains the cert bytes, because
+    // tls-server-end-point hashes the leaf DER directly from the
+    // collector's guarded state.
+    let channel_binding_tls_exporter = if matches!(version, Some(TlsVersion::Tls13)) {
+        let mut out_buf = [0u8; 32];
+        match conn.export_keying_material(&mut out_buf[..], b"EXPORTER-Channel-Binding", None) {
+            Ok(_) => Some(hex_lower(&out_buf)),
+            Err(e) => {
+                debug!(%e, "export_keying_material failed");
+                None
+            }
+        }
+    } else {
+        // RFC 9266 §2: tls-exporter is TLS-1.3-only.
+        None
+    };
+
     let (sig_scheme, ocsp_bytes, cert_bytes) = collector.take_state();
+
+    let channel_binding_server_end_point = cert_bytes
+        .first()
+        .map(|leaf_der| sha256_hex(leaf_der));
 
     let certificates = decode_certs(&cert_bytes);
 
@@ -176,6 +208,8 @@ pub async fn characterize_connection(
         ocsp_stapled: ocsp_len > 0,
         ocsp_response_len: ocsp_len,
         ocsp_response_bytes: ocsp_bytes,
+        channel_binding_tls_exporter,
+        channel_binding_server_end_point,
     });
 
     Ok(CharacterizationOutput {
@@ -342,6 +376,21 @@ fn decode_certs(raw: &[Vec<u8>]) -> Vec<CertificateInfo> {
     raw.iter()
         .filter_map(|der| CertificateInfo::from_der(der).ok())
         .collect()
+}
+
+fn hex_lower(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        s.push_str(&format!("{:02x}", b));
+    }
+    s
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(bytes);
+    hex_lower(&h.finalize())
 }
 
 /// Permissive verifier that:

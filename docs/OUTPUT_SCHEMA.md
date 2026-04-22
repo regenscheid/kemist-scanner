@@ -272,6 +272,15 @@ Notes:
   ignores unknown extensions; an echo is a protocol violation.
   `{value: false}` = ignored (correct); `{value: true}` = echo
   detected.
+- **`hello_retry_request`** — RFC 8446 §4.1.3 observation. A
+  dedicated probe sends a TLS 1.3 ClientHello with an empty
+  `key_share` extension, which a spec-compliant server MUST answer
+  with HelloRetryRequest (ServerHello whose random equals
+  `cf21ad74…a8339c`, the SHA-256 of `"HelloRetryRequest"`).
+  `{value: true}` = HRR observed (TLS 1.3 server behaving
+  correctly); `{value: false}` = regular ServerHello (either TLS
+  1.2 fallback or an unexpected non-HRR response from a TLS 1.3
+  server). This probe adds one extra handshake per target.
 
 See [CHECKS.md](CHECKS.md) for how each observation is obtained.
 
@@ -376,6 +385,40 @@ v1.5 signatures.
 ```
 Comparison of leaf cert fingerprints between the SNI-set characterization
 handshake and a second handshake with SNI omitted (via `ServerName::IpAddress`).
+
+### `tls.channel_binding`
+```
+{
+  tls_exporter: {
+    value?: string,        // 32-byte lower-case hex (64 chars)
+    method: Method,
+    reason?: string
+  },
+  tls_server_end_point: {
+    value?: string,        // 32-byte lower-case hex (64 chars)
+    method: Method,
+    reason?: string
+  }
+}
+```
+
+Two channel-binding values derived from the characterization
+handshake. No extra network round-trips.
+
+- **`tls_exporter`** (RFC 9266) — 32-byte exporter output keyed with
+  label `"EXPORTER-Channel-Binding"` and empty context, computed via
+  `ConnectionCommon::export_keying_material`. TLS-1.3-only per RFC
+  9266 §2; TLS 1.2 handshakes render `method: not_applicable` with
+  reason `not_defined_for_tls12`.
+- **`tls_server_end_point`** (RFC 5929 §4) — SHA-256 of the leaf
+  certificate DER. Populated whenever a leaf cert was delivered
+  (i.e., every successful characterization). Value matches
+  `certificates.leaf.fingerprint_sha256` byte-for-byte (the server
+  end-point binding and the cert fingerprint are the same hash over
+  the same bytes).
+
+Feeds SP 800-63B AAL3 verifier-impersonation-resistance rules and
+RFC 7677 / RFC 5802 SCRAM channel-binding requirements.
 
 ### `certificates`
 ```

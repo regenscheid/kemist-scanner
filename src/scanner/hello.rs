@@ -133,6 +133,37 @@ pub struct HelloExtensionsObserved {
     pub error: Option<String>,
 }
 
+/// RFC 8446 §4.1.3 HelloRetryRequest sentinel. A TLS 1.3 server that
+/// emits a HelloRetryRequest does so by sending a ServerHello whose
+/// `random` field carries this fixed 32-byte value (SHA-256 hash of
+/// the ASCII string `"HelloRetryRequest"`). Lets us distinguish HRR
+/// from a real ServerHello without decoding TLS 1.3-specific
+/// extensions.
+const HRR_SENTINEL: [u8; 32] = [
+    0xcf, 0x21, 0xad, 0x74, 0xe5, 0x9a, 0x61, 0x11, 0xbe, 0x1d, 0x8c, 0x02, 0x1e, 0x65, 0xb8, 0x91,
+    0xc2, 0xa2, 0x11, 0x16, 0x7a, 0xbb, 0x8c, 0x5e, 0x07, 0x9e, 0x09, 0xe2, 0xc8, 0xa8, 0x33, 0x9c,
+];
+
+/// Result of the TLS 1.3 HelloRetryRequest probe. Separate from
+/// [`HelloExtensionsObserved`] — this probe sends a TLS 1.3
+/// ClientHello (legacy_version 0x0303 + `supported_versions` 0x0304)
+/// with an empty `key_share`, which a spec-compliant TLS 1.3 server
+/// MUST answer with HelloRetryRequest (RFC 8446 §4.2.8). A TLS 1.2-
+/// only server picks 1.2, so `hrr_observed` will be `Some(false)`.
+#[derive(Debug, Clone, Default)]
+pub struct HelloRetryRequestObservation {
+    /// `Some(true)` — server emitted a TLS 1.3 HelloRetryRequest
+    /// (ServerRandom matched the RFC 8446 §4.1.3 sentinel).
+    /// `Some(false)` — server responded with a regular ServerHello
+    /// (either TLS 1.2 fallback, or a TLS 1.3 server that unexpectedly
+    /// accepted the empty key_share and didn't retry).
+    /// `None` — probe never reached a parseable ServerHello; check
+    /// `error` for the reason.
+    pub hrr_observed: Option<bool>,
+    /// Human-readable failure reason when `hrr_observed` is `None`.
+    pub error: Option<String>,
+}
+
 /// Run the probe. `sni` is the hostname to put in the server_name extension.
 pub async fn probe_hello_extensions(
     target: SocketAddr,
@@ -625,6 +656,191 @@ fn status_request_ext() -> Vec<u8> {
     vec![0x01, 0x00, 0x00, 0x00, 0x00]
 }
 
+/// Drive the TLS 1.3 HelloRetryRequest probe. Opens a fresh TCP
+/// connection, sends a hand-crafted TLS 1.3 ClientHello with an empty
+/// `key_share`, reads the response, and classifies whether the
+/// ServerHello's random matches the RFC 8446 §4.1.3 HRR sentinel.
+///
+/// Independent of [`probe_hello_extensions`] — separate handshake,
+/// separate output struct. The two probes can run in parallel.
+pub async fn probe_hello_retry_request(
+    target: SocketAddr,
+    sni: &str,
+    connect_timeout: Duration,
+    handshake_timeout: Duration,
+) -> HelloRetryRequestObservation {
+    let mut out = HelloRetryRequestObservation::default();
+
+    let client_hello = build_tls13_client_hello_empty_key_share(sni);
+
+    let mut stream = match timeout(connect_timeout, TcpStream::connect(&target)).await {
+        Err(_) => {
+            out.error = Some("tcp_connect_timeout".to_string());
+            return out;
+        }
+        Ok(Err(e)) => {
+            let err = ScannerError::from_io("tcp_connect", e);
+            out.error = Some(err.category);
+            return out;
+        }
+        Ok(Ok(s)) => s,
+    };
+
+    if let Err(_) = timeout(handshake_timeout, stream.write_all(&client_hello)).await {
+        out.error = Some("write_client_hello_timeout".to_string());
+        return out;
+    }
+    if let Err(e) = stream.flush().await {
+        out.error = Some(format!("write_flush: {e}"));
+        return out;
+    }
+
+    let mut buf = vec![0u8; 8 * 1024];
+    let mut read = 0usize;
+    loop {
+        match timeout(handshake_timeout, stream.read(&mut buf[read..])).await {
+            Err(_) => {
+                if read == 0 {
+                    out.error = Some("read_timeout_no_bytes".to_string());
+                    return out;
+                }
+                break;
+            }
+            Ok(Ok(0)) => break,
+            Ok(Ok(n)) => {
+                read += n;
+                if read >= buf.len() || record_contains_server_hello(&buf[..read]) {
+                    break;
+                }
+            }
+            Ok(Err(e)) => {
+                out.error = Some(format!("read_io: {e}"));
+                return out;
+            }
+        }
+    }
+
+    classify_hrr_response(&buf[..read], &mut out);
+    out
+}
+
+/// Inspect the first TLS record in `bytes` for a ServerHello and set
+/// `hrr_observed` according to whether its 32-byte random matches the
+/// HRR sentinel. Alert / malformed / non-handshake responses go to
+/// `error`.
+fn classify_hrr_response(bytes: &[u8], out: &mut HelloRetryRequestObservation) {
+    if bytes.len() < 5 {
+        out.error = Some("response_too_short".to_string());
+        return;
+    }
+    let content_type = bytes[0];
+    if content_type == 0x15 {
+        if bytes.len() >= 7 {
+            out.error = Some(format!(
+                "alert_level_{}_desc_{}",
+                bytes[5], bytes[6]
+            ));
+        } else {
+            out.error = Some("alert_truncated".to_string());
+        }
+        return;
+    }
+    if content_type != 0x16 {
+        out.error = Some(format!("unexpected_content_type_{content_type}"));
+        return;
+    }
+
+    let record_len = u16::from_be_bytes([bytes[3], bytes[4]]) as usize;
+    let record_body = match bytes.get(5..5 + record_len) {
+        Some(b) => b,
+        None => {
+            out.error = Some("record_length_exceeds_buffer".to_string());
+            return;
+        }
+    };
+    if record_body.len() < 4 || record_body[0] != 0x02 {
+        out.error = Some("not_a_server_hello".to_string());
+        return;
+    }
+    // Handshake body starts at +4; ServerRandom at +4+2 (after legacy_version).
+    if record_body.len() < 4 + 2 + 32 {
+        out.error = Some("server_hello_truncated_random".to_string());
+        return;
+    }
+    let random = &record_body[4 + 2..4 + 2 + 32];
+    out.hrr_observed = Some(random == HRR_SENTINEL);
+}
+
+/// Build a TLS 1.3 ClientHello that forces a HelloRetryRequest by
+/// offering an empty `key_share`. Per RFC 8446 §4.2.8:
+///
+/// > If the server selects an (EC)DHE group and the client did not
+/// > offer a compatible "key_share" extension in the initial
+/// > ClientHello, the server MUST respond with a HelloRetryRequest
+/// > message.
+///
+/// An empty `client_shares` vector is explicitly permitted and is
+/// the canonical way to trigger HRR from any TLS 1.3 server.
+///
+/// Also includes `supported_versions` advertising TLS 1.3 only —
+/// without it, the server falls back to TLS 1.2 and there's no HRR
+/// to observe.
+fn build_tls13_client_hello_empty_key_share(sni: &str) -> Vec<u8> {
+    let mut ch = Vec::with_capacity(512);
+
+    // client_version = TLS 1.2 (legacy, TLS 1.3 puts real version in
+    // the `supported_versions` extension per RFC 8446 §4.1.2).
+    ch.extend_from_slice(&[0x03, 0x03]);
+    // random — 32 bytes of an uninteresting pattern.
+    ch.extend_from_slice(&[0xCD; 32]);
+    // session_id = 32 bytes (TLS 1.3 middlebox-compat mode, RFC 8446
+    // §4.1.2 — non-empty session_id tricks middleboxes into thinking
+    // this is a resumable TLS 1.2 handshake).
+    ch.push(0x20);
+    ch.extend_from_slice(&[0xAB; 32]);
+    // cipher_suites — TLS 1.3 suites only.
+    let cipher_suites: &[u16] = &[0x1301, 0x1302, 0x1303, 0x1304, 0x1305];
+    let cs_bytes: Vec<u8> = cipher_suites.iter().flat_map(|c| c.to_be_bytes()).collect();
+    ch.extend_from_slice(&(cs_bytes.len() as u16).to_be_bytes());
+    ch.extend_from_slice(&cs_bytes);
+    // compression_methods — null only (TLS 1.3 requires this).
+    ch.push(0x01);
+    ch.push(0x00);
+
+    let mut exts: Vec<u8> = Vec::new();
+    append_sni_extension(&mut exts, sni);
+    append_extension(&mut exts, 0x000d, &signature_algorithms_ext());
+    append_extension(&mut exts, 0x000a, &supported_groups_ext());
+    // supported_versions — TLS 1.3 only (extension 43, RFC 8446 §4.2.1).
+    // Body: 1-byte list-length + 2-byte per-version list.
+    append_extension(&mut exts, 0x002b, &[0x02, 0x03, 0x04]);
+    // key_share — empty vector (extension 51, RFC 8446 §4.2.8).
+    // Body: 2-byte client_shares length = 0.
+    append_extension(&mut exts, 0x0033, &[0x00, 0x00]);
+    // psk_key_exchange_modes — mandatory when offering PSK, but also
+    // recommended for compatibility. Body: 1-byte list-length + mode
+    // bytes. Offer `psk_dhe_ke` (1).
+    append_extension(&mut exts, 0x002d, &[0x01, 0x01]);
+
+    ch.extend_from_slice(&(exts.len() as u16).to_be_bytes());
+    ch.extend_from_slice(&exts);
+
+    let body_len = ch.len();
+    let mut hs = Vec::with_capacity(4 + ch.len());
+    hs.push(0x01); // ClientHello
+    hs.push(((body_len >> 16) & 0xff) as u8);
+    hs.push(((body_len >> 8) & 0xff) as u8);
+    hs.push((body_len & 0xff) as u8);
+    hs.extend_from_slice(&ch);
+
+    let mut record = Vec::with_capacity(5 + hs.len());
+    record.push(0x16); // handshake
+    record.extend_from_slice(&[0x03, 0x01]); // legacy record version
+    record.extend_from_slice(&(hs.len() as u16).to_be_bytes());
+    record.extend_from_slice(&hs);
+    record
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -720,6 +936,80 @@ mod tests {
             names,
             vec!["uncompressed", "ansiX962_compressed_prime", "0x0A"]
         );
+    }
+
+    #[test]
+    fn tls13_client_hello_has_empty_key_share_and_tls13_only_versions() {
+        let ch = build_tls13_client_hello_empty_key_share("example.com");
+        // Extensions block must contain `supported_versions` (0x002b) +
+        // `key_share` (0x0033) + the empty key_share marker.
+        // Search for supported_versions header: 0x00 0x2b LEN_HI LEN_LO ...
+        let sv_hdr = [0x00u8, 0x2b, 0x00, 0x03];
+        assert!(
+            ch.windows(4).any(|w| w == sv_hdr),
+            "supported_versions extension missing"
+        );
+        // key_share ext header = 0x00 0x33 0x00 0x02 followed by empty vec 0x00 0x00.
+        let ks_hdr = [0x00u8, 0x33, 0x00, 0x02, 0x00, 0x00];
+        assert!(
+            ch.windows(6).any(|w| w == ks_hdr),
+            "empty key_share extension missing"
+        );
+    }
+
+    #[test]
+    fn classify_hrr_matches_rfc_sentinel() {
+        // Fabricate a ServerHello whose 32-byte random equals the RFC
+        // 8446 §4.1.3 HRR sentinel. Expect `hrr_observed: Some(true)`.
+        let mut record = Vec::new();
+        record.push(0x16); // handshake content type
+        record.extend_from_slice(&[0x03, 0x03]); // legacy version
+        // Handshake body: msg_type(1) + length(3) + legacy_version(2) + random(32)
+        let mut hs_body = Vec::new();
+        hs_body.extend_from_slice(&[0x03, 0x03]); // legacy_version
+        hs_body.extend_from_slice(&HRR_SENTINEL);
+        let mut hs = Vec::new();
+        hs.push(0x02); // ServerHello
+        hs.extend_from_slice(&[0x00, 0x00, hs_body.len() as u8]);
+        hs.extend_from_slice(&hs_body);
+        record.extend_from_slice(&(hs.len() as u16).to_be_bytes());
+        record.extend_from_slice(&hs);
+
+        let mut out = HelloRetryRequestObservation::default();
+        classify_hrr_response(&record, &mut out);
+        assert_eq!(out.hrr_observed, Some(true));
+        assert!(out.error.is_none());
+    }
+
+    #[test]
+    fn classify_hrr_rejects_real_server_random() {
+        // Random that is NOT the HRR sentinel should give Some(false).
+        let mut record = Vec::new();
+        record.push(0x16);
+        record.extend_from_slice(&[0x03, 0x03]);
+        let mut hs_body = Vec::new();
+        hs_body.extend_from_slice(&[0x03, 0x03]);
+        hs_body.extend_from_slice(&[0xAAu8; 32]);
+        let mut hs = Vec::new();
+        hs.push(0x02);
+        hs.extend_from_slice(&[0x00, 0x00, hs_body.len() as u8]);
+        hs.extend_from_slice(&hs_body);
+        record.extend_from_slice(&(hs.len() as u16).to_be_bytes());
+        record.extend_from_slice(&hs);
+
+        let mut out = HelloRetryRequestObservation::default();
+        classify_hrr_response(&record, &mut out);
+        assert_eq!(out.hrr_observed, Some(false));
+    }
+
+    #[test]
+    fn classify_hrr_surfaces_alert() {
+        // Alert record (content_type 0x15) should populate `error`, not hrr_observed.
+        let record = [0x15u8, 0x03, 0x03, 0x00, 0x02, 0x02, 0x28];
+        let mut out = HelloRetryRequestObservation::default();
+        classify_hrr_response(&record, &mut out);
+        assert!(out.hrr_observed.is_none());
+        assert!(out.error.unwrap().starts_with("alert_level_"));
     }
 
     #[test]
