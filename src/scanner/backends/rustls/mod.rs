@@ -13,6 +13,8 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+
+pub mod session_resumption;
 use tokio::net::TcpStream;
 use tokio::time::timeout;
 use tokio_rustls::{rustls, TlsConnector};
@@ -235,7 +237,7 @@ async fn rustls_connect_outcome(
 /// equivalents scattered across `ciphers.rs` / `groups.rs` — probes
 /// never validate certificates; the characterization path does.
 #[derive(Debug)]
-struct AcceptAllVerifier;
+pub(crate) struct AcceptAllVerifier;
 
 impl rustls::client::danger::ServerCertVerifier for AcceptAllVerifier {
     fn verify_server_cert(

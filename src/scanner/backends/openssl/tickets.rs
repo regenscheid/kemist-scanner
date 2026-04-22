@@ -41,9 +41,7 @@ use openssl::ssl::{
 };
 use tracing::{debug, info};
 
-use crate::model::scan_result::{
-    ObservationBool, SessionResumption, Tls12Resumption, Tls13Resumption,
-};
+use crate::model::scan_result::{ObservationBool, SessionResumption, Tls12Resumption};
 
 /// Run the probe. Always returns a populated [`SessionResumption`];
 /// slots that aren't observable fall back to `NotProbed` with a
@@ -71,17 +69,18 @@ pub async fn probe(
         }
     });
 
-    // TLS 1.3 resumption + 0-RTT are deferred to a follow-up
-    // workstream. Always emit with a `NotProbed` reason so rule
-    // engines see a stable schema shape.
-    let tls1_3 = Tls13Resumption {
-        new_session_ticket_count: None,
-        ticket_lifetime_secs: Vec::new(),
-        psk_resumption_accepted: ObservationBool::not_probed(
-            "tls13_resumption_probe_not_implemented",
-        ),
-        early_data_accepted: ObservationBool::not_probed("early_data_probe_not_implemented"),
+    // TLS 1.3 resumption + 0-RTT probe lives on the rustls backend
+    // (session ticket + 0-RTT machinery is cleanest via rustls's
+    // `ClientSessionStore` trait). Aggregate its result into the
+    // combined `SessionResumption` output so consumers see one
+    // `tls.session_resumption` block regardless of backend split.
+    let ctx = crate::scanner::backends::ProbeContext {
+        target,
+        hostname: hostname.to_string(),
+        connect_timeout,
+        handshake_timeout,
     };
+    let tls1_3 = crate::scanner::backends::rustls::session_resumption::probe(&ctx).await;
 
     SessionResumption { tls1_2, tls1_3 }
 }
