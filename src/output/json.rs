@@ -292,10 +292,20 @@ fn merge_openssl_cipher_probes(
                 HandshakeOutcome::Supported => (Some(true), Method::Probe, None),
                 HandshakeOutcome::NotSupported => (Some(false), Method::Probe, None),
                 HandshakeOutcome::Error(e) => (None, Method::Error, Some(e.clone())),
-                HandshakeOutcome::NotProbed(_)
-                | HandshakeOutcome::IgnoredGroupReturnedCustomPrime => unreachable!(
-                    "OpenSSL cipher probe never constructs NotProbed or \
-                     IgnoredGroupReturnedCustomPrime variants"
+                // OpenSSL cipher probes emit `NotProbed` when the
+                // cipher name isn't recognized by the local OpenSSL
+                // build (e.g. static-DH/ECDH suites dropped in
+                // OpenSSL 3.x). Surface as `method: not_probed` with
+                // the deterministic reason so downstream consumers
+                // can tell "never attempted" from "attempted and
+                // rejected."
+                HandshakeOutcome::NotProbed(reason) => {
+                    (None, Method::NotProbed, Some(reason.clone()))
+                }
+                HandshakeOutcome::IgnoredGroupReturnedCustomPrime => unreachable!(
+                    "OpenSSL cipher probe never constructs \
+                     IgnoredGroupReturnedCustomPrime variant — that's \
+                     FFDHE-specific"
                 ),
             };
             let entry = CipherSuiteEntry {

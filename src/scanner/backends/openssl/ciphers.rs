@@ -245,7 +245,11 @@ const TARGETS: &[Target] = &[
     },
     Target {
         iana_name: "TLS_ECDHE_RSA_WITH_ARIA_128_GCM_SHA256",
-        openssl_name: "ECDHE-RSA-ARIA128-GCM-SHA256",
+        // OpenSSL 3.x collapsed the RSA-signature qualifier on ARIA
+        // ECDHE suites; the accepted name is `ECDHE-ARIA128-GCM-SHA256`
+        // without the `-RSA-` segment. IANA codepoint 0xC060 is still
+        // the RSA-authenticated variant.
+        openssl_name: "ECDHE-ARIA128-GCM-SHA256",
         iana_code: 0xC060,
         version: TlsVersion::Tls12,
     },
@@ -512,11 +516,26 @@ fn probe_single_suite_blocking(
     let ctx = match build_legacy_context(ossl_version, openssl_cipher_name) {
         Ok(c) => c,
         Err(stack) => {
-            // Usually means the cipher name isn't recognized by the local
-            // OpenSSL build. Classify as Error, not NotSupported — this is
-            // a kemist-side bug, not a server observation.
+            // `no cipher match` from `SSL_CTX_set_cipher_list` means
+            // the cipher name isn't in the vendored OpenSSL 3.x build
+            // at all — static-DH/ECDH suites (0x0030, 0x0031, 0xC004,
+            // 0xC00E) were removed upstream, other suites may need
+            // additional openssl-src features. Surface these as
+            // `NotProbed` with a deterministic reason rather than an
+            // Error, because the scanner cannot generate any
+            // server-side signal — it never gets as far as sending a
+            // ClientHello. Other build errors (misconfigured SSL_CTX
+            // flags, provider load issues) still map to Error.
+            let stack_str = stack.to_string();
+            let outcome = if stack_str.contains("no cipher match") {
+                HandshakeOutcome::NotProbed(format!(
+                    "openssl_3x_cipher_not_available:{openssl_cipher_name}"
+                ))
+            } else {
+                HandshakeOutcome::Error(format!("openssl_ctx_build: {stack}"))
+            };
             return ProbeRun {
-                outcome: HandshakeOutcome::Error(format!("openssl_ctx_build: {stack}")),
+                outcome,
                 dh_snapshot: None,
                 ske_sig: None,
             };
@@ -598,6 +617,33 @@ fn build_legacy_context(
     // is attempted.
     builder.set_cipher_list(&format!("{}:@SECLEVEL=0", cipher_list))?;
     builder.set_verify(SslVerifyMode::NONE);
+    // Dummy PSK client callback. Without this, OpenSSL refuses to
+    // construct a ClientHello for PSK-family cipher suites because it
+    // has no identity/key to put in the `pre_shared_key` extension —
+    // the handshake fails client-side before any bytes leave the
+    // socket, surfacing as `internal_scanner_error` with no context.
+    // Installing a bogus identity/key lets the ClientHello go out;
+    // real servers reply with `unknown_psk_identity` (alert 115) or
+    // `handshake_failure` (alert 40), which the classifier maps to
+    // `NotSupported` — the observation we actually want from a PSK
+    // probe against an unknown-secret target.
+    //
+    // The callback runs only when a PSK-family suite is selected; it
+    // never fires for non-PSK probes.
+    builder.set_psk_client_callback(|_ssl, _hint, identity_out, psk_out| {
+        let identity = b"kemist-probe";
+        let psk = [0u8; 32];
+        if identity_out.len() < identity.len() + 1 || psk_out.len() < psk.len() {
+            // Buffer too small — return a zero-length PSK, OpenSSL
+            // then aborts with SSL_R_PSK_IDENTITY_NOT_FOUND. Handshake
+            // still fails cleanly.
+            return Ok(0);
+        }
+        identity_out[..identity.len()].copy_from_slice(identity);
+        identity_out[identity.len()] = 0;
+        psk_out[..psk.len()].copy_from_slice(&psk);
+        Ok(psk.len())
+    });
     Ok(builder.build())
 }
 

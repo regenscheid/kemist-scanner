@@ -44,7 +44,7 @@ openssl-sys = { version = "0.9", optional = true }
 #   SSLv3 protocol-version probe fails at context build. The legacy
 #   provider alone enables SSLv3 primitives but not the SSLv3
 #   record-layer / protocol code itself.
-openssl-src = { version = "=300.5.5", features = ["weak-crypto", "ssl3"], optional = true }
+openssl-src = { version = "=300.5.5", features = ["weak-crypto", "ssl3", "camellia", "seed"], optional = true }
 foreign-types = { version = "0.3", optional = true }
 
 # Async runtime and networking
@@ -103,7 +103,7 @@ chrono = { version = "0.4", features = ["serde"] }
 # openssl-src ignores our `weak-crypto`/`ssl3` features and OpenSSL is
 # compiled with `no-weak-ssl-ciphers` / `no-ssl3`, which strips RC4 /
 # single-DES / 3DES / SSLv3 from the cipher-list tables.
-openssl-src = { version = "=300.5.5", features = ["weak-crypto", "ssl3"], optional = true }
+openssl-src = { version = "=300.5.5", features = ["weak-crypto", "ssl3", "camellia", "seed"], optional = true }
 
 [dev-dependencies]
 tokio-test = "0.4"
