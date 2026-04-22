@@ -522,9 +522,19 @@ fn build_groups(results: &ScanResults) -> TlsGroups {
                      is OpenSSL-only"
                 ),
             };
-            // src/scanner/groups.rs is TLS 1.3-only by design, so every
-            // entry lands in tls1_3.
-            out.tls1_3.insert(r.name.clone(), obs);
+            // Route by the version tag on the result. Classical ECDHE
+            // curves get probed at both TLS 1.2 and TLS 1.3 (two
+            // entries in `probes.results`); ML-KEM and hybrids are
+            // TLS 1.3 only.
+            match r.version {
+                TlsVersion::Tls12 => {
+                    out.tls1_2.insert(r.name.clone(), obs);
+                }
+                TlsVersion::Tls13 => {
+                    out.tls1_3.insert(r.name.clone(), obs);
+                }
+                _ => {}
+            }
         }
     }
 

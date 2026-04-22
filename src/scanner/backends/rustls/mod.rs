@@ -140,14 +140,13 @@ async fn probe_single_group_shape(
     version: TlsVersion,
     ctx: &ProbeContext,
 ) -> Result<HandshakeResult, UnsatisfiableConstraint> {
-    // Rustls group probes are TLS-1.3-only by design — TLS 1.2 uses
-    // `supported_groups` for ECDHE but the rustls group-probe path
-    // pins kx_groups in the provider, which constrains both 1.2 and
-    // 1.3. The existing probe_single_group doesn't separate versions.
-    if version != TlsVersion::Tls13 {
-        return Err(UnsatisfiableConstraint::new(
-            "rustls_group_probe_is_tls13_only",
-        ));
+    // Only TLS 1.2 and TLS 1.3 are meaningful targets for the rustls
+    // group probe — rustls doesn't speak earlier versions at all.
+    if !matches!(version, TlsVersion::Tls12 | TlsVersion::Tls13) {
+        return Err(UnsatisfiableConstraint::new(format!(
+            "rustls_group_probe_version_out_of_scope:{:?}",
+            version
+        )));
     }
     let Some(group) = rustls::crypto::aws_lc_rs::ALL_KX_GROUPS
         .iter()
@@ -162,6 +161,7 @@ async fn probe_single_group_shape(
         ctx.target,
         &ctx.hostname,
         group,
+        version,
         ctx.connect_timeout,
         ctx.handshake_timeout,
     )

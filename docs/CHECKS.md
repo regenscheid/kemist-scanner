@@ -182,8 +182,16 @@ any leftover `not_probed` slot with a real `supported: true | false`
 observation. Entries that carry `method: not_probed` after both paths
 have run identify a codepoint neither backend ships.
 
-**Mechanism.** Per-group TLS 1.3 handshake with that single group in
-`kx_groups`. Outcomes classify identically to cipher probes.
+**Mechanism.** Per-group handshake with that single group pinned in
+`kx_groups`. Classical ECDHE curves (X25519, X448, secp256r1/384r1/
+521r1, brainpool*) are probed at **both TLS 1.2 and TLS 1.3** — the
+TLS 1.2 handshake pins the cipher list to ECDHE-only
+(`ECDHE:@SECLEVEL=0` on the OpenSSL side; rustls's TLS 1.2 provider
+default is already ECDHE-heavy), so a successful handshake can only
+use the advertised curve. ML-KEM and PQC hybrids are probed at TLS
+1.3 only (they're not defined in TLS 1.2). FFDHE groups are
+TLS-1.2-only on the DHE cipher path (plus TLS 1.3 key_share where
+the server opts in). Outcomes classify identically to cipher probes.
 
 **Future extension paths.** See [PQC.md](PQC.md) and the module
 docstring in [src/scanner/groups.rs](../src/scanner/groups.rs).

@@ -64,7 +64,9 @@ use tracing::debug;
 use crate::model::errors::ScannerError;
 use crate::scanner::backends::{is_wire_rejection, HandshakeOutcome, TlsBackend};
 
-/// One per-group probe result.
+/// One per-group probe result at a specific TLS version. Same codepoint
+/// may appear twice (once for TLS 1.2 ECDHE, once for TLS 1.3
+/// key_share) for curves that are valid across versions.
 #[derive(Debug, Clone)]
 pub struct GroupProbeResult {
     /// Human-readable name matching rustls's `NamedGroup` Debug output
@@ -72,6 +74,8 @@ pub struct GroupProbeResult {
     pub name: String,
     /// IANA codepoint (e.g. `0x11EC`).
     pub iana_code: u16,
+    /// TLS version this probe targeted.
+    pub version: crate::model::protocol::TlsVersion,
     pub outcome: HandshakeOutcome,
 }
 
@@ -94,25 +98,29 @@ pub struct GroupProbeOutput {
 pub fn iana_code_for(name: &str) -> Option<u16> {
     TARGET_GROUPS
         .iter()
-        .find(|(n, _)| *n == name)
-        .map(|(_, code)| *code)
+        .find(|(n, _, _)| *n == name)
+        .map(|(_, code, _)| *code)
 }
 
-const TARGET_GROUPS: &[(&str, u16)] = &[
-    // Classical elliptic curves
-    ("X25519", 0x001d),
-    ("X448", 0x001e),
-    ("secp256r1", 0x0017),
-    ("secp384r1", 0x0018),
-    ("secp521r1", 0x0019),
-    // Standalone ML-KEM (NIST FIPS 203)
-    ("MLKEM512", 0x0200),
-    ("MLKEM768", 0x0201),
-    ("MLKEM1024", 0x0202),
-    // PQC hybrids (IETF TLS WG codepoints)
-    ("secp256r1MLKEM768", 0x11eb),
-    ("X25519MLKEM768", 0x11ec),
-    ("secp384r1MLKEM1024", 0x11ed),
+/// `(name, iana_code, tls12_eligible)`. TLS 1.2 eligibility is
+/// per-codepoint: classical ECC curves ride TLS 1.2 ECDHE + TLS 1.3
+/// key_share; standalone ML-KEM and PQC hybrids are defined only at
+/// TLS 1.3, so probing them at 1.2 is a category error.
+const TARGET_GROUPS: &[(&str, u16, bool)] = &[
+    // Classical elliptic curves — valid at TLS 1.2 (ECDHE) and TLS 1.3.
+    ("X25519", 0x001d, true),
+    ("X448", 0x001e, true),
+    ("secp256r1", 0x0017, true),
+    ("secp384r1", 0x0018, true),
+    ("secp521r1", 0x0019, true),
+    // Standalone ML-KEM (NIST FIPS 203) — TLS 1.3 only.
+    ("MLKEM512", 0x0200, false),
+    ("MLKEM768", 0x0201, false),
+    ("MLKEM1024", 0x0202, false),
+    // PQC hybrids (IETF TLS WG codepoints) — TLS 1.3 only.
+    ("secp256r1MLKEM768", 0x11eb, false),
+    ("X25519MLKEM768", 0x11ec, false),
+    ("secp384r1MLKEM1024", 0x11ed, false),
 ];
 
 /// Probe every target group. Respects `per_probe_delay` between
@@ -147,42 +155,56 @@ pub async fn probe_kx_groups(
         .copied()
         .collect();
 
-    let mut results = Vec::with_capacity(TARGET_GROUPS.len());
+    let mut results = Vec::with_capacity(TARGET_GROUPS.len() * 2);
 
-    for (name, iana_code) in TARGET_GROUPS {
-        let outcome = if rustls_cipher_codes.contains(iana_code) {
-            let constraint = crate::scanner::backends::HandshakeConstraint::single_group_at(
-                *iana_code,
-                crate::model::protocol::TlsVersion::Tls13,
-            );
-            match registry.rustls.handshake(constraint, &ctx).await {
-                Ok(r) => r.outcome,
-                Err(u) => HandshakeOutcome::Error(format!(
-                    "unsatisfiable_constraint:{}",
-                    u.reason
-                )),
+    for (name, iana_code, tls12_eligible) in TARGET_GROUPS {
+        // Every classical ECDHE curve gets probed at both TLS 1.2 and
+        // TLS 1.3 — two handshakes per curve, results tagged with the
+        // version so the JSON emitter can route them into the right
+        // per-version bucket. ML-KEM / PQC hybrids are TLS 1.3 only;
+        // their TLS 1.2 slot renders as `not_applicable` in the
+        // downstream merge rather than a real probe.
+        let mut versions = vec![crate::model::protocol::TlsVersion::Tls13];
+        if *tls12_eligible {
+            versions.insert(0, crate::model::protocol::TlsVersion::Tls12);
+        }
+
+        for version in versions {
+            let outcome = if rustls_cipher_codes.contains(iana_code) {
+                let constraint =
+                    crate::scanner::backends::HandshakeConstraint::single_group_at(
+                        *iana_code, version,
+                    );
+                match registry.rustls.handshake(constraint, &ctx).await {
+                    Ok(r) => r.outcome,
+                    Err(u) => HandshakeOutcome::Error(format!(
+                        "unsatisfiable_constraint:{}",
+                        u.reason
+                    )),
+                }
+            } else {
+                debug!("group {} not exposed by aws-lc-rs, skipping probe", name);
+                HandshakeOutcome::NotProbed(format!(
+                    "aws_lc_rs_no_{}_support",
+                    name.to_lowercase()
+                ))
+            };
+
+            results.push(GroupProbeResult {
+                name: (*name).to_string(),
+                iana_code: *iana_code,
+                version,
+                outcome,
+            });
+
+            if !per_probe_delay.is_zero()
+                && !matches!(
+                    results.last().unwrap().outcome,
+                    HandshakeOutcome::NotProbed(_)
+                )
+            {
+                tokio::time::sleep(per_probe_delay).await;
             }
-        } else {
-            debug!("group {} not exposed by aws-lc-rs, skipping probe", name);
-            HandshakeOutcome::NotProbed(format!(
-                "aws_lc_rs_no_{}_support",
-                name.to_lowercase()
-            ))
-        };
-
-        results.push(GroupProbeResult {
-            name: (*name).to_string(),
-            iana_code: *iana_code,
-            outcome,
-        });
-
-        if !per_probe_delay.is_zero()
-            && !matches!(
-                results.last().unwrap().outcome,
-                HandshakeOutcome::NotProbed(_)
-            )
-        {
-            tokio::time::sleep(per_probe_delay).await;
         }
     }
 
@@ -193,14 +215,26 @@ pub(crate) async fn probe_single_group(
     target: SocketAddr,
     hostname: &str,
     group: &'static dyn SupportedKxGroup,
+    version: crate::model::protocol::TlsVersion,
     connect_timeout: Duration,
     handshake_timeout: Duration,
 ) -> HandshakeOutcome {
     let mut provider = aws_lc_rs::default_provider();
     provider.kx_groups = vec![group];
 
+    let proto = match version {
+        crate::model::protocol::TlsVersion::Tls12 => &rustls::version::TLS12,
+        crate::model::protocol::TlsVersion::Tls13 => &rustls::version::TLS13,
+        other => {
+            return HandshakeOutcome::Error(format!(
+                "rustls_group_probe_version_out_of_scope:{:?}",
+                other
+            ));
+        }
+    };
+
     let config = match rustls::ClientConfig::builder_with_provider(Arc::new(provider))
-        .with_protocol_versions(&[&rustls::version::TLS13])
+        .with_protocol_versions(&[proto])
     {
         Ok(b) => b
             .dangerous()

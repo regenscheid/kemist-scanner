@@ -106,18 +106,22 @@ const TARGETS: &[KxGroupTarget] = &[
         ffdhe_cross_check: Some(DhClassification::Ffdhe8192),
     },
     // Groups OpenSSL 3.5 ships but aws-lc-rs does not.
+    // `tls12_applicable: true` here drives an additional ECDHE-pinned
+    // handshake at TLS 1.2 — the codepoint is valid across versions
+    // per RFC 4492 + RFC 8446, so servers with TLS-1.2-only ECDHE
+    // support surface visibly.
     KxGroupTarget {
         openssl_name: "X448",
         display_name: "X448",
         iana_code: 0x001E,
-        tls12_applicable: false,
+        tls12_applicable: true,
         ffdhe_cross_check: None,
     },
     KxGroupTarget {
         openssl_name: "P-521",
         display_name: "secp521r1",
         iana_code: 0x0019,
-        tls12_applicable: false,
+        tls12_applicable: true,
         ffdhe_cross_check: None,
     },
     KxGroupTarget {
@@ -415,7 +419,7 @@ fn probe_blocking(
     let _ = tcp.set_read_timeout(Some(handshake_timeout));
     let _ = tcp.set_write_timeout(Some(handshake_timeout));
 
-    let ctx = match build_context(version, t.openssl_name) {
+    let ctx = match build_context(version, t.openssl_name, t.ffdhe_cross_check.is_some()) {
         Ok(c) => c,
         Err(stack) => {
             return HandshakeOutcome::Error(format!("openssl_ctx_build: {stack}"));
@@ -490,6 +494,7 @@ fn openssl_rejected_group_client_side(err: &openssl::ssl::Error) -> bool {
 fn build_context(
     version: SslVersion,
     group_name: &str,
+    is_ffdhe: bool,
 ) -> Result<SslContext, openssl::error::ErrorStack> {
     let mut builder = SslContext::builder(SslMethod::tls_client())?;
     builder.set_min_proto_version(Some(version))?;
@@ -497,8 +502,19 @@ fn build_context(
     builder.set_security_level(0);
     builder.set_verify(SslVerifyMode::NONE);
     builder.set_groups_list(group_name)?;
+    // At TLS 1.2, the cipher suite determines which group-bearing
+    // handshake branch runs — DHE for FFDHE primes, ECDHE for named
+    // curves. Pinning the cipher list to the matching family is what
+    // makes the single-group `set_groups_list` offer load-bearing:
+    // without it the server could fall back to a different kx entirely
+    // and our group advertisement becomes a null signal.
     if version == SslVersion::TLS1_2 {
-        builder.set_cipher_list("DHE:@SECLEVEL=0")?;
+        let cipher_list = if is_ffdhe {
+            "DHE:@SECLEVEL=0"
+        } else {
+            "ECDHE:@SECLEVEL=0"
+        };
+        builder.set_cipher_list(cipher_list)?;
     }
     Ok(builder.build())
 }
@@ -542,13 +558,22 @@ mod tests {
     }
 
     #[test]
-    fn non_ffdhe_targets_are_tls13_only() {
+    fn mlkem_and_hybrid_targets_are_tls13_only() {
+        // ML-KEM standalone and PQC hybrid codepoints are defined only
+        // at TLS 1.3 (the hybrid structure encodes both classical and
+        // PQC shares in `key_share`, which doesn't exist in TLS 1.2).
+        // Classical ECDHE curves CAN ride TLS 1.2 — they're allowed.
         for t in TARGETS {
-            if t.ffdhe_cross_check.is_none() {
+            let is_mlkem_or_hybrid = matches!(
+                t.iana_code,
+                0x0200 | 0x0201 | 0x0202 | 0x11EB | 0x11EC | 0x11ED
+            );
+            if is_mlkem_or_hybrid {
                 assert!(
                     !t.tls12_applicable,
-                    "{} must not be TLS 1.2 applicable",
-                    t.display_name
+                    "{} (0x{:04X}) is TLS 1.3 only — must not be TLS 1.2 applicable",
+                    t.display_name,
+                    t.iana_code
                 );
             }
         }
