@@ -141,7 +141,10 @@ async fn run_one(
     })
 }
 
-fn probe_blocking(
+/// Synchronous sigalg-pinned handshake. `pub(crate)` so
+/// `backends::openssl::handshake()` can wrap it for the sigalgs
+/// constraint shape.
+pub(crate) fn probe_blocking(
     sigalgs: &str,
     target: SocketAddr,
     hostname: &str,

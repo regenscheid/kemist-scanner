@@ -12,11 +12,12 @@
 
 use async_trait::async_trait;
 
-use crate::model::protocol::ProtocolSupport;
+use crate::model::protocol::{ProtocolSupport, TlsVersion};
 use crate::scanner::backends::{
     openssl_inventory, BackendInventory, ConstraintCapabilities, HandshakeConstraint,
     HandshakeOutcome, HandshakeResult, ProbeContext, TlsBackend, UnsatisfiableConstraint,
 };
+use crate::scanner::probe::NegotiatedState;
 
 pub struct OpensslBackend {
     inventory: BackendInventory,
@@ -68,16 +69,12 @@ impl TlsBackend for OpensslBackend {
         c: HandshakeConstraint,
         ctx: &ProbeContext,
     ) -> Result<HandshakeResult, UnsatisfiableConstraint> {
-        // Shapes not wired to existing probe functions yet — Stage 3
-        // will migrate fallback_scsv / sigalg_policy rewrites onto them.
+        // `sigalgs` pinning still deferred — the sigalg_policy rewrite
+        // needs an IANA-codepoint↔OpenSSL-string mapping that Stage 4b
+        // scopes out.
         if c.sigalgs.is_some() {
             return Err(UnsatisfiableConstraint::new(
-                "openssl_backend_sigalgs_pending_stage_3",
-            ));
-        }
-        if c.send_fallback_scsv {
-            return Err(UnsatisfiableConstraint::new(
-                "openssl_backend_send_fallback_scsv_pending_stage_3",
+                "openssl_backend_sigalgs_pending",
             ));
         }
         if c.alpn.is_some() {
@@ -89,6 +86,82 @@ impl TlsBackend for OpensslBackend {
         // already (`set_security_level(0)` is baked into the context
         // builders). Accepting the flag explicitly is fine — ignoring
         // it matches current behavior.
+
+        // FALLBACK_SCSV downgrade probe. Expects `version_range` pinned
+        // to the downgrade target in `max`. Wraps the existing
+        // `fallback_scsv::probe_scsv_blocking` helper.
+        if c.send_fallback_scsv {
+            let Some((_, v_max)) = c.version_range else {
+                return Err(UnsatisfiableConstraint::new(
+                    "openssl_backend_scsv_requires_version_range",
+                ));
+            };
+            let Some(downgrade_target) = tls_to_ssl_version(v_max) else {
+                return Err(UnsatisfiableConstraint::new(format!(
+                    "openssl_backend_scsv_version_out_of_scope:{:?}",
+                    v_max
+                )));
+            };
+            let hostname_owned = ctx.hostname.clone();
+            let target = ctx.target;
+            let connect_timeout = ctx.connect_timeout;
+            let handshake_timeout = ctx.handshake_timeout;
+            let probe = tokio::task::spawn_blocking(move || {
+                crate::scanner::openssl::fallback_scsv::probe_scsv_blocking(
+                    target,
+                    &hostname_owned,
+                    downgrade_target,
+                    connect_timeout,
+                    handshake_timeout,
+                )
+            })
+            .await
+            .unwrap_or_else(|e| {
+                crate::scanner::openssl::fallback_scsv::ProbeOutcome::Error(format!(
+                    "spawn_blocking_panic: {e}"
+                ))
+            });
+            return Ok(scsv_outcome_to_handshake_result(probe));
+        }
+
+        // Characterization: wide version range, no cipher/group pin —
+        // let the server pick its max supported protocol. Wraps the
+        // existing `fallback_scsv::characterize_max_version_blocking`
+        // so the returned `HandshakeResult.negotiated.version` carries
+        // the server's choice.
+        if c.cipher_suites.is_none()
+            && c.groups.is_none()
+            && matches!(c.version_range, Some((v_min, v_max)) if v_min != v_max)
+        {
+            let hostname_owned = ctx.hostname.clone();
+            let target = ctx.target;
+            let connect_timeout = ctx.connect_timeout;
+            let handshake_timeout = ctx.handshake_timeout;
+            let negotiated_ssl = tokio::task::spawn_blocking(move || {
+                crate::scanner::openssl::fallback_scsv::characterize_max_version_blocking(
+                    target,
+                    &hostname_owned,
+                    connect_timeout,
+                    handshake_timeout,
+                )
+            })
+            .await
+            .unwrap_or(None);
+            let result = match negotiated_ssl {
+                Some(v) => {
+                    let mut r = HandshakeResult::outcome_only(HandshakeOutcome::Supported);
+                    r.negotiated = Some(NegotiatedState {
+                        version: ssl_to_tls_version(v),
+                        ..Default::default()
+                    });
+                    r
+                }
+                None => HandshakeResult::outcome_only(HandshakeOutcome::Error(
+                    "characterization_handshake_failed".to_string(),
+                )),
+            };
+            return Ok(result);
+        }
 
         match (&c.cipher_suites, &c.groups, c.version_range) {
             (Some(suites), None, Some((v_min, v_max)))
@@ -138,6 +211,61 @@ impl TlsBackend for OpensslBackend {
             )),
         }
     }
+}
+
+/// Convert a `TlsVersion` to the OpenSSL `SslVersion` enum. Covers
+/// the versions probe_scsv and the characterization helper accept;
+/// returns `None` for SSLv2 (not representable in OpenSSL 3.x).
+fn tls_to_ssl_version(v: TlsVersion) -> Option<openssl::ssl::SslVersion> {
+    use openssl::ssl::SslVersion;
+    match v {
+        TlsVersion::Ssl3 => Some(SslVersion::SSL3),
+        TlsVersion::Tls10 => Some(SslVersion::TLS1),
+        TlsVersion::Tls11 => Some(SslVersion::TLS1_1),
+        TlsVersion::Tls12 => Some(SslVersion::TLS1_2),
+        TlsVersion::Tls13 => Some(SslVersion::TLS1_3),
+        TlsVersion::Ssl2 => None,
+    }
+}
+
+/// Reverse mapping: OpenSSL's `SslVersion::version2()` result back into
+/// the scanner's `TlsVersion`. `None` for values OpenSSL exposes but
+/// the scanner doesn't model (e.g. DTLS versions).
+fn ssl_to_tls_version(v: openssl::ssl::SslVersion) -> Option<TlsVersion> {
+    use openssl::ssl::SslVersion;
+    if v == SslVersion::TLS1_3 {
+        Some(TlsVersion::Tls13)
+    } else if v == SslVersion::TLS1_2 {
+        Some(TlsVersion::Tls12)
+    } else if v == SslVersion::TLS1_1 {
+        Some(TlsVersion::Tls11)
+    } else if v == SslVersion::TLS1 {
+        Some(TlsVersion::Tls10)
+    } else if v == SslVersion::SSL3 {
+        Some(TlsVersion::Ssl3)
+    } else {
+        None
+    }
+}
+
+/// Fold an SCSV `ProbeOutcome` into a `HandshakeResult`. The composer
+/// on the orchestrator side reads `outcome` + `alert` to classify
+/// SCSV enforcement — `HandshakeAccepted` means the server honored a
+/// downgrade offer, each alert variant carries the server's rejection
+/// category in `alert`.
+fn scsv_outcome_to_handshake_result(
+    outcome: crate::scanner::openssl::fallback_scsv::ProbeOutcome,
+) -> HandshakeResult {
+    use crate::scanner::openssl::fallback_scsv::ProbeOutcome;
+    let mut result = HandshakeResult::outcome_only(match &outcome {
+        ProbeOutcome::HandshakeAccepted => HandshakeOutcome::Supported,
+        ProbeOutcome::Alert(_) => HandshakeOutcome::NotSupported,
+        ProbeOutcome::Error(msg) => HandshakeOutcome::Error(msg.clone()),
+    });
+    if let ProbeOutcome::Alert(cat) = outcome {
+        result.alert = Some(cat);
+    }
+    result
 }
 
 /// Map the `ProtocolSupport` shape used by existing version probes to
