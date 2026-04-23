@@ -205,7 +205,7 @@ fn fully_populated_openssl_observations_match_schema_v1() {
         fallback_scsv::FallbackScsvResult,
         kx_groups::{KxGroupProbeOutput, KxGroupProbeResult},
         renegotiation::{RenegotiationObservation, RenegotiationVerdict},
-        tls13_extensions::Tls13EncryptedExtensions,
+        tls13_extensions::{DelegatedCredentialFacts, Tls13EncryptedExtensions},
         OpensslObservations,
     };
 
@@ -328,11 +328,17 @@ fn fully_populated_openssl_observations_match_schema_v1() {
         negotiated_version: Some("tls1_3".to_string()),
     };
 
-    // TLS 1.3 EncryptedExtensions observation.
+    // TLS 1.3 EncryptedExtensions + Certificate observations. The DC
+    // slot exercises the RFC 9345 populated shape.
     let tls13_ee = Tls13EncryptedExtensions {
         parsed: true,
         record_size_limit: Some(16385),
         compress_certificate_algorithms: vec!["zlib".to_string(), "brotli".to_string()],
+        delegated_credential: Some(DelegatedCredentialFacts {
+            valid_time_seconds: 604_800,
+            expected_cert_verify_algorithm_code: 0x0403,
+            expected_cert_verify_algorithm: "ecdsa_secp256r1_sha256".to_string(),
+        }),
         error: None,
     };
 

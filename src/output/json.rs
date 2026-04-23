@@ -748,6 +748,7 @@ fn build_extensions(results: &ScanResults, ctx: &JsonEmitContext) -> TlsExtensio
         .unwrap_or_default();
     let max_fragment_length = hello.and_then(|h| h.max_fragment_length.clone());
     let (record_size_limit, compress_certificate_algorithms) = build_tls13_ee_observations(results);
+    let delegated_credentials = build_delegated_credentials(results);
 
     // RFC 8701 GREASE echo. `true` = server echoed an unknown
     // extension (protocol violation); `false` = server correctly
@@ -798,6 +799,75 @@ fn build_extensions(results: &ScanResults, ctx: &JsonEmitContext) -> TlsExtensio
         compress_certificate_algorithms,
         grease_echoed,
         hello_retry_request,
+        delegated_credentials,
+    }
+}
+
+/// Merge the TLS 1.2 SH presence signal (from `hello.rs`) with the
+/// TLS 1.3 CertificateEntry parse (from `openssl/tls13_extensions.rs`)
+/// into a single [`DelegatedCredentialsObservation`]. TLS 1.3 takes
+/// precedence when both paths observe DC; the TLS 1.2 path only
+/// carries presence, the TLS 1.3 path carries `valid_time` +
+/// `expected_cert_verify_algorithm`.
+fn build_delegated_credentials(
+    results: &ScanResults,
+) -> crate::model::scan_result::DelegatedCredentialsObservation {
+    use crate::model::scan_result::DelegatedCredentialsObservation;
+
+    let tls12_seen = results
+        .hello_observed
+        .as_ref()
+        .and_then(|h| h.delegated_credential_advertised_in_sh)
+        .unwrap_or(false);
+
+    #[cfg(feature = "legacy-probes")]
+    let tls13_dc = results
+        .openssl_observations
+        .as_ref()
+        .and_then(|o| o.tls13_extensions.as_ref())
+        .and_then(|e| e.delegated_credential.clone());
+    #[cfg(not(feature = "legacy-probes"))]
+    let tls13_dc: Option<crate::scanner::backends::openssl::tls13_extensions::DelegatedCredentialFacts> = None;
+
+    match (tls13_dc, tls12_seen) {
+        (Some(dc), _) => DelegatedCredentialsObservation {
+            value: ObservationBool::probe(true),
+            valid_time_seconds: Some(dc.valid_time_seconds),
+            expected_cert_verify_algorithm: Some(dc.expected_cert_verify_algorithm),
+            delivery_path: Some("tls1_3_certificate_entry".to_string()),
+        },
+        (None, true) => DelegatedCredentialsObservation {
+            value: ObservationBool::probe(true),
+            valid_time_seconds: None,
+            expected_cert_verify_algorithm: None,
+            delivery_path: Some("tls1_2_server_hello".to_string()),
+        },
+        (None, false) => {
+            // Neither path saw DC. Distinguish "probed, not observed"
+            // (hello probe parsed a SH) from "never probed" (hello
+            // probe failed and no legacy-probes handshake reached
+            // Certificate either).
+            let hello_ok = results
+                .hello_observed
+                .as_ref()
+                .map(|h| h.server_hello_parsed)
+                .unwrap_or(false);
+            if hello_ok {
+                DelegatedCredentialsObservation {
+                    value: ObservationBool::probe(false),
+                    valid_time_seconds: None,
+                    expected_cert_verify_algorithm: None,
+                    delivery_path: None,
+                }
+            } else {
+                DelegatedCredentialsObservation {
+                    value: ObservationBool::not_probed("no_dc_observed_on_either_path"),
+                    valid_time_seconds: None,
+                    expected_cert_verify_algorithm: None,
+                    delivery_path: None,
+                }
+            }
+        }
     }
 }
 

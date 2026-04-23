@@ -57,6 +57,11 @@ const EXT_HEARTBEAT: u16 = 15;
 const EXT_SIGNED_CERT_TIMESTAMP: u16 = 18;
 const EXT_ENCRYPT_THEN_MAC: u16 = 22;
 const EXT_EXTENDED_MASTER_SECRET: u16 = 23;
+/// RFC 9345 — delegated credentials. TLS 1.2 path: server echoes an
+/// empty extension in ServerHello; TLS 1.3 path moves the signed DC
+/// structure into the leaf CertificateEntry extensions (handled in
+/// `openssl/tls13_extensions.rs`, not here).
+const EXT_DELEGATED_CREDENTIAL: u16 = 0x0022;
 const EXT_NPN: u16 = 13172; // Google's pre-ALPN protocol negotiation.
 const EXT_RENEGOTIATION_INFO: u16 = 0xff01;
 
@@ -124,6 +129,14 @@ pub struct HelloExtensionsObserved {
     /// negotiated TLS 1.1 or lower), or `"none"` (no sentinel match).
     /// `None` when we never got a parseable ServerHello.
     pub tls13_downgrade_sentinel: Option<String>,
+    /// Whether the server echoed the `delegated_credential` extension
+    /// (RFC 9345, ext 0x0022) in ServerHello. Observation-only signal
+    /// of DC support on the TLS 1.2 path. The signed DC structure
+    /// itself isn't observable from this probe (lives in a later
+    /// handshake message this probe never reaches); the TLS 1.3 path
+    /// in `openssl/tls13_extensions.rs` parses the CertificateEntry
+    /// for the full DC payload.
+    pub delegated_credential_advertised_in_sh: Option<bool>,
     /// Whether the server echoed the GREASE extension we injected
     /// (RFC 8701). A conforming server silently ignores unknown
     /// extensions (`false`); a misbehaving middlebox or buggy server
@@ -384,6 +397,8 @@ fn parse_server_hello(bytes: &[u8], out: &mut HelloExtensionsObserved) {
     out.sct_via_tls_extension = seen.contains_key(&EXT_SIGNED_CERT_TIMESTAMP);
     out.truncated_hmac = Some(seen.contains_key(&EXT_TRUNCATED_HMAC));
     out.npn = Some(seen.contains_key(&EXT_NPN));
+    out.delegated_credential_advertised_in_sh =
+        Some(seen.contains_key(&EXT_DELEGATED_CREDENTIAL));
     // GREASE echo-detection: true iff the server echoed ANY codepoint
     // in the `0x?A0?A` family (both bytes `0x?A`), not just the one
     // we injected. Catches both the literal echo and broader buggy
@@ -557,6 +572,13 @@ fn build_tls12_client_hello(sni: &str) -> Vec<u8> {
                                                                   // them. Servers that ignore unknown extensions silently drop these.
     append_extension(&mut exts, EXT_TRUNCATED_HMAC, &[]);
     append_extension(&mut exts, EXT_NPN, &[]);
+    // RFC 9345 §4.1 — offer delegated credentials with a
+    // SignatureSchemeList of the signature schemes we'd accept from a
+    // DC. The list is `length(2) | scheme(2)+`. Conforming servers
+    // that support DC echo an empty extension in ServerHello;
+    // servers that don't silently drop the extension. Both
+    // outcomes feed the presence observation.
+    append_extension(&mut exts, EXT_DELEGATED_CREDENTIAL, &delegated_credential_ext());
     // RFC 6066 §4 — offer max_fragment_length = 2^12. We advertise the
     // largest legal value so servers that support smaller limits still
     // echo. We never actually honor the negotiated limit (probe bails
@@ -654,6 +676,27 @@ fn ec_point_formats_ext() -> Vec<u8> {
 fn status_request_ext() -> Vec<u8> {
     // status_type=ocsp(1), responder_id_list len=0, request_extensions len=0
     vec![0x01, 0x00, 0x00, 0x00, 0x00]
+}
+
+/// RFC 9345 §4.1 — body of the `delegated_credential` extension
+/// (type 0x0022). Offered as a SignatureSchemeList the client would
+/// accept as the DC's signature scheme. Shape: `length(2) | scheme(2)+`.
+/// Servers that support DC typically echo an empty ext body back in
+/// ServerHello; servers that don't drop the extension silently.
+fn delegated_credential_ext() -> Vec<u8> {
+    // Schemes a DC might sign with. Kept aligned with the schemes we
+    // accept elsewhere in the probe — ECDSA, RSA-PSS, Ed25519.
+    let schemes: &[u16] = &[
+        0x0403, // ecdsa_secp256r1_sha256
+        0x0503, // ecdsa_secp384r1_sha384
+        0x0804, // rsa_pss_rsae_sha256
+        0x0807, // ed25519
+    ];
+    let s_bytes: Vec<u8> = schemes.iter().flat_map(|s| s.to_be_bytes()).collect();
+    let mut v = Vec::with_capacity(2 + s_bytes.len());
+    v.extend_from_slice(&(s_bytes.len() as u16).to_be_bytes());
+    v.extend_from_slice(&s_bytes);
+    v
 }
 
 /// Drive the TLS 1.3 HelloRetryRequest probe. Opens a fresh TCP
@@ -880,6 +923,43 @@ mod tests {
                 code
             );
         }
+    }
+
+    #[test]
+    fn delegated_credential_ext_body_shape_rfc_9345() {
+        // length(2) | scheme(2)+ with 4 schemes = 8 bytes of schemes,
+        // total body = 10 bytes.
+        let body = delegated_credential_ext();
+        assert_eq!(body.len(), 10);
+        let list_len = u16::from_be_bytes([body[0], body[1]]) as usize;
+        assert_eq!(list_len, 8);
+        // Each scheme is 2 bytes; verify the four we expect.
+        assert_eq!(&body[2..4], &[0x04, 0x03]); // ecdsa_secp256r1_sha256
+        assert_eq!(&body[4..6], &[0x05, 0x03]); // ecdsa_secp384r1_sha384
+        assert_eq!(&body[6..8], &[0x08, 0x04]); // rsa_pss_rsae_sha256
+        assert_eq!(&body[8..10], &[0x08, 0x07]); // ed25519
+    }
+
+    #[test]
+    fn client_hello_offers_delegated_credential_ext() {
+        let ch = build_tls12_client_hello("example.com");
+        // Ext type 0x00 0x22 followed by length 0x00 0x0A (10-byte body).
+        let mut found = false;
+        for window in ch.windows(4) {
+            if window[0] == 0x00 && window[1] == 0x22 && window[2] == 0x00 && window[3] == 0x0A {
+                found = true;
+                break;
+            }
+        }
+        assert!(found, "ClientHello should include ext 0x0022 body length 10");
+    }
+
+    #[test]
+    fn extension_walker_recognizes_dc_in_server_hello() {
+        // Synthetic extension block: ext_type=0x0022 len=0 (server echo).
+        let ext_block: &[u8] = &[0x00, 0x22, 0x00, 0x00];
+        let seen = walk_extensions(ext_block);
+        assert!(seen.contains_key(&EXT_DELEGATED_CREDENTIAL));
     }
 
     #[test]

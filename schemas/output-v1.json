@@ -159,7 +159,8 @@
             "npn",
             "supported_point_formats_echoed",
             "grease_echoed",
-            "hello_retry_request"
+            "hello_retry_request",
+            "delegated_credentials"
           ],
           "properties": {
             "ems": { "$ref": "#/$defs/observationBool" },
@@ -221,7 +222,31 @@
               "description": "RFC 8879 — server-advertised certificate compression algorithms. Populated via the OpenSSL EncryptedExtensions probe."
             },
             "grease_echoed": { "$ref": "#/$defs/observationBool" },
-            "hello_retry_request": { "$ref": "#/$defs/observationBool" }
+            "hello_retry_request": { "$ref": "#/$defs/observationBool" },
+            "delegated_credentials": {
+              "type": "object",
+              "required": ["value"],
+              "properties": {
+                "value": { "$ref": "#/$defs/observationBool" },
+                "valid_time_seconds": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 4294967295,
+                  "description": "RFC 9345 §4.1 — seconds from leaf cert `notBefore` at which the DC expires. Present only on the TLS 1.3 CertificateEntry path."
+                },
+                "expected_cert_verify_algorithm": {
+                  "type": "string",
+                  "description": "Canonical IANA SignatureScheme name for the DC's signature (`ecdsa_secp256r1_sha256`, etc.), or `0xNNNN` for unknown codepoints. Present only on the TLS 1.3 CertificateEntry path."
+                },
+                "delivery_path": {
+                  "type": "string",
+                  "enum": ["tls1_3_certificate_entry", "tls1_2_server_hello"],
+                  "description": "Observation path that produced this record."
+                }
+              },
+              "additionalProperties": false,
+              "description": "RFC 9345 delegated-credentials observation. TLS 1.2 path emits presence-only via ServerHello ext 0x0022; TLS 1.3 path parses the leaf CertificateEntry extensions. The scanner records observable fields; it does not verify the DC signature or compare `valid_time` against the wall clock."
+            }
           },
           "additionalProperties": false
         },

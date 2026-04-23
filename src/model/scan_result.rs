@@ -568,6 +568,44 @@ pub struct TlsExtensions {
     /// `not_probed` / `error` — the probe did not reach a parseable
     /// ServerHello; reason carries the failure mode.
     pub hello_retry_request: ObservationBool,
+    /// RFC 9345 delegated credentials observation. Offered in the
+    /// TLS 1.2 byte-probe ClientHello (ext 0x0022) and in the TLS 1.3
+    /// characterization handshake. `value` is `true` when the server
+    /// indicated DC support on either path; `delivery_path` identifies
+    /// which path observed it. The scanner never verifies the DC
+    /// signature over the leaf pubkey and never compares `valid_time`
+    /// against the wall clock — observation only.
+    pub delegated_credentials: DelegatedCredentialsObservation,
+}
+
+/// RFC 9345 delegated-credentials observation. The TLS 1.2 path can
+/// only signal presence via the ServerHello extension echo; the
+/// TLS 1.3 path parses the leaf CertificateEntry extensions and also
+/// surfaces `valid_time` + `expected_cert_verify_algorithm`.
+#[derive(Serialize, Debug, Clone)]
+pub struct DelegatedCredentialsObservation {
+    /// Whether the server indicated delegated-credential support on
+    /// either the TLS 1.2 SH or TLS 1.3 CertificateEntry path.
+    /// `not_probed` when neither path produced an observation.
+    pub value: ObservationBool,
+    /// TLS 1.3 only — `valid_time` field from the DelegatedCredential
+    /// struct (seconds from the leaf cert's `notBefore`, RFC 9345
+    /// §4.1). Absent on TLS 1.2 SH observation (signed-structure
+    /// bytes don't reach the probe) and when no DC was observed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub valid_time_seconds: Option<u32>,
+    /// TLS 1.3 only — canonical IANA SignatureScheme name for the
+    /// `expected_cert_verify_algorithm` field of the DelegatedCredential
+    /// (`"ecdsa_secp256r1_sha256"`, etc.). `"0xNNNN"` for unrecognized
+    /// codepoints. Absent on TLS 1.2 and when no DC was observed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_cert_verify_algorithm: Option<String>,
+    /// Which observation path populated the fields:
+    /// `"tls1_3_certificate_entry"` or `"tls1_2_server_hello"`.
+    /// `None` when no DC observation exists (value is not_probed or
+    /// probe==false on both paths).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delivery_path: Option<String>,
 }
 
 /// Single CRL fetch + revocation-check result.

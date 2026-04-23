@@ -254,7 +254,13 @@ a specific reason — never `supported: false` without a real probe.
   max_fragment_length?: string,             // "2^9".."2^12" or "0xNN"
   record_size_limit?: int,                  // RFC 8449 (see caveat)
   compress_certificate_algorithms: [...],   // RFC 8879 (see caveat)
-  grease_echoed: ObservationBool            // RFC 8701
+  grease_echoed: ObservationBool,           // RFC 8701
+  delegated_credentials: {                  // RFC 9345
+    value:                            ObservationBool,
+    valid_time_seconds?:              int,    // TLS 1.3 path only
+    expected_cert_verify_algorithm?:  string, // TLS 1.3 path only
+    delivery_path?:                   "tls1_3_certificate_entry" | "tls1_2_server_hello"
+  }
 }
 ```
 
@@ -299,6 +305,23 @@ Notes:
   correctly); `{value: false}` = regular ServerHello (either TLS
   1.2 fallback or an unexpected non-HRR response from a TLS 1.3
   server). This probe adds one extra handshake per target.
+- **`delegated_credentials`** — RFC 9345 observation. Two paths
+  feed one observation:
+  - *TLS 1.2 path* — byte-probe ClientHello offers ext 0x0022 with
+    a SignatureSchemeList; a DC-supporting server echoes an empty
+    ext 0x0022 in ServerHello. Presence-only (`value`).
+  - *TLS 1.3 path* — OpenSSL msg-callback on the Certificate
+    handshake message walks the leaf CertificateEntry's
+    extensions (RFC 8446 §4.4.2) for ext 0x0022 and parses the
+    `DelegatedCredential` struct header: `valid_time_seconds`
+    (RFC 9345 §4.1) and `expected_cert_verify_algorithm`
+    (canonical IANA SignatureScheme name).
+  When both paths observe DC on one scan, the TLS 1.3 record wins
+  and `delivery_path = "tls1_3_certificate_entry"`. When only the
+  TLS 1.2 path observes, `delivery_path = "tls1_2_server_hello"`
+  with the detail fields absent. The scanner does **not** verify
+  the DC signature against the leaf pubkey and does **not**
+  compare `valid_time` against the wall clock — observation only.
 
 **Note on revocation.** `ocsp_stapling` is a TLS-handshake
 observation (server stapled or not). Out-of-band revocation

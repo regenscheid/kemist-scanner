@@ -79,6 +79,17 @@ mechanics.
   dual-cert deployments (e.g. RSA + ECDSA leaves on the same
   endpoint). Two distinct fingerprints across the five probes is
   the downstream-comparable signal; the scanner only records.
+- `tls.extensions.delegated_credentials` — RFC 9345 observation.
+  Two-path pipeline: the byte-level hello probe offers ext 0x0022
+  in its TLS 1.2 ClientHello and records whether the server echoes
+  an empty ext 0x0022 in ServerHello (presence only); the OpenSSL
+  TLS 1.3 msg-callback walks the leaf CertificateEntry's
+  extensions for ext 0x0022 and parses the `DelegatedCredential`
+  header fields (`valid_time_seconds`,
+  `expected_cert_verify_algorithm`). Unified shape with
+  `delivery_path` identifying which path populated the record. No
+  DC signature verification, no wall-clock comparison on
+  `valid_time` — observation only.
 
 ### Added — CLI
 

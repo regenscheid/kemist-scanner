@@ -1,12 +1,18 @@
-//! TLS 1.3 EncryptedExtensions observation.
+//! TLS 1.3 msg-callback observations.
+//!
+//! Despite the module name ("tls13_extensions"), this module captures
+//! observations from two TLS 1.3 handshake messages via
+//! `SSL_CTX_set_msg_callback`: EncryptedExtensions (RFC 8449
+//! record_size_limit, RFC 8879 compress_certificate) and Certificate
+//! (RFC 9345 delegated_credentials, carried in the leaf
+//! CertificateEntry's extensions block).
 //!
 //! EncryptedExtensions is sent encrypted under the handshake traffic
 //! key. Userland code can't read those bytes off the wire without
 //! deriving keys, which would mean re-implementing a TLS 1.3 client.
-//! Instead we hook OpenSSL's `SSL_CTX_set_msg_callback` — OpenSSL
-//! decrypts the record internally, then invokes the callback with
-//! the plaintext. We capture the message body, parse the extensions
-//! block ourselves, and surface the observations.
+//! OpenSSL decrypts the record internally, then invokes the callback
+//! with the plaintext. We capture the message body, parse the
+//! extensions block ourselves, and surface the observations.
 //!
 //! Same pattern as [`crate::scanner::openssl::client_auth`] (which
 //! captures CertificateRequest); the two could share scaffolding in
@@ -79,10 +85,15 @@ const SSL_CTRL_SET_MSG_CALLBACK: c_int = 15;
 const CONTENT_TYPE_HANDSHAKE: c_int = 22;
 /// TLS 1.3 handshake type for EncryptedExtensions.
 const HANDSHAKE_TYPE_ENCRYPTED_EXTENSIONS: u8 = 8;
+/// TLS 1.3 handshake type for Certificate.
+const HANDSHAKE_TYPE_CERTIFICATE: u8 = 11;
 
 /// Extensions carried in EncryptedExtensions that we observe.
 const EXT_COMPRESS_CERTIFICATE: u16 = 27;
 const EXT_RECORD_SIZE_LIMIT: u16 = 28;
+/// RFC 9345 — delegated_credential. In TLS 1.3 this rides inside the
+/// leaf CertificateEntry's extensions (RFC 8446 §4.4.2), not in EE.
+const EXT_DELEGATED_CREDENTIAL: u16 = 0x0022;
 
 extern "C" {
     /// `SSL_CTX_callback_ctrl` — generic callback-installer. Casting
@@ -114,9 +125,17 @@ thread_local! {
     /// message (including the 4-byte header). Cleared at the start of
     /// each probe on the same worker so stale state doesn't bleed.
     static CAPTURED: RefCell<Option<Vec<u8>>> = const { RefCell::new(None) };
+    /// Per-thread buffer for the captured Certificate handshake message
+    /// (including the 4-byte header). Needed for the RFC 9345
+    /// delegated_credentials observation which lives inside the leaf
+    /// CertificateEntry's extensions block. Cleared alongside CAPTURED.
+    static CAPTURED_CERT: RefCell<Option<Vec<u8>>> = const { RefCell::new(None) };
 }
 
 /// Observations parsed out of the TLS 1.3 EncryptedExtensions flight.
+/// Despite the struct name, the `delegated_credential` field is
+/// sourced from the Certificate handshake message (RFC 8446 §4.4.2
+/// CertificateEntry extensions) captured by the same msg_callback.
 #[derive(Debug, Clone, Default)]
 pub struct Tls13EncryptedExtensions {
     /// Whether the probe received a parseable EncryptedExtensions
@@ -132,8 +151,31 @@ pub struct Tls13EncryptedExtensions {
     /// (`"zlib"`, `"brotli"`, `"zstd"`), `"0xNNNN"` for unknowns.
     /// Empty when the extension was not present.
     pub compress_certificate_algorithms: Vec<String>,
+    /// RFC 9345 delegated-credential observation parsed from the
+    /// leaf CertificateEntry's extensions. `None` when the server
+    /// did not advertise DC on this probe's handshake or the
+    /// Certificate message was not captured.
+    pub delegated_credential: Option<DelegatedCredentialFacts>,
     /// Human-readable failure reason when `parsed` is false.
     pub error: Option<String>,
+}
+
+/// Parsed DelegatedCredential fields per RFC 9345 §4.1. Only the
+/// structural fields the scanner observes — the signed public-key
+/// blob and signature are intentionally skipped (non-goals: no DC
+/// signature verification, no `valid_time` wall-clock comparison).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DelegatedCredentialFacts {
+    /// Seconds from the leaf cert's `notBefore` at which the DC
+    /// expires (RFC 9345 §4.1). Scanner observation only — no
+    /// wall-clock comparison.
+    pub valid_time_seconds: u32,
+    /// IANA SignatureScheme codepoint the DC's signature uses.
+    pub expected_cert_verify_algorithm_code: u16,
+    /// Canonical IANA name for the SignatureScheme
+    /// (`"ecdsa_secp256r1_sha256"`, etc.). `"0xNNNN"` for
+    /// unrecognized codepoints.
+    pub expected_cert_verify_algorithm: String,
 }
 
 /// Run the probe. Always returns a `Tls13EncryptedExtensions` so the
@@ -170,6 +212,7 @@ fn probe_blocking(
     handshake_timeout: Duration,
 ) -> Tls13EncryptedExtensions {
     CAPTURED.with(|c| *c.borrow_mut() = None);
+    CAPTURED_CERT.with(|c| *c.borrow_mut() = None);
 
     let tcp = match std::net::TcpStream::connect_timeout(&target, connect_timeout) {
         Ok(s) => s,
@@ -213,19 +256,27 @@ fn probe_blocking(
     let _ = ssl.connect(tcp);
 
     let captured = CAPTURED.with(|c| c.borrow_mut().take());
+    let captured_cert = CAPTURED_CERT.with(|c| c.borrow_mut().take());
     debug!(
-        "TLS 1.3 EE probe captured_bytes: {}",
-        captured.as_ref().map(|v| v.len()).unwrap_or(0)
+        "TLS 1.3 EE probe captured_bytes: {} cert_bytes: {}",
+        captured.as_ref().map(|v| v.len()).unwrap_or(0),
+        captured_cert.as_ref().map(|v| v.len()).unwrap_or(0)
     );
 
-    match captured {
+    let mut out = match captured {
         None => Tls13EncryptedExtensions {
             parsed: false,
             error: Some("no_encrypted_extensions_observed".to_string()),
             ..Default::default()
         },
         Some(raw) => parse_encrypted_extensions(&raw),
+    };
+    // Overlay DC observation (from Certificate message) regardless of
+    // EE parse success — the two are independent observations.
+    if let Some(cert_bytes) = captured_cert.as_deref() {
+        out.delegated_credential = parse_certificate_for_dc(cert_bytes);
     }
+    out
 }
 
 /// Parse a compress_certificate extension body into canonical names.
@@ -313,14 +364,23 @@ unsafe extern "C" fn msg_callback(
     // SAFETY: OpenSSL passes a valid `buf`/`len` for the duration of
     // the callback.
     let slice = unsafe { std::slice::from_raw_parts(buf as *const u8, len) };
-    if slice.first() != Some(&HANDSHAKE_TYPE_ENCRYPTED_EXTENSIONS) {
-        return;
-    }
-    CAPTURED.with(|c| {
-        if c.borrow().is_none() {
-            *c.borrow_mut() = Some(slice.to_vec());
+    match slice.first() {
+        Some(&HANDSHAKE_TYPE_ENCRYPTED_EXTENSIONS) => {
+            CAPTURED.with(|c| {
+                if c.borrow().is_none() {
+                    *c.borrow_mut() = Some(slice.to_vec());
+                }
+            });
         }
-    });
+        Some(&HANDSHAKE_TYPE_CERTIFICATE) => {
+            CAPTURED_CERT.with(|c| {
+                if c.borrow().is_none() {
+                    *c.borrow_mut() = Some(slice.to_vec());
+                }
+            });
+        }
+        _ => {}
+    }
 }
 
 /// Parse the captured EncryptedExtensions handshake message.
@@ -409,6 +469,111 @@ fn cert_comp_name(code: u16) -> String {
     }
 }
 
+/// Render an IANA SignatureScheme codepoint as its canonical name,
+/// falling back to `"0xNNNN"` for unknowns. RFC 8446 §4.2.3 table.
+fn signature_scheme_name(code: u16) -> String {
+    match code {
+        0x0201 => "rsa_pkcs1_sha1".to_string(),
+        0x0203 => "ecdsa_sha1".to_string(),
+        0x0401 => "rsa_pkcs1_sha256".to_string(),
+        0x0403 => "ecdsa_secp256r1_sha256".to_string(),
+        0x0501 => "rsa_pkcs1_sha384".to_string(),
+        0x0503 => "ecdsa_secp384r1_sha384".to_string(),
+        0x0601 => "rsa_pkcs1_sha512".to_string(),
+        0x0603 => "ecdsa_secp521r1_sha512".to_string(),
+        0x0804 => "rsa_pss_rsae_sha256".to_string(),
+        0x0805 => "rsa_pss_rsae_sha384".to_string(),
+        0x0806 => "rsa_pss_rsae_sha512".to_string(),
+        0x0807 => "ed25519".to_string(),
+        0x0808 => "ed448".to_string(),
+        0x0809 => "rsa_pss_pss_sha256".to_string(),
+        0x080A => "rsa_pss_pss_sha384".to_string(),
+        0x080B => "rsa_pss_pss_sha512".to_string(),
+        other => format!("0x{:04x}", other),
+    }
+}
+
+/// Parse a captured TLS 1.3 Certificate handshake message, looking
+/// for an RFC 9345 delegated_credential extension on the leaf
+/// CertificateEntry. Returns `Some` when the DC extension is present
+/// and the inner `DelegatedCredential` header fields parse cleanly.
+///
+/// Layout (RFC 8446 §4.4.2):
+/// ```text
+///   hs_type(1)=0x0b | hs_len(3) | ctx_len(1) | ctx<ctx_len> |
+///   cert_list_len(3) | [ cert_len(3) | cert_data<cert_len> |
+///                        ext_len(2) | extensions<ext_len> ]+
+/// ```
+/// RFC 9345 §4.1 DelegatedCredential payload (inside ext 0x0022):
+/// ```text
+///   valid_time(4) | expected_cert_verify_algorithm(2) |
+///   pk_len(3) | public_key<pk_len> |
+///   sig_alg(2) | sig_len(2) | signature<sig_len>
+/// ```
+/// The scanner reads `valid_time` and `expected_cert_verify_algorithm`;
+/// the public-key and signature blobs are skipped.
+fn parse_certificate_for_dc(raw: &[u8]) -> Option<DelegatedCredentialFacts> {
+    if raw.len() < 4 || raw[0] != HANDSHAKE_TYPE_CERTIFICATE {
+        return None;
+    }
+    let hs_len = ((raw[1] as usize) << 16) | ((raw[2] as usize) << 8) | (raw[3] as usize);
+    let body = raw.get(4..4 + hs_len)?;
+    // certificate_request_context<0..2^8-1>
+    let (&ctx_len, rest) = body.split_first()?;
+    let after_ctx = rest.get(ctx_len as usize..)?;
+    // certificate_list<0..2^24-1>
+    if after_ctx.len() < 3 {
+        return None;
+    }
+    let list_len = ((after_ctx[0] as usize) << 16)
+        | ((after_ctx[1] as usize) << 8)
+        | (after_ctx[2] as usize);
+    let list_body = after_ctx.get(3..3 + list_len)?;
+    // Leaf entry only (first entry).
+    if list_body.len() < 3 {
+        return None;
+    }
+    let cert_len =
+        ((list_body[0] as usize) << 16) | ((list_body[1] as usize) << 8) | (list_body[2] as usize);
+    let after_cert = list_body.get(3 + cert_len..)?;
+    if after_cert.len() < 2 {
+        return None;
+    }
+    let ext_len = u16::from_be_bytes([after_cert[0], after_cert[1]]) as usize;
+    let ext_block = after_cert.get(2..2 + ext_len)?;
+    // Walk CertificateEntry extensions.
+    let mut i = 0;
+    while i + 4 <= ext_block.len() {
+        let ty = u16::from_be_bytes([ext_block[i], ext_block[i + 1]]);
+        let body_len = u16::from_be_bytes([ext_block[i + 2], ext_block[i + 3]]) as usize;
+        let body_end = i + 4 + body_len;
+        if body_end > ext_block.len() {
+            break;
+        }
+        if ty == EXT_DELEGATED_CREDENTIAL {
+            return parse_delegated_credential_body(&ext_block[i + 4..body_end]);
+        }
+        i = body_end;
+    }
+    None
+}
+
+/// Parse the body of the RFC 9345 `delegated_credential` extension.
+/// Reads the two header fields the scanner observes and skips the
+/// public-key and signature blobs.
+fn parse_delegated_credential_body(body: &[u8]) -> Option<DelegatedCredentialFacts> {
+    if body.len() < 6 {
+        return None;
+    }
+    let valid_time = u32::from_be_bytes([body[0], body[1], body[2], body[3]]);
+    let code = u16::from_be_bytes([body[4], body[5]]);
+    Some(DelegatedCredentialFacts {
+        valid_time_seconds: valid_time,
+        expected_cert_verify_algorithm_code: code,
+        expected_cert_verify_algorithm: signature_scheme_name(code),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -482,5 +647,118 @@ mod tests {
         let out = parse_encrypted_extensions(&[0x08, 0x00]);
         assert!(!out.parsed);
         assert_eq!(out.error.as_deref(), Some("ee_truncated_header"));
+    }
+
+    /// Build a synthetic TLS 1.3 Certificate handshake message with a
+    /// single CertificateEntry that carries a DC extension. `dc_body`
+    /// is the body of ext 0x0022; `cert_der` is an arbitrary leaf DER
+    /// (content doesn't matter — the parser skips it).
+    fn build_certificate_msg(cert_der: &[u8], dc_body: &[u8]) -> Vec<u8> {
+        // CertificateEntry extensions block: ext_type(2) + len(2) + body.
+        let mut ext_block = Vec::new();
+        ext_block.extend_from_slice(&EXT_DELEGATED_CREDENTIAL.to_be_bytes());
+        ext_block.extend_from_slice(&(dc_body.len() as u16).to_be_bytes());
+        ext_block.extend_from_slice(dc_body);
+
+        // CertificateEntry: cert_len(3) + cert_der + ext_len(2) + exts.
+        let mut entry = Vec::new();
+        let cl = cert_der.len();
+        entry.push(((cl >> 16) & 0xff) as u8);
+        entry.push(((cl >> 8) & 0xff) as u8);
+        entry.push((cl & 0xff) as u8);
+        entry.extend_from_slice(cert_der);
+        entry.extend_from_slice(&(ext_block.len() as u16).to_be_bytes());
+        entry.extend_from_slice(&ext_block);
+
+        // certificate_list: 3-byte length prefix + entry bytes.
+        let mut list = Vec::new();
+        let ll = entry.len();
+        list.push(((ll >> 16) & 0xff) as u8);
+        list.push(((ll >> 8) & 0xff) as u8);
+        list.push((ll & 0xff) as u8);
+        list.extend_from_slice(&entry);
+
+        // body: ctx_len(1)=0 + certificate_list.
+        let mut body = Vec::new();
+        body.push(0x00);
+        body.extend_from_slice(&list);
+
+        // Handshake header: type(1)=11 + length(3).
+        let mut v = Vec::new();
+        v.push(HANDSHAKE_TYPE_CERTIFICATE);
+        let bl = body.len();
+        v.push(((bl >> 16) & 0xff) as u8);
+        v.push(((bl >> 8) & 0xff) as u8);
+        v.push((bl & 0xff) as u8);
+        v.extend_from_slice(&body);
+        v
+    }
+
+    #[test]
+    fn parse_certificate_extracts_dc_valid_time_and_scheme() {
+        // valid_time=604800 (7 days), scheme=ecdsa_secp256r1_sha256 (0x0403).
+        // RFC 9345 §4.1 DelegatedCredential: valid_time(4) + scheme(2) +
+        // pk_len(3) + pk + sig_alg(2) + sig_len(2) + sig. Padding
+        // body with empty pk + empty sig.
+        let mut dc = Vec::new();
+        dc.extend_from_slice(&604_800u32.to_be_bytes());
+        dc.extend_from_slice(&0x0403u16.to_be_bytes());
+        dc.extend_from_slice(&[0x00, 0x00, 0x00]); // pk_len=0
+        dc.extend_from_slice(&0x0403u16.to_be_bytes()); // sig_alg
+        dc.extend_from_slice(&[0x00, 0x00]); // sig_len=0
+
+        let cert_msg = build_certificate_msg(b"fake_leaf_der_bytes", &dc);
+        let out = parse_certificate_for_dc(&cert_msg).expect("dc parsed");
+        assert_eq!(out.valid_time_seconds, 604_800);
+        assert_eq!(out.expected_cert_verify_algorithm_code, 0x0403);
+        assert_eq!(out.expected_cert_verify_algorithm, "ecdsa_secp256r1_sha256");
+    }
+
+    #[test]
+    fn parse_certificate_without_dc_returns_none() {
+        // CertificateEntry with no extensions (ext_block empty).
+        let cert_der: &[u8] = b"unused_leaf_der";
+        let mut entry = Vec::new();
+        entry.push(0x00);
+        entry.push(0x00);
+        entry.push(cert_der.len() as u8);
+        entry.extend_from_slice(cert_der);
+        entry.extend_from_slice(&[0x00, 0x00]); // ext_len=0
+
+        let mut list = Vec::new();
+        list.push(0x00);
+        list.push(0x00);
+        list.push(entry.len() as u8);
+        list.extend_from_slice(&entry);
+
+        let mut body = vec![0x00];
+        body.extend_from_slice(&list);
+
+        let mut msg = vec![HANDSHAKE_TYPE_CERTIFICATE];
+        msg.push(0x00);
+        msg.push(0x00);
+        msg.push(body.len() as u8);
+        msg.extend_from_slice(&body);
+
+        assert!(parse_certificate_for_dc(&msg).is_none());
+    }
+
+    #[test]
+    fn parse_certificate_wrong_message_type_returns_none() {
+        // Msg type 11 expected; feed type 8 (EE).
+        let msg = [HANDSHAKE_TYPE_ENCRYPTED_EXTENSIONS, 0, 0, 0];
+        assert!(parse_certificate_for_dc(&msg).is_none());
+    }
+
+    #[test]
+    fn parse_delegated_credential_body_short_returns_none() {
+        assert!(parse_delegated_credential_body(&[0, 1, 2, 3]).is_none());
+    }
+
+    #[test]
+    fn signature_scheme_name_maps_known_codes() {
+        assert_eq!(signature_scheme_name(0x0403), "ecdsa_secp256r1_sha256");
+        assert_eq!(signature_scheme_name(0x0807), "ed25519");
+        assert_eq!(signature_scheme_name(0x9999), "0x9999");
     }
 }
