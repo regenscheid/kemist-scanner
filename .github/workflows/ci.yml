@@ -141,13 +141,20 @@ jobs:
     - name: Check binary size
       run: |
         SIZE=$(stat -c%s target/release/kemist)
-        # 16 MiB. Current release binary is ~12.4 MiB on Linux after the
-        # full OpenSSL 3.5.5 LTS subsystem landed (weak-crypto + ssl3 +
-        # legacy provider + D1-D8 probe modules). Headroom absorbs
-        # platform variance and small future additions; raise this
-        # deliberately if a new probe honestly needs the space, don't
-        # silently accept creep.
-        MAX=$((16 * 1024 * 1024))
+        # 24 MiB. Release binary sizes observed across platforms:
+        #   Linux x86_64: ~12.4 MiB after OpenSSL 3.5.5 LTS landed.
+        #   Linux arm64 / macOS arm64: ~14-15 MiB (per-arch codegen
+        #   differences; aws-lc-sys + vendored OpenSSL inflate more
+        #   on arm).
+        # The observation expansion workstream (sigalg leaf capture,
+        # RFC 9345 DC, ephemeral reuse probe, ROBOT differential
+        # probe + TLS 1.2 PRF/MAC helpers) adds ~1-2 MiB. Gate is
+        # set with ~40% headroom over the largest observed variant
+        # so ARM runners don't flap and one more probe workstream
+        # fits without a gate bump. Raise this deliberately if a
+        # new probe honestly needs the space, don't silently accept
+        # creep.
+        MAX=$((24 * 1024 * 1024))
         echo "kemist release binary: ${SIZE} bytes (limit ${MAX})"
         if [ "${SIZE}" -gt "${MAX}" ]; then
           echo "::error::release binary exceeds ${MAX} bytes (got ${SIZE})"

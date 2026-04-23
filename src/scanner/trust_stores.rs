@@ -33,6 +33,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 
 use rustls::client::WebPkiServerVerifier;
+use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::CertificateDer;
 use rustls::RootCertStore;
 
@@ -258,18 +259,15 @@ fn load_store_from_path(path: &PathBuf) -> Result<LoadedStore, String> {
     })
 }
 
-/// Parse a PEM bundle (with optional `#`-style comments / blank
-/// lines outside the BEGIN/END framing — they're ignored by
-/// `rustls_pemfile`). Returns `None` when the bundle has zero
-/// valid certs — callers emit `not_probed` with reason
+/// Parse a PEM bundle (comments and blank lines outside the
+/// BEGIN/END framing are ignored by the `PemObject` slice iterator
+/// from `rustls-pki-types`). Returns `None` when the bundle has
+/// zero valid certs — callers emit `not_probed` with reason
 /// `trust_store_empty`.
 fn build_verifier_from_pem(pem: &[u8]) -> Result<Option<Arc<WebPkiServerVerifier>>, String> {
-    let mut cursor = std::io::Cursor::new(pem);
-    let certs: Result<Vec<_>, _> = rustls_pemfile::certs(&mut cursor).collect();
-    let certs: Vec<CertificateDer<'static>> = certs
-        .map_err(|e| format!("pem parse: {e}"))?
-        .into_iter()
-        .collect();
+    let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(pem)
+        .collect::<Result<_, _>>()
+        .map_err(|e| format!("pem parse: {e}"))?;
     if certs.is_empty() {
         return Ok(None);
     }
