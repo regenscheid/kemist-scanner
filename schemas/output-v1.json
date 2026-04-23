@@ -160,7 +160,8 @@
             "supported_point_formats_echoed",
             "grease_echoed",
             "hello_retry_request",
-            "delegated_credentials"
+            "delegated_credentials",
+            "ephemeral_key_reuse"
           ],
           "properties": {
             "ems": { "$ref": "#/$defs/observationBool" },
@@ -246,6 +247,27 @@
               },
               "additionalProperties": false,
               "description": "RFC 9345 delegated-credentials observation. TLS 1.2 path emits presence-only via ServerHello ext 0x0022; TLS 1.3 path parses the leaf CertificateEntry extensions. The scanner records observable fields; it does not verify the DC signature or compare `valid_time` against the wall clock."
+            },
+            "ephemeral_key_reuse": {
+              "type": "object",
+              "required": [
+                "dhe_public_reused_across_connections",
+                "ecdhe_public_reused_across_connections"
+              ],
+              "properties": {
+                "dhe_public_reused_across_connections": { "$ref": "#/$defs/observationBool" },
+                "ecdhe_public_reused_across_connections": { "$ref": "#/$defs/observationBool" },
+                "dhe_suite_probed": {
+                  "type": "string",
+                  "description": "IANA name of the DHE suite pinned for the two reuse-detection handshakes. Absent when no DHE suite was observed supported."
+                },
+                "ecdhe_suite_probed": {
+                  "type": "string",
+                  "description": "IANA name of the ECDHE suite pinned for the two reuse-detection handshakes. Absent when no ECDHE suite was observed supported."
+                }
+              },
+              "additionalProperties": false,
+              "description": "Ephemeral DH/ECDH public-value reuse observation (Raccoon signal, CVE-2020-1968). For each family the scanner runs two sequential TLS 1.2 handshakes against a supported suite and compares the server's ephemeral public value byte-for-byte. `true` = the server reused its ephemeral key across fresh handshakes; `false` = distinct keys; `not_probed` when no suite in the family was observed supported. Scanner records, downstream rule engines interpret."
             }
           },
           "additionalProperties": false

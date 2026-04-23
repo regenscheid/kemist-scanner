@@ -749,6 +749,7 @@ fn build_extensions(results: &ScanResults, ctx: &JsonEmitContext) -> TlsExtensio
     let max_fragment_length = hello.and_then(|h| h.max_fragment_length.clone());
     let (record_size_limit, compress_certificate_algorithms) = build_tls13_ee_observations(results);
     let delegated_credentials = build_delegated_credentials(results);
+    let ephemeral_key_reuse = build_ephemeral_key_reuse(results);
 
     // RFC 8701 GREASE echo. `true` = server echoed an unknown
     // extension (protocol violation); `false` = server correctly
@@ -800,6 +801,33 @@ fn build_extensions(results: &ScanResults, ctx: &JsonEmitContext) -> TlsExtensio
         grease_echoed,
         hello_retry_request,
         delegated_credentials,
+        ephemeral_key_reuse,
+    }
+}
+
+/// Merge the ephemeral-key-reuse observation from
+/// `OpensslObservations.ephemeral_key_reuse`. Builds a
+/// `feature_disabled` skeleton on non-legacy-probes builds so the
+/// output shape stays stable across feature matrices.
+fn build_ephemeral_key_reuse(
+    results: &ScanResults,
+) -> crate::model::scan_result::EphemeralKeyReuseObservation {
+    use crate::model::scan_result::EphemeralKeyReuseObservation;
+
+    #[cfg(feature = "legacy-probes")]
+    {
+        if let Some(obs) = results.openssl_observations.as_ref() {
+            if let Some(ekr) = obs.ephemeral_key_reuse.as_ref() {
+                return ekr.clone();
+            }
+        }
+    }
+    let _ = results;
+    EphemeralKeyReuseObservation {
+        dhe_public_reused_across_connections: ObservationBool::not_probed("feature_disabled"),
+        ecdhe_public_reused_across_connections: ObservationBool::not_probed("feature_disabled"),
+        dhe_suite_probed: None,
+        ecdhe_suite_probed: None,
     }
 }
 

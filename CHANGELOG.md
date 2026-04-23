@@ -90,6 +90,16 @@ mechanics.
   `delivery_path` identifying which path populated the record. No
   DC signature verification, no wall-clock comparison on
   `valid_time` — observation only.
+- `tls.extensions.ephemeral_key_reuse` — Raccoon-class observation
+  (CVE-2020-1968). For each of DHE and ECDHE the scanner picks a
+  server-supported suite from the earlier cipher probe and runs
+  two fresh TLS 1.2 handshakes with session caching disabled,
+  comparing the server's ephemeral public value (`Y` / ECDH
+  point) byte-for-byte across the pair. Records
+  `dhe_public_reused_across_connections`,
+  `ecdhe_public_reused_across_connections`, and the pinned suite
+  names. No side-channel attempt; ephemeral reuse is the
+  prerequisite signal, not the exploit.
 
 ### Added — CLI
 

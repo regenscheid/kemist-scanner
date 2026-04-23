@@ -576,6 +576,36 @@ pub struct TlsExtensions {
     /// signature over the leaf pubkey and never compares `valid_time`
     /// against the wall clock — observation only.
     pub delegated_credentials: DelegatedCredentialsObservation,
+    /// Ephemeral DH / ECDH public-value reuse observation. Captured
+    /// by running two sequential TLS 1.2 handshakes per family and
+    /// comparing the server's ephemeral public value byte-for-byte.
+    /// Matching values across fresh handshakes is the observable
+    /// signal for Raccoon-class exposure (CVE-2020-1968). Scanner
+    /// records; downstream rule engines interpret.
+    pub ephemeral_key_reuse: EphemeralKeyReuseObservation,
+}
+
+/// Ephemeral DH / ECDH public-value reuse observation. Two sequential
+/// handshakes per family; compare the server's ephemeral public
+/// value. See module docs at
+/// `scanner::backends::openssl::ephemeral_reuse`.
+#[derive(Serialize, Debug, Clone)]
+pub struct EphemeralKeyReuseObservation {
+    /// `true` when two fresh TLS 1.2 DHE handshakes returned
+    /// identical DH public values. `not_probed` when no DHE suite
+    /// was observed supported by the earlier cipher probe.
+    pub dhe_public_reused_across_connections: ObservationBool,
+    /// Same signal for ECDHE — `true` when the server's ECDH point
+    /// matched byte-for-byte across two fresh handshakes.
+    pub ecdhe_public_reused_across_connections: ObservationBool,
+    /// IANA name of the DHE suite the probe pinned for its two
+    /// handshakes. `None` when no DHE suite was available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dhe_suite_probed: Option<String>,
+    /// IANA name of the ECDHE suite the probe pinned. `None` when
+    /// no ECDHE suite was available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ecdhe_suite_probed: Option<String>,
 }
 
 /// RFC 9345 delegated-credentials observation. The TLS 1.2 path can

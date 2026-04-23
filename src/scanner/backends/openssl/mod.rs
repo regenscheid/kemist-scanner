@@ -22,6 +22,7 @@ pub mod alerts;
 pub mod ciphers;
 pub mod client_auth;
 pub mod dh_params;
+pub mod ephemeral_reuse;
 pub mod fallback_scsv;
 pub mod kx_groups;
 pub mod protocol_versions;
@@ -113,6 +114,10 @@ pub struct OpensslObservations {
     /// failed; per-constraint skip lands as `method: not_probed`
     /// inside.
     pub sigalg_policy: Option<crate::model::scan_result::SignatureAlgorithmPolicyProbe>,
+    /// Ephemeral DH/ECDH reuse observation (Raccoon signal). `None`
+    /// only when the outer probe setup failed; family slots inside
+    /// land as `not_probed` when no suite was observed supported.
+    pub ephemeral_key_reuse: Option<crate::model::scan_result::EphemeralKeyReuseObservation>,
     /// Per-probe non-fatal errors collected during the scan. Populated so
     /// every "not probed" outcome carries a reason string rather than going
     /// silent.
@@ -175,6 +180,19 @@ pub async fn run_all_probes(cfg: &ScanConfig) -> Result<OpensslObservations, Sca
     // TLS 1.3 stubbed for a follow-up workstream).
     let sr = tickets::probe(cfg.target, &cfg.hostname, cfg.timeout, cfg.timeout).await;
     out.session_resumption = Some(sr);
+
+    // Ephemeral DH/ECDH reuse probe (Raccoon signal). Gated on the
+    // earlier cipher_probes output — reads which DHE/ECDHE suites
+    // the server actually supports before picking one to re-probe.
+    let ekr = ephemeral_reuse::probe(
+        cfg.target,
+        &cfg.hostname,
+        cfg.timeout,
+        cfg.timeout,
+        out.cipher_probes.as_ref(),
+    )
+    .await;
+    out.ephemeral_key_reuse = Some(ekr);
 
     // Signature-algorithm policy probe (four constrained handshakes;
     // `--sigalg-probe-skip` opts out individual ones).

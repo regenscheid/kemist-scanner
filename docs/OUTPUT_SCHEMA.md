@@ -260,6 +260,12 @@ a specific reason — never `supported: false` without a real probe.
     valid_time_seconds?:              int,    // TLS 1.3 path only
     expected_cert_verify_algorithm?:  string, // TLS 1.3 path only
     delivery_path?:                   "tls1_3_certificate_entry" | "tls1_2_server_hello"
+  },
+  ephemeral_key_reuse: {                    // Raccoon signal (CVE-2020-1968)
+    dhe_public_reused_across_connections:   ObservationBool,
+    ecdhe_public_reused_across_connections: ObservationBool,
+    dhe_suite_probed?:                      string, // IANA name
+    ecdhe_suite_probed?:                    string  // IANA name
   }
 }
 ```
@@ -305,6 +311,20 @@ Notes:
   correctly); `{value: false}` = regular ServerHello (either TLS
   1.2 fallback or an unexpected non-HRR response from a TLS 1.3
   server). This probe adds one extra handshake per target.
+- **`ephemeral_key_reuse`** — Raccoon-class observation
+  (CVE-2020-1968). For each of DHE and ECDHE, the probe picks a
+  server-supported suite from the earlier cipher probe, pins
+  `DHE-RSA-AES128-GCM-SHA256` / `ECDHE-RSA-AES128-GCM-SHA256`,
+  and runs two back-to-back fresh TLS 1.2 handshakes with session
+  caching explicitly disabled. It then hashes the server's
+  ephemeral public value (`Y` for DH, uncompressed point bytes
+  for ECDH) with SHA-256 and compares the two hashes. `true` =
+  byte-for-byte match across fresh handshakes (ephemeral key
+  reused); `false` = distinct ephemeral keys. `not_probed` lands
+  when no suite in the family was observed supported by the
+  cipher probe. The scanner does not attempt the side-channel
+  itself — ephemeral reuse is the prerequisite signal, not the
+  exploit.
 - **`delegated_credentials`** — RFC 9345 observation. Two paths
   feed one observation:
   - *TLS 1.2 path* — byte-probe ClientHello offers ext 0x0022 with

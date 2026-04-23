@@ -402,6 +402,16 @@ fn fully_populated_openssl_observations_match_schema_v1() {
         },
     };
 
+    // Ephemeral key reuse observation — DHE reused, ECDHE not
+    // reused. Mirrors a realistic mixed signal the fixture emits to
+    // exercise both populated branches.
+    let ephemeral_key_reuse = kemist::model::scan_result::EphemeralKeyReuseObservation {
+        dhe_public_reused_across_connections: ObservationBool::probe(true),
+        ecdhe_public_reused_across_connections: ObservationBool::probe(false),
+        dhe_suite_probed: Some("TLS_DHE_RSA_WITH_AES_128_GCM_SHA256".to_string()),
+        ecdhe_suite_probed: Some("TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256".to_string()),
+    };
+
     let mut results = fixture_results();
     results.openssl_observations = Some(OpensslObservations {
         cipher_probes: Some(cipher_probes),
@@ -412,6 +422,7 @@ fn fully_populated_openssl_observations_match_schema_v1() {
         tls13_extensions: Some(tls13_ee),
         session_resumption: Some(session_resumption),
         sigalg_policy: Some(sigalg_policy),
+        ephemeral_key_reuse: Some(ephemeral_key_reuse),
         probe_errors: vec![],
     });
 
@@ -637,6 +648,7 @@ fn ffdhe_cross_check_reason_surfaces_in_output() {
         tls13_extensions: None,
         session_resumption: None,
         sigalg_policy: None,
+        ephemeral_key_reuse: None,
         probe_errors: vec![],
     });
 
