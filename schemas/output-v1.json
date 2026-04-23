@@ -221,7 +221,23 @@
               "description": "RFC 8879 — server-advertised certificate compression algorithms. Populated via the OpenSSL EncryptedExtensions probe."
             },
             "grease_echoed": { "$ref": "#/$defs/observationBool" },
-            "hello_retry_request": { "$ref": "#/$defs/observationBool" }
+            "hello_retry_request": { "$ref": "#/$defs/observationBool" },
+            "ocsp_http_fallback": {
+              "type": "array",
+              "description": "OCSP-over-HTTP fetch results — one entry per AIA OCSP URL queried. Populated only when `--enable-revocation-fetch` is set. Complements `ocsp_stapling`; both can be present on a single record.",
+              "items": {
+                "type": "object",
+                "required": ["url", "response_length"],
+                "properties": {
+                  "url": { "type": "string" },
+                  "http_status": { "type": "integer", "minimum": 100, "maximum": 599 },
+                  "response_length": { "type": "integer", "minimum": 0 },
+                  "content": { "$ref": "#/$defs/ocspResponseContent" },
+                  "error": { "type": "string" }
+                },
+                "additionalProperties": false
+              }
+            }
           },
           "additionalProperties": false
         },
@@ -373,6 +389,11 @@
         "enabled": { "type": "boolean" },
         "hsts": { "type": "object" },
         "preload_list_status": { "type": "string" },
+        "preload_list_source": {
+          "type": "string",
+          "description": "Provenance of the HSTS preload snapshot used for this observation. `compiled_in` = the build-time Chromium snapshot bundled in the binary. `runtime_override:<path>` = an override file supplied via `--hsts-preload-list-path`. Consumers comparing results across runs must check this — the `preload_list_status` value is only comparable under the same source snapshot.",
+          "pattern": "^(compiled_in|runtime_override:.+)$"
+        },
         "security_txt": {
           "type": "object",
           "properties": {

@@ -551,6 +551,44 @@ pub struct TlsExtensions {
     /// `not_probed` / `error` — the probe did not reach a parseable
     /// ServerHello; reason carries the failure mode.
     pub hello_retry_request: ObservationBool,
+    /// OCSP-over-HTTP fallback results — one entry per AIA `OCSP`
+    /// URL in the leaf cert. Populated only when
+    /// `--enable-revocation-fetch` is set AND the leaf's AIA lists
+    /// OCSP responders AND both leaf + issuer DER are available from
+    /// the chain. Empty otherwise. Complements
+    /// `ocsp_stapling` — the two can coexist in one record (stapled
+    /// + fetched), and rule engines comparing freshness should
+    /// consult both.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ocsp_http_fallback: Vec<OcspHttpFallbackEntry>,
+}
+
+/// Single OCSP-over-HTTP fetch result.
+#[derive(Serialize, Debug, Clone)]
+pub struct OcspHttpFallbackEntry {
+    /// URL fetched (from the leaf's AIA `OCSP` extension).
+    pub url: String,
+    /// HTTP status code from the POST. `None` on transport failure
+    /// before an HTTP response arrived.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub http_status: Option<u16>,
+    /// Parsed OCSP response contents — same shape as
+    /// `ocsp_stapling.content` (RFC 6960 BasicOCSPResponse).
+    /// `None` when the fetch failed OR the response body wasn't
+    /// parseable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<crate::model::ocsp_response::OcspResponseContent>,
+    /// Length of the raw response body in bytes. `0` when the fetch
+    /// failed before a body arrived.
+    pub response_length: usize,
+    /// Error category / reason when the probe didn't yield a
+    /// parseable response. Canonical values:
+    /// `post_failed:<reqwest_error>`, `http_status_<code>`,
+    /// `response_exceeds_size_cap:<bytes>`, `body_read:<err>`,
+    /// `leaf_parse_failed:<err>`, `issuer_parse_failed:<err>`,
+    /// `ocsp_request_build:<err>`, `response_parse_failed:<err>`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 #[derive(Serialize, Debug, Clone)]
@@ -857,6 +895,12 @@ pub struct Http {
     pub hsts: Option<Hsts>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub preload_list_status: Option<String>,
+    /// Snapshot provenance — `"compiled_in"` (default) or
+    /// `"runtime_override:<path>"` when `--hsts-preload-list-path`
+    /// was used. Consumers should never assume the same snapshot
+    /// across runs; the breadcrumb makes the source explicit.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preload_list_source: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub security_txt: Option<SecurityTxt>,
     /// Security-related response headers beyond HSTS — CSP / XFO /

@@ -299,6 +299,19 @@ Notes:
   correctly); `{value: false}` = regular ServerHello (either TLS
   1.2 fallback or an unexpected non-HRR response from a TLS 1.3
   server). This probe adds one extra handshake per target.
+- **`ocsp_http_fallback`** — opt-in (`--enable-revocation-fetch`).
+  For each AIA `OCSP` URL the leaf cert advertises, the scanner
+  builds an OCSPRequest (CertID over leaf + issuer, SHA-1 digest
+  for interop) via `openssl::ocsp` and POSTs it with
+  `Content-Type: application/ocsp-request`. The parsed response
+  lands in `content` with the same shape as
+  `ocsp_stapling.content`. Complements stapled OCSP — the two
+  can coexist on the same record and legitimately differ on
+  timing/issuer. Cap: 256 KB response body, 10 s per-URL
+  timeout. Error categories surface in `error` as
+  `post_failed:<...>`, `http_status_<code>`,
+  `response_exceeds_size_cap:<bytes>`, `leaf_parse_failed:<...>`,
+  `issuer_parse_failed:<...>`, `response_parse_failed:<...>`.
 
 See [CHECKS.md](CHECKS.md) for how each observation is obtained.
 

@@ -74,6 +74,13 @@ pub struct ScannerConfig {
     /// `"rsa_pss_only"`, `"rsa_pkcs1_only"`. Unknown entries are
     /// ignored.
     pub sigalg_probe_skip: Vec<String>,
+    /// Fire active revocation fetches — CRL downloads and
+    /// OCSP-over-HTTP fallback. Default `false`; when `true`, the
+    /// scanner issues HTTP GETs to `crl_distribution_points.urls`
+    /// and HTTP POSTs to `authority_information_access.ocsp`.
+    /// Even when this flag is on, individual fetches respect
+    /// per-URL timeouts (10s) and body-size caps.
+    pub enable_revocation_fetch: bool,
 }
 
 impl Default for ScannerConfig {
@@ -94,6 +101,7 @@ impl Default for ScannerConfig {
             user_agent_info_url: "https://www.kemist-tls.net".to_string(),
             include_ocsp_raw: false,
             sigalg_probe_skip: Vec::new(),
+            enable_revocation_fetch: false,
         }
     }
 }
@@ -228,6 +236,7 @@ impl Scanner {
                     enable_http_checks: self.config.enable_http_checks,
                     user_agent_info_url: self.config.user_agent_info_url.clone(),
                     sigalg_probe_skip: self.config.sigalg_probe_skip.clone(),
+                    enable_revocation_fetch: self.config.enable_revocation_fetch,
                 };
 
                 info!(
@@ -335,6 +344,9 @@ fn empty_scan_results(target: &Target, addr: SocketAddr) -> crate::scanner::Scan
         hrr_observed: None,
         sslv2_observation: None,
         alpn_matrix: None,
+        #[cfg(all(feature = "http-checks", feature = "legacy-probes"))]
+        ocsp_http_fetch: None,
+        cert_chain_der: Vec::new(),
         http_observations: None,
         #[cfg(feature = "legacy-probes")]
         openssl_observations: None,

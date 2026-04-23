@@ -95,6 +95,19 @@ sha-1 = "0.10"  # For SHA-1 fingerprints
 # same trust set.
 reqwest = { version = "0.12", optional = true, default-features = false, features = ["rustls-tls-webpki-roots", "charset", "http2"] }
 
+# Compile-time perfect-hash table — used for the HSTS preload list
+# lookup. The preload snapshot is parsed at build time into a static
+# `phf::Map<&'static str, bool>` via `phf_codegen`, giving O(1)
+# lookups without loading 90K entries into a HashMap at startup.
+phf = { version = "0.11", features = ["macros"] }
+
+# Lenient JSON parser used at runtime when loading a
+# `--hsts-preload-list-path` override — same file format as the
+# vendored Chromium snapshot, which carries JavaScript-style
+# line comments. Build-time consumption uses the build-dep copy;
+# this runtime copy is only for the override path.
+json5 = "0.4"
+
 [build-dependencies]
 chrono = { version = "0.4", features = ["serde"] }
 # Must also appear in [build-dependencies] — feature unification under
@@ -104,6 +117,14 @@ chrono = { version = "0.4", features = ["serde"] }
 # compiled with `no-weak-ssl-ciphers` / `no-ssl3`, which strips RC4 /
 # single-DES / 3DES / SSLv3 from the cipher-list tables.
 openssl-src = { version = "=300.5.5", features = ["weak-crypto", "ssl3", "camellia", "seed"], optional = true }
+
+# Build-time preload-list processing: parse Chromium's
+# `transport_security_state_static.json` (which carries JavaScript-style
+# `//` comments) and emit a `phf::Map` in OUT_DIR. `json5` handles the
+# comments + trailing commas; `phf_codegen` writes the map.
+serde = { version = "1", features = ["derive"] }
+json5 = "0.4"
+phf_codegen = "0.11"
 
 [dev-dependencies]
 tokio-test = "0.4"

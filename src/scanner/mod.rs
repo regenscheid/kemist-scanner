@@ -5,6 +5,8 @@ pub mod ciphers;
 pub mod groups;
 pub mod hello;
 pub mod http;
+#[cfg(all(feature = "http-checks", feature = "legacy-probes"))]
+pub mod ocsp_http;
 pub mod probe;
 pub mod raw;
 pub mod runner;
@@ -69,6 +71,10 @@ pub struct ScanConfig {
     /// Canonical names of signature-algorithm policy probes to skip
     /// (from `--sigalg-probe-skip`). Empty = run all four.
     pub sigalg_probe_skip: Vec<String>,
+    /// Fire active revocation fetches — CRL + OCSP-over-HTTP. When
+    /// `false`, the scanner only observes whatever revocation data
+    /// comes in-band during the TLS handshake (stapled OCSP).
+    pub enable_revocation_fetch: bool,
 }
 
 #[derive(Debug)]
@@ -133,6 +139,24 @@ pub struct ScanResults {
     /// probe didn't run.
     #[serde(skip_serializing)]
     pub alpn_matrix: Option<crate::scanner::alpn_matrix::AlpnMatrixOutput>,
+    /// OCSP-over-HTTP fallback results — one fetch per AIA OCSP URL
+    /// the leaf cert advertises. Populated only when
+    /// `--enable-revocation-fetch` is set AND the characterization
+    /// handshake captured both a leaf and an issuer cert. `None`
+    /// otherwise. Feeds `tls.extensions.ocsp_http_fallback` in
+    /// schema.
+    #[cfg(all(feature = "http-checks", feature = "legacy-probes"))]
+    #[serde(skip_serializing)]
+    pub ocsp_http_fetch: Option<crate::scanner::ocsp_http::OcspHttpFetchOutput>,
+    /// Raw DER bytes of every cert in the chain the server delivered
+    /// during the characterization handshake. Retained on the
+    /// results so post-handshake probes (OCSP-over-HTTP, CRL fetch)
+    /// can rebuild `X509` handles without re-running the handshake.
+    /// Index 0 is the leaf; subsequent entries are intermediates in
+    /// chain order. Not serialized to JSON (the parsed form under
+    /// `certificate_chain` already carries everything consumers key on).
+    #[serde(skip_serializing)]
+    pub cert_chain_der: Vec<Vec<u8>>,
     /// HTTP-layer observations (HSTS / security.txt / preload list).
     /// Feeds the top-level `http` field in schema.
     #[serde(skip_serializing)]
@@ -187,6 +211,9 @@ impl SslScanner {
             hrr_observed: None,
             sslv2_observation: None,
             alpn_matrix: None,
+            #[cfg(all(feature = "http-checks", feature = "legacy-probes"))]
+            ocsp_http_fetch: None,
+            cert_chain_der: Vec::new(),
             http_observations: None,
             #[cfg(feature = "legacy-probes")]
             openssl_observations: None,
@@ -280,6 +307,7 @@ impl SslScanner {
         {
             Ok(out) => {
                 results.certificate_chain = out.certificates;
+                results.cert_chain_der = out.cert_der;
                 results.negotiated = out.negotiated;
                 results.alpn_offered = out.alpn_offered;
                 results.validation = out.validation;
@@ -353,6 +381,42 @@ impl SslScanner {
             .await,
         );
         pause().await;
+
+        // OCSP-over-HTTP fallback. Only fires when the operator
+        // opted into revocation fetches (`--enable-revocation-fetch`)
+        // AND the characterization handshake captured both a leaf +
+        // issuer cert AND the leaf's AIA advertises OCSP URLs. Runs
+        // regardless of whether the server already stapled — the two
+        // responses (stapled vs HTTP-fetched) can legitimately
+        // differ on timing, and both are useful observations.
+        #[cfg(all(feature = "http-checks", feature = "legacy-probes"))]
+        if self.config.enable_revocation_fetch {
+            if let Some(leaf_info) = results.certificate_chain.first() {
+                let urls: Vec<String> = leaf_info
+                    .extensions
+                    .authority_information_access
+                    .as_ref()
+                    .map(|aia| aia.ocsp.clone())
+                    .unwrap_or_default();
+                if !urls.is_empty() {
+                    if let (Some(leaf_der), Some(issuer_der)) = (
+                        results.cert_chain_der.first(),
+                        results.cert_chain_der.get(1),
+                    ) {
+                        results.ocsp_http_fetch = Some(
+                            crate::scanner::ocsp_http::probe_ocsp_http(
+                                leaf_der,
+                                issuer_der,
+                                &urls,
+                                self.config.timeout,
+                            )
+                            .await,
+                        );
+                    }
+                }
+            }
+            pause().await;
+        }
 
         // HTTP-layer observations (HSTS, security.txt, preload list).
         // Gated by `enable_http_checks` — even when the cargo feature

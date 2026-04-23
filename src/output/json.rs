@@ -88,6 +88,7 @@ fn build_http(results: &ScanResults) -> Option<Http> {
             preload: h.preload,
         }),
         preload_list_status: obs.preload_list_status.clone(),
+        preload_list_source: obs.preload_list_source.clone(),
         security_txt: obs.security_txt.as_ref().map(|s| {
             use crate::model::scan_result::SecurityTxtParsedOutput;
             SecurityTxt {
@@ -772,6 +773,8 @@ fn build_extensions(results: &ScanResults, ctx: &JsonEmitContext) -> TlsExtensio
         None => ObservationBool::not_probed("hrr_probe_not_run"),
     };
 
+    let ocsp_http_fallback = build_ocsp_http_fallback(results);
+
     TlsExtensions {
         ems,
         secure_renegotiation,
@@ -796,7 +799,50 @@ fn build_extensions(results: &ScanResults, ctx: &JsonEmitContext) -> TlsExtensio
         compress_certificate_algorithms,
         grease_echoed,
         hello_retry_request,
+        ocsp_http_fallback,
     }
+}
+
+/// Render the OCSP-over-HTTP fallback entries from
+/// `results.ocsp_http_fetch`. Parses each raw response body via the
+/// shared OCSP parser ([`crate::model::ocsp_response::parse`]) so
+/// the `content` shape matches what stapled OCSP renders as.
+#[cfg(all(feature = "http-checks", feature = "legacy-probes"))]
+fn build_ocsp_http_fallback(
+    results: &ScanResults,
+) -> Vec<crate::model::scan_result::OcspHttpFallbackEntry> {
+    use crate::model::scan_result::OcspHttpFallbackEntry;
+
+    let Some(fetch) = results.ocsp_http_fetch.as_ref() else {
+        return Vec::new();
+    };
+    fetch
+        .results
+        .iter()
+        .map(|r| {
+            let (content, parse_err) = match r.response_der.as_ref() {
+                Some(bytes) => match crate::model::ocsp_response::parse(bytes) {
+                    Ok(c) => (Some(c), None),
+                    Err(e) => (None, Some(format!("response_parse_failed:{e}"))),
+                },
+                None => (None, None),
+            };
+            OcspHttpFallbackEntry {
+                url: r.url.clone(),
+                http_status: r.http_status,
+                content,
+                response_length: r.response_der.as_ref().map(|b| b.len()).unwrap_or(0),
+                error: r.error.clone().or(parse_err),
+            }
+        })
+        .collect()
+}
+
+#[cfg(not(all(feature = "http-checks", feature = "legacy-probes")))]
+fn build_ocsp_http_fallback(
+    _results: &ScanResults,
+) -> Vec<crate::model::scan_result::OcspHttpFallbackEntry> {
+    Vec::new()
 }
 
 /// Build the [`OcspStapling`] slot from the characterization

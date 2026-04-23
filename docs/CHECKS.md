@@ -336,6 +336,48 @@ Computed post-handshake from the characterization handshake's state
 Feeds SP 800-63B AAL3 verifier-impersonation-resistance rules and
 RFC 7677 / RFC 5802 SCRAM-PLUS channel-binding requirements.
 
+## Revocation fetches (opt-in)
+
+Gated behind `--enable-revocation-fetch`. Default off — avoids
+sending per-scan traffic to responders the operator may not want
+to hit. Both checks below share the flag.
+
+### OCSP-over-HTTP fallback
+
+Source: [src/scanner/ocsp_http.rs](../src/scanner/ocsp_http.rs).
+Requires features `http-checks` + `legacy-probes` (both default-on).
+
+| Observation | How | Output field |
+|---|---|---|
+| OCSP-HTTP fetch per AIA URL | `openssl::ocsp::OcspRequest::new()` + `OcspCertId::from_cert(sha1, leaf, issuer)` → DER → `reqwest` POST to AIA URL with `Content-Type: application/ocsp-request`. Response parsed via the shared [src/model/ocsp_response.rs](../src/model/ocsp_response.rs) parser. | `tls.extensions.ocsp_http_fallback[]` |
+
+**CertID digest: SHA-1.** RFC 6960 §A.2 calls out SHA-1 as the
+interoperable default; production responders frequently reject
+SHA-256 CertIDs (pre-computed responses keyed on SHA-1). The
+observation surface isn't about cryptographic strength of the
+CertID — it's about what the responder says about the leaf's
+revocation state, and that signal is the same either way.
+
+**No nonce.** We don't add a `Nonce` extension (RFC 6960 §4.4.1).
+Nonced requests force the responder to sign a fresh reply, which
+many production responders refuse because they serve
+pre-computed responses from CDN caches. Skipping the nonce
+matches common client behavior.
+
+**No signature validation.** The parser extracts
+`signature_algorithm_oid`, `responder_id_*`, `produced_at`,
+`this_update`, `next_update`, `cert_status`, etc.; kemist does
+not cryptographically validate the responder's signature against
+a trusted responder chain. Rule engines that want to verify can
+do so against a trust bundle they control.
+
+**Body cap: 256 KB, timeout: 10 s per URL.**
+
+**Coexistence with stapled OCSP.** Runs regardless of whether the
+server already stapled — the two responses can differ on
+timing and both are useful observations. `ocsp_stapling`
+continues to carry whatever came in-band.
+
 ## ALPN probe matrix
 
 Per-protocol ALPN handshake. One TLS 1.3 handshake per target token
@@ -398,16 +440,28 @@ rustls+webpki-roots.
   URL, HTTP status, and `Location` target. The terminal entry has a
   non-3xx status and no `location`. A `status: 0` entry indicates a
   transport-level failure (DNS / TCP / TLS) at that hop.
-- **Preload list** — static 12-entry lookup covering `github.com`,
-  `paypal.com`, `reddit.com`, `cisa.gov`, `mozilla.org`, `wikipedia.org`,
-  `twitter.com`, `gov.uk`, `example.com`, `cloudflare.com`, and two
-  `www.*` variants. Subdomain match for entries marked
-  `include_subdomains: true`.
+- **Preload list** — full Chromium `transport_security_state_static.json`
+  snapshot bundled at build time (~92,000 entries as of the current
+  vendoring). `build.rs` parses the JSON and emits a compile-time
+  `phf::Map<&'static str, bool>` for O(1) lookups without a runtime
+  HashMap. Only `mode: "force-https"` entries count — HPKP-only
+  pinning entries are excluded. Subdomain match walks parent labels
+  against the map; any parent with `include_subdomains: true` makes
+  the child `included`.
+  See [data/README.md](../data/README.md) for snapshot provenance +
+  refresh instructions.
+  **Runtime override** — `--hsts-preload-list-path <path>` loads an
+  alternate file (same Chromium format, `//` comments OK) at
+  startup; output surfaces `http.preload_list_source:
+  "runtime_override:<path>"` for provenance.
 
-**The preload list is a stub.** Shipping a full Chromium
-`transport_security_state_static.json` snapshot (~15,000 entries) is
-deferred — the current list covers common test targets. Non-listed
-hosts emit `not_included` regardless of their real Chrome status.
+**Snapshot staleness.** The preload list is pinned at vendoring
+time (the exact upstream revision lives in the commit that touched
+`data/hsts_preload_list.json`). Operators running against targets
+added/removed from the list between snapshots can refresh the data
+without rebuilding by passing `--hsts-preload-list-path`. Build-time
+bundling (rather than a runtime-only download) keeps builds
+offline-capable and reproducible.
 
 ## STARTTLS
 

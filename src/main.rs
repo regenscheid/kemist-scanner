@@ -116,6 +116,25 @@ struct Args {
     #[arg(long, value_name = "CSV", value_delimiter = ',')]
     sigalg_probe_skip: Vec<String>,
 
+    /// Override the compile-time HSTS preload list with a runtime
+    /// snapshot loaded from `<PATH>`. Accepts the Chromium
+    /// `transport_security_state_static.json` format (JavaScript-style
+    /// `//` comments tolerated). Output carries
+    /// `http.preload_list_source: "runtime_override:<path>"` when the
+    /// flag is in effect. Without the flag, kemist uses the bundled
+    /// snapshot (see data/README.md for provenance).
+    #[arg(long, value_name = "PATH")]
+    hsts_preload_list_path: Option<std::path::PathBuf>,
+
+    /// Enable active revocation fetches — CRL downloads (S2) and
+    /// OCSP-over-HTTP fallback (S3). Default off; when unset, the
+    /// scanner still captures stapled OCSP in-band during the TLS
+    /// handshake but does not issue any additional revocation
+    /// traffic. Fetches are rate-limited per scan via per-URL 10-second
+    /// timeouts and body-size caps (5 MB CRL, 256 KB OCSP response).
+    #[arg(long)]
+    enable_revocation_fetch: bool,
+
     /// Increase logging verbosity (-v info, -vv debug, -vvv trace).
     #[arg(short, long, action = clap::ArgAction::Count)]
     verbose: u8,
@@ -166,6 +185,21 @@ async fn run() -> Result<()> {
         .install_default()
         .expect("failed to install rustls crypto provider");
 
+    // Runtime HSTS-preload override. Loaded before any scan so the
+    // `OnceLock` settles; subsequent `preload_list_status` calls see
+    // the override. Load failure is a fatal user error — operators
+    // who supply the flag expect the override to take effect; silent
+    // fall-through to the compile-time list would hide bugs.
+    if let Some(path) = &args.hsts_preload_list_path {
+        let path_str = path.to_string_lossy().into_owned();
+        match kemist::scanner::http::load_preload_override_from_path(&path_str) {
+            Ok(ov) => kemist::scanner::http::install_preload_override(ov),
+            Err(e) => anyhow::bail!(
+                "failed to load HSTS preload override from {path_str}: {e}"
+            ),
+        }
+    }
+
     // Collect targets from all three input sources.
     let targets = collect_targets(&args)?;
     if targets.is_empty() {
@@ -201,6 +235,7 @@ async fn run() -> Result<()> {
         user_agent_info_url,
         include_ocsp_raw: args.include_ocsp_raw,
         sigalg_probe_skip: args.sigalg_probe_skip.clone(),
+        enable_revocation_fetch: args.enable_revocation_fetch,
     });
 
     let results = scanner.scan_many(targets).await;
