@@ -73,18 +73,18 @@ jobs:
       run: cargo build --release --verbose
 
   feature_matrix:
-    # Proves the legacy-probe feature boundary is honestly opt-out. Each
-    # variant exercises a different subset of the dep graph; if any of
-    # the three fails to compile, the feature gating drifted.
+    # Proves the legacy-probe feature boundary is honestly opt-out.
+    # `minimal` drops the OpenSSL subsystem entirely; the new `tls.*`
+    # sections render as empty / feature_disabled but the schema shape
+    # stays stable. A previous `no-legacy-probes` variant referenced a
+    # `native-legacy` feature that was removed in commit 7c21fe9; kept
+    # removing it here so the matrix matches the actual Cargo features.
     name: Feature matrix
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         include:
-          - variant: no-legacy-probes
-            # native-tls fallback for SSLv3/TLS1.0/1.1; openssl omitted.
-            args: "--no-default-features --features http-checks,native-legacy"
           - variant: minimal
             # No legacy backend at all; the new tls.* sections render as
             # empty/feature_disabled but the schema shape stays stable.

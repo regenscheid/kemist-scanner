@@ -34,6 +34,12 @@ use kemist::scanner::backends::all_inventories;
 ///   shipped; closed-ecosystem suite.
 /// - `CipherClassification::Other` — fallback-only, never expected in
 ///   probe inventory.
+///
+/// The legacy-reachable entries (everything beyond the modern
+/// ECDHE-AEAD core) require the OpenSSL backend; under
+/// `--no-default-features` those probes compile out and the
+/// inventory shrinks to the rustls-shipped suites only.
+#[cfg(feature = "legacy-probes")]
 const EXPECTED_REACHED: &[CipherClassification] = &[
     CipherClassification::RsaKex,
     CipherClassification::DheAead,
@@ -48,6 +54,8 @@ const EXPECTED_REACHED: &[CipherClassification] = &[
     CipherClassification::EcdhePsk,
     CipherClassification::NullCipher,
 ];
+#[cfg(not(feature = "legacy-probes"))]
+const EXPECTED_REACHED: &[CipherClassification] = &[CipherClassification::EcdheAead];
 
 #[test]
 fn every_inventoried_cipher_classifies_to_known_variant() {
