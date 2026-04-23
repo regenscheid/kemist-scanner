@@ -17,7 +17,12 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
+pub mod alpn_matrix;
+pub mod characterize;
+pub mod ciphers;
+pub mod groups;
 pub mod session_resumption;
+pub mod sni;
 use tokio::net::TcpStream;
 use tokio::time::timeout;
 use tokio_rustls::{rustls, TlsConnector};
@@ -124,7 +129,7 @@ async fn probe_single_cipher_shape(
             code
         )));
     };
-    let outcome = crate::scanner::ciphers::probe_single_suite(
+    let outcome = self::ciphers::probe_single_suite(
         ctx.target,
         &ctx.hostname,
         suite,
@@ -157,7 +162,7 @@ async fn probe_single_group_shape(
             format!("aws_lc_rs_does_not_ship_group:0x{:04X}", code),
         )));
     };
-    let outcome = crate::scanner::groups::probe_single_group(
+    let outcome = self::groups::probe_single_group(
         ctx.target,
         &ctx.hostname,
         group,

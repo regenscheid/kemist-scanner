@@ -1,4 +1,3 @@
-pub mod alpn_matrix;
 pub mod backends;
 pub mod bundle_cache;
 #[cfg(all(feature = "http-checks", feature = "legacy-probes"))]
@@ -6,10 +5,8 @@ pub mod bundle_fetcher;
 #[cfg(all(feature = "http-checks", feature = "legacy-probes"))]
 pub mod bundle_updater;
 pub mod cert;
-pub mod ciphers;
 #[cfg(feature = "http-checks")]
 pub mod crl_fetch;
-pub mod groups;
 pub mod hello;
 pub mod http;
 #[cfg(all(feature = "http-checks", feature = "legacy-probes"))]
@@ -17,8 +14,17 @@ pub mod ocsp_http;
 pub mod probe;
 pub mod raw;
 pub mod runner;
-pub mod sni;
 pub mod trust_stores;
+
+// Back-compat re-exports for the rustls-backed probe modules that
+// migrated from `src/scanner/*.rs` to `src/scanner/backends/rustls/*.rs`.
+// External callers that still reference `crate::scanner::{ciphers,
+// groups, alpn_matrix, sni}` continue to resolve. Mirrors the
+// `crate::scanner::openssl` alias below.
+pub use crate::scanner::backends::rustls::alpn_matrix;
+pub use crate::scanner::backends::rustls::ciphers;
+pub use crate::scanner::backends::rustls::groups;
+pub use crate::scanner::backends::rustls::sni;
 
 // Backwards-compatible alias. The entire OpenSSL subsystem lives
 // under `backends::openssl`; this re-export keeps
@@ -38,15 +44,15 @@ use tracing::info;
 use crate::model::cert::CertificateInfo;
 use crate::model::errors::ScannerError;
 use crate::model::protocol::{ProtocolSupport, TlsVersion};
-use crate::scanner::ciphers::{probe_cipher_suites, CipherProbeOutput};
-use crate::scanner::groups::{probe_kx_groups, GroupProbeOutput};
+use crate::scanner::backends::rustls::ciphers::{probe_cipher_suites, CipherProbeOutput};
+use crate::scanner::backends::rustls::groups::{probe_kx_groups, GroupProbeOutput};
 use crate::scanner::hello::{
     probe_hello_extensions, probe_hello_retry_request, HelloExtensionsObserved,
     HelloRetryRequestObservation,
 };
 use crate::scanner::http::{probe_http, HttpObservations};
 use crate::scanner::probe::{characterize_connection, NegotiatedState, ValidationResult};
-use crate::scanner::sni::{probe_sni_omitted, SniBehaviorResult};
+use crate::scanner::backends::rustls::sni::{probe_sni_omitted, SniBehaviorResult};
 
 // Scanner-module functions return `Result<T, ScannerError>` explicitly rather
 // than a type alias, so they don't collide with `rustls::Result<T, rustls::Error>`
@@ -146,7 +152,7 @@ pub struct ScanResults {
     /// ALPN token. Feeds `tls.alpn_probe` in schema. `None` when the
     /// probe didn't run.
     #[serde(skip_serializing)]
-    pub alpn_matrix: Option<crate::scanner::alpn_matrix::AlpnMatrixOutput>,
+    pub alpn_matrix: Option<crate::scanner::backends::rustls::alpn_matrix::AlpnMatrixOutput>,
     /// OCSP-over-HTTP fallback results — one fetch per AIA OCSP URL
     /// the leaf cert advertises. Populated only when
     /// `--enable-revocation-fetch` is set AND the characterization
@@ -389,7 +395,7 @@ impl SslScanner {
         // server would accept independently, not just what it picks
         // when both are offered.
         results.alpn_matrix = Some(
-            crate::scanner::alpn_matrix::probe_alpn_matrix(
+            crate::scanner::backends::rustls::alpn_matrix::probe_alpn_matrix(
                 self.config.target,
                 &self.config.hostname,
                 self.config.timeout,

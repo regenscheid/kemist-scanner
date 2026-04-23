@@ -212,11 +212,11 @@ fn build_tls(results: &ScanResults, ctx: &JsonEmitContext) -> Tls {
 }
 
 /// Build the per-ALPN probe matrix. Maps each
-/// [`crate::scanner::alpn_matrix::AlpnProbeOutcome`] onto the
+/// [`crate::scanner::backends::rustls::alpn_matrix::AlpnProbeOutcome`] onto the
 /// `{supported, method, reason}` envelope used throughout the schema.
 fn build_alpn_probe(results: &ScanResults) -> Vec<crate::model::scan_result::AlpnProbeEntry> {
     use crate::model::scan_result::AlpnProbeEntry;
-    use crate::scanner::alpn_matrix::AlpnProbeOutcome;
+    use crate::scanner::backends::rustls::alpn_matrix::AlpnProbeOutcome;
 
     let Some(matrix) = results.alpn_matrix.as_ref() else {
         return Vec::new();
@@ -1044,7 +1044,7 @@ fn extract_cn(dn: &str) -> Option<String> {
 fn build_sni_behavior(results: &ScanResults) -> SniBehavior {
     match &results.sni_behavior {
         Some(r) => {
-            use crate::scanner::sni::SniBehaviorOutcome;
+            use crate::scanner::backends::rustls::sni::SniBehaviorOutcome;
             let method = match r.outcome {
                 SniBehaviorOutcome::SameCert | SniBehaviorOutcome::DifferentCert => Method::Probe,
                 SniBehaviorOutcome::Rejected => Method::Probe,

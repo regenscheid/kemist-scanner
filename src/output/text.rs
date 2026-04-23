@@ -896,7 +896,7 @@ fn print_group(name: &str, obs: &GroupObservation) {
     // (populated for OpenSSL FFDHE entries), else look up from the
     // aws-lc-rs probe table for modern groups.
     let code = obs.iana_code.clone().unwrap_or_else(|| {
-        crate::scanner::groups::iana_code_for(name)
+        crate::scanner::backends::rustls::groups::iana_code_for(name)
             .map(|c| format!("0x{c:04X}"))
             .unwrap_or_else(|| "0x????".to_string())
     });
