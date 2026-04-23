@@ -108,9 +108,7 @@ pub async fn probe(ctx: &ProbeContext) -> Tls13Resumption {
             new_session_ticket_count: Some(ticket_count),
             ticket_lifetime_secs: Vec::new(),
             psk_resumption_accepted: ObservationBool::error(&reason),
-            early_data_accepted: ObservationBool::not_probed(
-                "resumption_handshake_failed",
-            ),
+            early_data_accepted: ObservationBool::not_probed("resumption_handshake_failed"),
         },
         Err(_) => Tls13Resumption {
             new_session_ticket_count: Some(ticket_count),
@@ -197,16 +195,9 @@ async fn do_handshake_and_observe(
     };
 
     let (_tcp_ref, conn) = tls.get_ref();
-    let resumed = matches!(
-        conn.handshake_kind(),
-        Some(rustls::HandshakeKind::Resumed)
-    );
+    let resumed = matches!(conn.handshake_kind(), Some(rustls::HandshakeKind::Resumed));
     let early_accepted = conn.is_early_data_accepted();
-    debug!(
-        resumed,
-        early_accepted,
-        "tls1.3 resumption observation"
-    );
+    debug!(resumed, early_accepted, "tls1.3 resumption observation");
     Ok((resumed, early_accepted))
 }
 
@@ -255,18 +246,11 @@ impl ClientSessionStore for TicketCountingStore {
         self.inner.kx_hint(server_name)
     }
 
-    fn set_tls12_session(
-        &self,
-        server_name: ServerName<'static>,
-        value: Tls12ClientSessionValue,
-    ) {
+    fn set_tls12_session(&self, server_name: ServerName<'static>, value: Tls12ClientSessionValue) {
         self.inner.set_tls12_session(server_name, value);
     }
 
-    fn tls12_session(
-        &self,
-        server_name: &ServerName<'_>,
-    ) -> Option<Tls12ClientSessionValue> {
+    fn tls12_session(&self, server_name: &ServerName<'_>) -> Option<Tls12ClientSessionValue> {
         self.inner.tls12_session(server_name)
     }
 

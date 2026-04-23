@@ -46,13 +46,13 @@ use crate::model::errors::ScannerError;
 use crate::model::protocol::{ProtocolSupport, TlsVersion};
 use crate::scanner::backends::rustls::ciphers::{probe_cipher_suites, CipherProbeOutput};
 use crate::scanner::backends::rustls::groups::{probe_kx_groups, GroupProbeOutput};
+use crate::scanner::backends::rustls::sni::{probe_sni_omitted, SniBehaviorResult};
 use crate::scanner::hello::{
     probe_hello_extensions, probe_hello_retry_request, HelloExtensionsObserved,
     HelloRetryRequestObservation,
 };
 use crate::scanner::http::{probe_http, HttpObservations};
 use crate::scanner::probe::{characterize_connection, NegotiatedState, ValidationResult};
-use crate::scanner::backends::rustls::sni::{probe_sni_omitted, SniBehaviorResult};
 
 // Scanner-module functions return `Result<T, ScannerError>` explicitly rather
 // than a type alias, so they don't collide with `rustls::Result<T, rustls::Error>`
@@ -466,9 +466,7 @@ impl SslScanner {
                     if let Some(leaf_der) = results.cert_chain_der.first() {
                         use x509_parser::prelude::FromDer;
                         if let Ok((_, cert)) =
-                            x509_parser::certificate::X509Certificate::from_der(
-                                leaf_der,
-                            )
+                            x509_parser::certificate::X509Certificate::from_der(leaf_der)
                         {
                             let serial_bytes = cert.raw_serial().to_vec();
                             results.crl_fetch = Some(

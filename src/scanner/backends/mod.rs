@@ -22,19 +22,19 @@ use async_trait::async_trait;
 use crate::model::cert::CertificateInfo;
 use crate::model::errors::ScannerError;
 use crate::model::protocol::TlsVersion;
-use crate::scanner::probe::NegotiatedState;
 #[cfg(feature = "legacy-probes")]
 use crate::scanner::openssl::dh_params::DhSnapshot;
+use crate::scanner::probe::NegotiatedState;
 
-pub mod registry;
-pub mod rustls;
 #[cfg(feature = "legacy-probes")]
 pub mod openssl;
+pub mod registry;
+pub mod rustls;
 
-pub use self::registry::BackendRegistry;
-pub use self::rustls::RustlsBackend;
 #[cfg(feature = "legacy-probes")]
 pub use self::openssl::OpensslBackend;
+pub use self::registry::BackendRegistry;
+pub use self::rustls::RustlsBackend;
 
 /// Outcome of a single probe handshake. Unifies the per-probe-family
 /// outcome enums that used to live alongside each probe (`ProbeOutcome`,

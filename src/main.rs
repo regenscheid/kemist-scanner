@@ -196,9 +196,7 @@ fn parse_name_path_flags(
     let mut out = std::collections::BTreeMap::new();
     for entry in raw {
         let (name, path) = entry.split_once(':').ok_or_else(|| {
-            anyhow::anyhow!(
-                "{flag}: expected NAME:PATH, got `{entry}` (no colon separator)"
-            )
+            anyhow::anyhow!("{flag}: expected NAME:PATH, got `{entry}` (no colon separator)")
         })?;
         let name = name.trim();
         let path = path.trim();
@@ -259,8 +257,7 @@ async fn run() -> Result<()> {
     #[cfg(all(feature = "http-checks", feature = "legacy-probes"))]
     if args.update_trust_stores {
         let reports = kemist::scanner::bundle_updater::update_all_trust_stores().await;
-        let all_ok =
-            kemist::scanner::bundle_updater::print_reports("trust-stores", &reports);
+        let all_ok = kemist::scanner::bundle_updater::print_reports("trust-stores", &reports);
         std::process::exit(if all_ok { 0 } else { 1 });
     }
     #[cfg(all(feature = "http-checks", feature = "legacy-probes"))]
@@ -284,9 +281,7 @@ async fn run() -> Result<()> {
         let path_str = path.to_string_lossy().into_owned();
         match kemist::scanner::http::load_preload_override_from_path(&path_str) {
             Ok(ov) => kemist::scanner::http::install_preload_override(ov),
-            Err(e) => anyhow::bail!(
-                "failed to load HSTS preload override from {path_str}: {e}"
-            ),
+            Err(e) => anyhow::bail!("failed to load HSTS preload override from {path_str}: {e}"),
         }
     } else {
         // No explicit override — try the cache. This is a no-op
@@ -300,13 +295,11 @@ async fn run() -> Result<()> {
     // validation reads the registry.
     let ts_overrides = parse_name_path_flags("--trust-store", &args.trust_store)?;
     let ts_extras = parse_name_path_flags("--extra-trust-store", &args.extra_trust_store)?;
-    let registry = match kemist::scanner::trust_stores::build_default_registry(
-        &ts_overrides,
-        &ts_extras,
-    ) {
-        Ok(r) => r,
-        Err(e) => anyhow::bail!("trust-store setup failed: {e}"),
-    };
+    let registry =
+        match kemist::scanner::trust_stores::build_default_registry(&ts_overrides, &ts_extras) {
+            Ok(r) => r,
+            Err(e) => anyhow::bail!("trust-store setup failed: {e}"),
+        };
     kemist::scanner::trust_stores::install_registry(registry);
 
     // Collect targets from all three input sources.

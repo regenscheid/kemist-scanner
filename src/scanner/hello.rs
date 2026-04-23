@@ -397,8 +397,7 @@ fn parse_server_hello(bytes: &[u8], out: &mut HelloExtensionsObserved) {
     out.sct_via_tls_extension = seen.contains_key(&EXT_SIGNED_CERT_TIMESTAMP);
     out.truncated_hmac = Some(seen.contains_key(&EXT_TRUNCATED_HMAC));
     out.npn = Some(seen.contains_key(&EXT_NPN));
-    out.delegated_credential_advertised_in_sh =
-        Some(seen.contains_key(&EXT_DELEGATED_CREDENTIAL));
+    out.delegated_credential_advertised_in_sh = Some(seen.contains_key(&EXT_DELEGATED_CREDENTIAL));
     // GREASE echo-detection: true iff the server echoed ANY codepoint
     // in the `0x?A0?A` family (both bytes `0x?A`), not just the one
     // we injected. Catches both the literal echo and broader buggy
@@ -578,7 +577,11 @@ fn build_tls12_client_hello(sni: &str) -> Vec<u8> {
     // that support DC echo an empty extension in ServerHello;
     // servers that don't silently drop the extension. Both
     // outcomes feed the presence observation.
-    append_extension(&mut exts, EXT_DELEGATED_CREDENTIAL, &delegated_credential_ext());
+    append_extension(
+        &mut exts,
+        EXT_DELEGATED_CREDENTIAL,
+        &delegated_credential_ext(),
+    );
     // RFC 6066 §4 — offer max_fragment_length = 2^12. We advertise the
     // largest legal value so servers that support smaller limits still
     // echo. We never actually honor the negotiated limit (probe bails
@@ -729,7 +732,10 @@ pub async fn probe_hello_retry_request(
         Ok(Ok(s)) => s,
     };
 
-    if let Err(_) = timeout(handshake_timeout, stream.write_all(&client_hello)).await {
+    if timeout(handshake_timeout, stream.write_all(&client_hello))
+        .await
+        .is_err()
+    {
         out.error = Some("write_client_hello_timeout".to_string());
         return out;
     }
@@ -779,10 +785,7 @@ fn classify_hrr_response(bytes: &[u8], out: &mut HelloRetryRequestObservation) {
     let content_type = bytes[0];
     if content_type == 0x15 {
         if bytes.len() >= 7 {
-            out.error = Some(format!(
-                "alert_level_{}_desc_{}",
-                bytes[5], bytes[6]
-            ));
+            out.error = Some(format!("alert_level_{}_desc_{}", bytes[5], bytes[6]));
         } else {
             out.error = Some("alert_truncated".to_string());
         }
@@ -902,21 +905,21 @@ mod tests {
     #[test]
     fn grease_codepoints_recognized() {
         // Full RFC 8701 GREASE table.
-        for hi in [0x0, 0x1, 0x2, 0x3, 0x4, 0x5, 0x6, 0x7, 0x8, 0x9, 0xA, 0xB, 0xC, 0xD, 0xE, 0xF] {
+        for hi in [
+            0x0, 0x1, 0x2, 0x3, 0x4, 0x5, 0x6, 0x7, 0x8, 0x9, 0xA, 0xB, 0xC, 0xD, 0xE, 0xF,
+        ] {
             let byte = (hi << 4) | 0x0A;
             let code = u16::from_be_bytes([byte, byte]);
-            assert!(
-                is_grease_codepoint(code),
-                "{:#06X} should be GREASE",
-                code
-            );
+            assert!(is_grease_codepoint(code), "{:#06X} should be GREASE", code);
         }
     }
 
     #[test]
     fn non_grease_codepoints_rejected() {
         // Common real extension codepoints must never register as GREASE.
-        for code in [0x0000u16, 0x000a, 0x000d, 0x0017, 0x001d, 0x002b, 0xff01, 0x0A0B, 0x0A1A] {
+        for code in [
+            0x0000u16, 0x000a, 0x000d, 0x0017, 0x001d, 0x002b, 0xff01, 0x0A0B, 0x0A1A,
+        ] {
             assert!(
                 !is_grease_codepoint(code),
                 "{:#06X} should NOT be GREASE",
@@ -951,7 +954,10 @@ mod tests {
                 break;
             }
         }
-        assert!(found, "ClientHello should include ext 0x0022 body length 10");
+        assert!(
+            found,
+            "ClientHello should include ext 0x0022 body length 10"
+        );
     }
 
     #[test]
@@ -975,7 +981,10 @@ mod tests {
                 break;
             }
         }
-        assert!(found, "ClientHello missing GREASE extension (0x0A0A, len=0)");
+        assert!(
+            found,
+            "ClientHello missing GREASE extension (0x0A0A, len=0)"
+        );
     }
 
     #[test]
@@ -1044,7 +1053,7 @@ mod tests {
         let mut record = Vec::new();
         record.push(0x16); // handshake content type
         record.extend_from_slice(&[0x03, 0x03]); // legacy version
-        // Handshake body: msg_type(1) + length(3) + legacy_version(2) + random(32)
+                                                 // Handshake body: msg_type(1) + length(3) + legacy_version(2) + random(32)
         let mut hs_body = Vec::new();
         hs_body.extend_from_slice(&[0x03, 0x03]); // legacy_version
         hs_body.extend_from_slice(&HRR_SENTINEL);

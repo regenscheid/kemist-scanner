@@ -203,9 +203,9 @@ mod tests {
         let r = BackendRegistry::new();
         // X448, secp521r1, MLKEM512, MLKEM1024, secp384r1MLKEM1024.
         for code in [0x001E, 0x0019, 0x0200, 0x0202, 0x11ED] {
-            let be = r.route_group(code).unwrap_or_else(|| {
-                panic!("group 0x{:04X} not routed", code)
-            });
+            let be = r
+                .route_group(code)
+                .unwrap_or_else(|| panic!("group 0x{:04X} not routed", code));
             assert_eq!(
                 be.id(),
                 "openssl",

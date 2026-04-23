@@ -525,9 +525,8 @@ fn parse_certificate_for_dc(raw: &[u8]) -> Option<DelegatedCredentialFacts> {
     if after_ctx.len() < 3 {
         return None;
     }
-    let list_len = ((after_ctx[0] as usize) << 16)
-        | ((after_ctx[1] as usize) << 8)
-        | (after_ctx[2] as usize);
+    let list_len =
+        ((after_ctx[0] as usize) << 16) | ((after_ctx[1] as usize) << 8) | (after_ctx[2] as usize);
     let list_body = after_ctx.get(3..3 + list_len)?;
     // Leaf entry only (first entry).
     if list_body.len() < 3 {

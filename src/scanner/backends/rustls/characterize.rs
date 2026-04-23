@@ -109,18 +109,14 @@ pub async fn characterize_connection(
 
     let (sig_scheme, ocsp_bytes, cert_bytes) = collector.take_state();
 
-    let channel_binding_server_end_point =
-        cert_bytes.first().map(|leaf_der| sha256_hex(leaf_der));
+    let channel_binding_server_end_point = cert_bytes.first().map(|leaf_der| sha256_hex(leaf_der));
 
     let certificates = decode_certs(&cert_bytes);
 
     // Offline chain validation + name match, decoupled from the permissive
     // handshake above. See probe module docs for why these are independent.
-    let validation = crate::scanner::probe::evaluate_validation(
-        &cert_bytes,
-        &certificates,
-        hostname,
-    );
+    let validation =
+        crate::scanner::probe::evaluate_validation(&cert_bytes, &certificates, hostname);
 
     let ocsp_len = ocsp_bytes.as_ref().map(|v| v.len()).unwrap_or(0);
     let negotiated = Some(NegotiatedState {

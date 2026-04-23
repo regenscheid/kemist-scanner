@@ -92,9 +92,7 @@ impl TlsBackend for RustlsBackend {
             ));
         }
         if c.seclevel_zero {
-            return Err(UnsatisfiableConstraint::new(
-                "rustls_backend_no_seclevel",
-            ));
+            return Err(UnsatisfiableConstraint::new("rustls_backend_no_seclevel"));
         }
 
         // Dispatch by constraint shape.

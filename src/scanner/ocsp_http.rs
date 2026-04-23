@@ -166,7 +166,8 @@ pub async fn probe_ocsp_http(
     };
 
     for url in aia_ocsp_urls {
-        out.results.push(fetch_one(&client, url, &request_der).await);
+        out.results
+            .push(fetch_one(&client, url, &request_der).await);
     }
     out
 }
@@ -187,11 +188,7 @@ fn build_ocsp_request_der(
     req.to_der()
 }
 
-async fn fetch_one(
-    client: &reqwest::Client,
-    url: &str,
-    request_der: &[u8],
-) -> OcspHttpFetch {
+async fn fetch_one(client: &reqwest::Client, url: &str, request_der: &[u8]) -> OcspHttpFetch {
     let resp = match client
         .post(url)
         .header("Content-Type", "application/ocsp-request")
@@ -272,8 +269,7 @@ mod tests {
         )
         .await;
         assert_eq!(out.results.len(), 1);
-        assert!(out
-            .results[0]
+        assert!(out.results[0]
             .error
             .as_ref()
             .unwrap()
@@ -322,8 +318,7 @@ mod tests {
         )
         .await;
         assert_eq!(out.results.len(), 1);
-        assert!(out
-            .results[0]
+        assert!(out.results[0]
             .error
             .as_ref()
             .unwrap()

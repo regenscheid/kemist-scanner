@@ -86,14 +86,8 @@ pub async fn probe_alpn_matrix(
 ) -> AlpnMatrixOutput {
     let mut results = Vec::with_capacity(ALPN_PROBE_LIST.len());
     for &proto in ALPN_PROBE_LIST {
-        let outcome = probe_single_alpn(
-            target,
-            hostname,
-            proto,
-            connect_timeout,
-            handshake_timeout,
-        )
-        .await;
+        let outcome =
+            probe_single_alpn(target, hostname, proto, connect_timeout, handshake_timeout).await;
         debug!(protocol = proto, ?outcome, "alpn probe result");
         results.push(AlpnProbeResult {
             protocol: proto.to_string(),

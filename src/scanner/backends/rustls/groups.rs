@@ -171,23 +171,18 @@ pub async fn probe_kx_groups(
 
         for version in versions {
             let outcome = if rustls_cipher_codes.contains(iana_code) {
-                let constraint =
-                    crate::scanner::backends::HandshakeConstraint::single_group_at(
-                        *iana_code, version,
-                    );
+                let constraint = crate::scanner::backends::HandshakeConstraint::single_group_at(
+                    *iana_code, version,
+                );
                 match registry.rustls.handshake(constraint, &ctx).await {
                     Ok(r) => r.outcome,
-                    Err(u) => HandshakeOutcome::Error(format!(
-                        "unsatisfiable_constraint:{}",
-                        u.reason
-                    )),
+                    Err(u) => {
+                        HandshakeOutcome::Error(format!("unsatisfiable_constraint:{}", u.reason))
+                    }
                 }
             } else {
                 debug!("group {} not exposed by aws-lc-rs, skipping probe", name);
-                HandshakeOutcome::NotProbed(format!(
-                    "aws_lc_rs_no_{}_support",
-                    name.to_lowercase()
-                ))
+                HandshakeOutcome::NotProbed(format!("aws_lc_rs_no_{}_support", name.to_lowercase()))
             };
 
             results.push(GroupProbeResult {

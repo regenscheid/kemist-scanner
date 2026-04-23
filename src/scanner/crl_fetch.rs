@@ -258,8 +258,7 @@ fn parse_crl(der_bytes: &[u8]) -> Result<ParsedCrl, String> {
     use x509_parser::prelude::FromDer;
     use x509_parser::revocation_list::CertificateRevocationList;
 
-    let (_, crl) = CertificateRevocationList::from_der(der_bytes)
-        .map_err(|e| format!("{e}"))?;
+    let (_, crl) = CertificateRevocationList::from_der(der_bytes).map_err(|e| format!("{e}"))?;
     let last_update = crl.last_update();
     let next_update = crl.next_update();
     let issuer = crl.issuer().to_string();
@@ -267,9 +266,7 @@ fn parse_crl(der_bytes: &[u8]) -> Result<ParsedCrl, String> {
     for entry in crl.iter_revoked_certificates() {
         let serial_bytes = entry.raw_serial().to_vec();
         let revocation_date = entry.revocation_date;
-        let reason = entry
-            .reason_code()
-            .map(|(_crit, code)| format!("{code:?}"));
+        let reason = entry.reason_code().map(|(_crit, code)| format!("{code:?}"));
         revoked_entries.push(RevokedEntry {
             serial_bytes,
             revocation_date,
@@ -299,15 +296,13 @@ fn decode_pem_if_armored(input: &[u8]) -> Result<Vec<u8>, String> {
         // DER path — hand bytes through unchanged.
         return Ok(input.to_vec());
     }
-    let text =
-        std::str::from_utf8(rest).map_err(|e| format!("non-utf8 in pem armor: {e}"))?;
+    let text = std::str::from_utf8(rest).map_err(|e| format!("non-utf8 in pem armor: {e}"))?;
     // Strip the BEGIN line, END line, and any intermediate
     // whitespace/newlines; base64-decode the middle.
     let Some(after_begin) = text.splitn(2, "\n").nth(1) else {
         return Err("malformed pem: no newline after BEGIN".to_string());
     };
-    let Some(before_end) = after_begin.rsplitn(2, "-----END X509 CRL-----").nth(1)
-    else {
+    let Some(before_end) = after_begin.rsplitn(2, "-----END X509 CRL-----").nth(1) else {
         return Err("malformed pem: no END marker".to_string());
     };
     // base64 decoder — we have a dep via x509-parser's transitive

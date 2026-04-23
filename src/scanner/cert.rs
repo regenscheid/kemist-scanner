@@ -571,14 +571,11 @@ fn parse_rsa_pss_params(params_der: Option<&[u8]>) -> (&'static str, Option<Stri
             if let Some((inner, _)) = der_body(elem_body) {
                 if !inner.is_empty() && inner[0] == 0x06 {
                     if let Some((oid_bytes, _)) = der_body(inner) {
-                        if let Ok((_, oid)) = der_parser::der::parse_der_oid(&[
-                            &[0x06, oid_bytes.len() as u8][..],
-                            oid_bytes,
-                        ].concat()) {
-                            let oid_str = oid
-                                .as_oid()
-                                .map(|o| o.to_id_string())
-                                .unwrap_or_default();
+                        if let Ok((_, oid)) = der_parser::der::parse_der_oid(
+                            &[&[0x06, oid_bytes.len() as u8][..], oid_bytes].concat(),
+                        ) {
+                            let oid_str =
+                                oid.as_oid().map(|o| o.to_id_string()).unwrap_or_default();
                             let name = match oid_str.as_str() {
                                 "2.16.840.1.101.3.4.2.1" => "sha256",
                                 "2.16.840.1.101.3.4.2.2" => "sha384",
@@ -815,17 +812,29 @@ mod tests {
         assert_eq!(pqc_family_of_oid("2.16.840.1.101.3.4.3.18"), Some("ml_dsa"));
         assert_eq!(pqc_family_of_oid("2.16.840.1.101.3.4.3.19"), Some("ml_dsa"));
         // FIPS 205 codepoints — SLH-DSA family
-        assert_eq!(pqc_family_of_oid("2.16.840.1.101.3.4.3.20"), Some("slh_dsa")); // SHA2-128s
-        assert_eq!(pqc_family_of_oid("2.16.840.1.101.3.4.3.25"), Some("slh_dsa")); // SHA2-256f
-        assert_eq!(pqc_family_of_oid("2.16.840.1.101.3.4.3.26"), Some("slh_dsa")); // SHAKE-128s
-        assert_eq!(pqc_family_of_oid("2.16.840.1.101.3.4.3.31"), Some("slh_dsa")); // SHAKE-256f
+        assert_eq!(
+            pqc_family_of_oid("2.16.840.1.101.3.4.3.20"),
+            Some("slh_dsa")
+        ); // SHA2-128s
+        assert_eq!(
+            pqc_family_of_oid("2.16.840.1.101.3.4.3.25"),
+            Some("slh_dsa")
+        ); // SHA2-256f
+        assert_eq!(
+            pqc_family_of_oid("2.16.840.1.101.3.4.3.26"),
+            Some("slh_dsa")
+        ); // SHAKE-128s
+        assert_eq!(
+            pqc_family_of_oid("2.16.840.1.101.3.4.3.31"),
+            Some("slh_dsa")
+        ); // SHAKE-256f
     }
 
     #[test]
     fn pqc_family_none_for_classical_and_out_of_range() {
         assert_eq!(pqc_family_of_oid("1.2.840.113549.1.1.11"), None); // RSA
         assert_eq!(pqc_family_of_oid("1.2.840.10045.4.3.2"), None); // ECDSA
-        // Arc with no subidentifier suffix.
+                                                                    // Arc with no subidentifier suffix.
         assert_eq!(pqc_family_of_oid("2.16.840.1.101.3.4.3"), None);
         // OID in the same arc but outside the FIPS-assigned range (e.g.
         // KEM OIDs on 2.16.840.1.101.3.4.4.*).
@@ -836,12 +845,21 @@ mod tests {
     #[test]
     fn algorithm_family_of_sig_oid_maps_rsa_ecdsa_ed() {
         assert_eq!(algorithm_family_of_sig_oid("1.2.840.113549.1.1.11"), "rsa"); // sha256WithRSA
-        assert_eq!(algorithm_family_of_sig_oid("1.2.840.113549.1.1.10"), "rsa_pss");
+        assert_eq!(
+            algorithm_family_of_sig_oid("1.2.840.113549.1.1.10"),
+            "rsa_pss"
+        );
         assert_eq!(algorithm_family_of_sig_oid("1.2.840.10045.4.3.2"), "ecdsa");
         assert_eq!(algorithm_family_of_sig_oid("1.3.101.112"), "ed25519");
         assert_eq!(algorithm_family_of_sig_oid("1.3.101.113"), "ed448");
-        assert_eq!(algorithm_family_of_sig_oid("2.16.840.1.101.3.4.3.18"), "ml_dsa_65");
-        assert_eq!(algorithm_family_of_sig_oid("2.16.840.1.101.3.4.3.20"), "slh_dsa_sha2_128s");
+        assert_eq!(
+            algorithm_family_of_sig_oid("2.16.840.1.101.3.4.3.18"),
+            "ml_dsa_65"
+        );
+        assert_eq!(
+            algorithm_family_of_sig_oid("2.16.840.1.101.3.4.3.20"),
+            "slh_dsa_sha2_128s"
+        );
         assert_eq!(algorithm_family_of_sig_oid("1.2.3.4.999"), "unknown");
     }
 

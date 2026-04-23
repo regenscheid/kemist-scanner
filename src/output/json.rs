@@ -113,9 +113,7 @@ fn build_http(results: &ScanResults) -> Option<Http> {
             use crate::model::scan_result::{CookieFlagsOutput, SecurityHeadersOutput};
             SecurityHeadersOutput {
                 content_security_policy: h.content_security_policy.clone(),
-                content_security_policy_report_only: h
-                    .content_security_policy_report_only
-                    .clone(),
+                content_security_policy_report_only: h.content_security_policy_report_only.clone(),
                 x_frame_options: h.x_frame_options.clone(),
                 x_content_type_options: h.x_content_type_options.clone(),
                 referrer_policy: h.referrer_policy.clone(),
@@ -287,18 +285,19 @@ fn build_channel_binding(results: &ScanResults) -> crate::model::scan_result::Ch
         }
     };
 
-    let tls_server_end_point = match negotiated.and_then(|n| n.channel_binding_server_end_point.clone()) {
-        Some(hex) => ChannelBindingValue {
-            value: Some(hex),
-            method: Method::Probe,
-            reason: None,
-        },
-        None => ChannelBindingValue {
-            value: None,
-            method: Method::NotProbed,
-            reason: Some("no_leaf_certificate".to_string()),
-        },
-    };
+    let tls_server_end_point =
+        match negotiated.and_then(|n| n.channel_binding_server_end_point.clone()) {
+            Some(hex) => ChannelBindingValue {
+                value: Some(hex),
+                method: Method::Probe,
+                reason: None,
+            },
+            None => ChannelBindingValue {
+                value: None,
+                method: Method::NotProbed,
+                reason: Some("no_leaf_certificate".to_string()),
+            },
+        };
 
     ChannelBinding {
         tls_exporter,
@@ -412,13 +411,7 @@ fn build_cipher_suites(results: &ScanResults) -> TlsCipherSuites {
 
     // OpenSSL legacy probes. Feature-gated — entirely absent when
     // `legacy-probes` is compiled off, leaving just aws-lc-rs entries.
-    merge_openssl_cipher_probes(
-        results,
-        &mut ssl3,
-        &mut tls1_0,
-        &mut tls1_1,
-        &mut tls1_2,
-    );
+    merge_openssl_cipher_probes(results, &mut ssl3, &mut tls1_0, &mut tls1_1, &mut tls1_2);
 
     // SSLv2 SERVER-HELLO cipher specs (raw-socket probe). Populated
     // only on servers that still answer SSLv2 — effectively zero
@@ -776,7 +769,6 @@ fn build_extensions(results: &ScanResults, ctx: &JsonEmitContext) -> TlsExtensio
         None => ObservationBool::not_probed("hrr_probe_not_run"),
     };
 
-
     TlsExtensions {
         ems,
         secure_renegotiation,
@@ -966,9 +958,7 @@ fn build_crl_fetch(results: &ScanResults) -> Vec<crate::model::scan_result::CrlF
 }
 
 #[cfg(not(feature = "http-checks"))]
-fn build_crl_fetch(
-    _results: &ScanResults,
-) -> Vec<crate::model::scan_result::CrlFetchEntry> {
+fn build_crl_fetch(_results: &ScanResults) -> Vec<crate::model::scan_result::CrlFetchEntry> {
     Vec::new()
 }
 
@@ -1130,9 +1120,7 @@ fn build_certificates(results: &ScanResults) -> Certificates {
 /// Assemble the leaf's out-of-band revocation observations:
 /// OCSP-over-HTTP fetches + CRL fetches. Empty values render as
 /// `None` on `CertificateFacts.revocation`.
-fn build_cert_revocation(
-    results: &ScanResults,
-) -> crate::model::scan_result::CertRevocation {
+fn build_cert_revocation(results: &ScanResults) -> crate::model::scan_result::CertRevocation {
     crate::model::scan_result::CertRevocation {
         ocsp_http_fallback: build_ocsp_http_fallback(results),
         crl_fetch: build_crl_fetch(results),
@@ -1237,10 +1225,7 @@ fn build_validation(results: &ScanResults) -> Validation {
 
     Validation {
         chain_valid_to_webpki_roots: to_obs("webpki-roots", v.chain_valid_to_webpki_roots),
-        chain_valid_to_microsoft_roots: to_obs(
-            "microsoft",
-            v.chain_valid_to_microsoft_roots,
-        ),
+        chain_valid_to_microsoft_roots: to_obs("microsoft", v.chain_valid_to_microsoft_roots),
         chain_valid_to_apple_roots: to_obs("apple", v.chain_valid_to_apple_roots),
         chain_valid_to_us_fpki_common_roots: to_obs(
             "us-fpki-common",

@@ -131,14 +131,7 @@ pub async fn probe(
 
     let mut per_variant = Vec::with_capacity(VARIANTS.len());
     for v in VARIANTS {
-        let result = run_variant(
-            *v,
-            target,
-            hostname,
-            connect_timeout,
-            handshake_timeout,
-        )
-        .await;
+        let result = run_variant(*v, target, hostname, connect_timeout, handshake_timeout).await;
         per_variant.push(result);
     }
 
@@ -158,7 +151,14 @@ async fn run_variant(
     handshake_timeout: Duration,
 ) -> RobotVariantObservation {
     let start = Instant::now();
-    let outcome = drive_variant(variant, target, hostname, connect_timeout, handshake_timeout).await;
+    let outcome = drive_variant(
+        variant,
+        target,
+        hostname,
+        connect_timeout,
+        handshake_timeout,
+    )
+    .await;
     let elapsed_ms = start.elapsed().as_millis() as u64;
 
     match outcome {
@@ -362,10 +362,7 @@ fn classify_post_cke_io_err(e: std::io::Error) -> Outcome {
     }
 }
 
-async fn classify_server_response(
-    stream: &mut TcpStream,
-    wait_for: Duration,
-) -> Outcome {
+async fn classify_server_response(stream: &mut TcpStream, wait_for: Duration) -> Outcome {
     let mut buf = [0u8; 4096];
     match timeout(wait_for, stream.read(&mut buf)).await {
         Ok(Ok(0)) => Outcome::GracefulClose,
@@ -384,9 +381,7 @@ async fn classify_server_response(
                     }
                 }
                 CT_HANDSHAKE => Outcome::UnexpectedPlaintext("handshake_record".to_string()),
-                other => {
-                    Outcome::UnexpectedPlaintext(format!("content_type_0x{other:02x}"))
-                }
+                other => Outcome::UnexpectedPlaintext(format!("content_type_0x{other:02x}")),
             }
         }
         Ok(Err(e)) => {
@@ -496,15 +491,12 @@ fn scan_server_flight(bytes: &[u8]) -> ScanResult {
                     // transcript, in wire order.
                     transcript.extend_from_slice(&rec_body[j..hs_end]);
                     match hs_type {
-                        HS_SERVER_HELLO => {
-                            // ServerHello body = version(2) +
-                            // random(32) + …
-                            if hs_end - (j + 4) >= 34 {
-                                let r_start = j + 4 + 2;
-                                let mut sr = [0u8; 32];
-                                sr.copy_from_slice(&rec_body[r_start..r_start + 32]);
-                                server_random = Some(sr);
-                            }
+                        // ServerHello body = version(2) + random(32) + …
+                        HS_SERVER_HELLO if hs_end - (j + 4) >= 34 => {
+                            let r_start = j + 4 + 2;
+                            let mut sr = [0u8; 32];
+                            sr.copy_from_slice(&rec_body[r_start..r_start + 32]);
+                            server_random = Some(sr);
                         }
                         HS_CERTIFICATE => {
                             cert_message = Some(rec_body[j..hs_end].to_vec());
@@ -563,12 +555,8 @@ fn extract_leaf_der(cert_msg: &[u8]) -> Option<Vec<u8>> {
 
 fn rsa_from_leaf_der(leaf_der: &[u8]) -> Result<Rsa<Public>, String> {
     let cert = X509::from_der(leaf_der).map_err(|e| format!("x509_parse:{e}"))?;
-    let pkey = cert
-        .public_key()
-        .map_err(|e| format!("x509_pubkey:{e}"))?;
-    let rsa = pkey
-        .rsa()
-        .map_err(|_| "leaf_pubkey_not_rsa".to_string())?;
+    let pkey = cert.public_key().map_err(|e| format!("x509_pubkey:{e}"))?;
+    let rsa = pkey.rsa().map_err(|_| "leaf_pubkey_not_rsa".to_string())?;
     Ok(rsa)
 }
 
@@ -829,7 +817,7 @@ fn aes128_cbc_encrypt_with_tls_padding(enc_key: &[u8], plaintext_with_mac: &[u8]
     let pad_byte = (pad_len - 1) as u8;
     let mut padded = Vec::with_capacity(plaintext_with_mac.len() + pad_len);
     padded.extend_from_slice(plaintext_with_mac);
-    padded.extend(std::iter::repeat(pad_byte).take(pad_len));
+    padded.extend(std::iter::repeat_n(pad_byte, pad_len));
 
     let mut iv = [0u8; 16];
     let _ = rand_bytes(&mut iv);
@@ -1012,8 +1000,8 @@ mod tests {
 
     #[test]
     fn byte_swap_variant_has_transposed_prefix() {
-        let p =
-            build_variant_payload(VariantKind::InvalidVersion0002ByteSwap, MOD_BYTES).full_plaintext;
+        let p = build_variant_payload(VariantKind::InvalidVersion0002ByteSwap, MOD_BYTES)
+            .full_plaintext;
         assert_eq!(p[0], 0x02);
         assert_eq!(p[1], 0x00);
     }
@@ -1080,7 +1068,7 @@ mod tests {
         let rec_len = u16::from_be_bytes([ch[3], ch[4]]) as usize;
         assert_eq!(rec_len, ch.len() - 5);
         assert_eq!(ch[5], 0x01); // ClientHello
-        // Cipher suite 0x002F should appear somewhere in the record.
+                                 // Cipher suite 0x002F should appear somewhere in the record.
         let mut found = false;
         for w in ch.windows(4) {
             if w[0] == 0x00 && w[1] == 0x2f && w[2] == 0x00 && w[3] == 0xff {
@@ -1088,7 +1076,10 @@ mod tests {
                 break;
             }
         }
-        assert!(found, "cipher suite 0x002F + SCSV must appear in ClientHello");
+        assert!(
+            found,
+            "cipher suite 0x002F + SCSV must appear in ClientHello"
+        );
     }
 
     #[test]

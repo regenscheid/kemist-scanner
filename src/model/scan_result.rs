@@ -1121,8 +1121,7 @@ pub struct Validation {
     /// override bundles have no accompanying manifest metadata.
     /// Lets rule engines pin observations to a specific snapshot.
     #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
-    pub trust_store_bundle_metadata:
-        std::collections::BTreeMap<String, TrustStoreBundleMetadata>,
+    pub trust_store_bundle_metadata: std::collections::BTreeMap<String, TrustStoreBundleMetadata>,
 }
 
 /// Output-side projection of [`crate::scanner::bundle_cache::BundleMetadata`].

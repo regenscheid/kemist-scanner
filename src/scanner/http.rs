@@ -232,8 +232,7 @@ pub fn install_preload_from_cache_if_fresh() {
     let Some(path) = crate::scanner::bundle_cache::hsts_preload_path() else {
         return;
     };
-    let Some(bytes) = crate::scanner::bundle_cache::read_verified(&path, "hsts_preload")
-    else {
+    let Some(bytes) = crate::scanner::bundle_cache::read_verified(&path, "hsts_preload") else {
         return;
     };
     // Parse in-place; we already own the verified bytes. Rebuild
@@ -272,10 +271,9 @@ pub fn install_preload_from_cache_if_fresh() {
 /// expected to surface the error to the user; kemist falls back to
 /// the compile-time PHF when override loading fails.
 pub fn load_preload_override_from_path(path: &str) -> Result<PreloadOverride, String> {
-    let raw = std::fs::read_to_string(path)
-        .map_err(|e| format!("read {path}: {e}"))?;
-    let parsed: PreloadOverrideFile = json5::from_str(&raw)
-        .map_err(|e| format!("parse {path}: {e}"))?;
+    let raw = std::fs::read_to_string(path).map_err(|e| format!("read {path}: {e}"))?;
+    let parsed: PreloadOverrideFile =
+        json5::from_str(&raw).map_err(|e| format!("parse {path}: {e}"))?;
     let mut map = std::collections::HashMap::new();
     for entry in parsed.entries {
         if entry.mode.as_deref() == Some("force-https") {
@@ -283,9 +281,7 @@ pub fn load_preload_override_from_path(path: &str) -> Result<PreloadOverride, St
         }
     }
     if map.is_empty() {
-        return Err(format!(
-            "no `mode: force-https` entries found in {path}"
-        ));
+        return Err(format!("no `mode: force-https` entries found in {path}"));
     }
     Ok(PreloadOverride {
         source_breadcrumb: format!("runtime_override:{path}"),
@@ -904,8 +900,7 @@ mod tests {
         let mut f = std::fs::File::create(&empty_path).unwrap();
         writeln!(f, r#"{{"entries": []}}"#).unwrap();
         drop(f);
-        let err =
-            load_preload_override_from_path(empty_path.to_str().unwrap()).unwrap_err();
+        let err = load_preload_override_from_path(empty_path.to_str().unwrap()).unwrap_err();
         assert!(err.contains("no `mode: force-https` entries"));
 
         // File with entries but none `force-https`.
@@ -917,8 +912,7 @@ mod tests {
         )
         .unwrap();
         drop(f);
-        let err =
-            load_preload_override_from_path(pins_only_path.to_str().unwrap()).unwrap_err();
+        let err = load_preload_override_from_path(pins_only_path.to_str().unwrap()).unwrap_err();
         assert!(err.contains("no `mode: force-https` entries"));
 
         let _ = std::fs::remove_file(empty_path);
@@ -1015,8 +1009,7 @@ mod tests {
 
     #[test]
     fn set_cookie_without_flags_is_all_false() {
-        let c = parse_set_cookie("tracking=xyz; Path=/; Domain=example.com")
-            .expect("parseable");
+        let c = parse_set_cookie("tracking=xyz; Path=/; Domain=example.com").expect("parseable");
         assert_eq!(c.name, "tracking");
         assert!(!c.secure);
         assert!(!c.http_only);

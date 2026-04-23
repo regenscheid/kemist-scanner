@@ -39,8 +39,13 @@ use rustls::RootCertStore;
 /// Canonical compile-time store names. Matches the CLI `--trust-store`
 /// enum and the schema's `chain_valid_to_<name>_roots` field naming
 /// convention (with underscores).
-pub const COMPILED_STORE_NAMES: &[&str] =
-    &["webpki-roots", "microsoft", "apple", "us-fpki-common", "us-dod"];
+pub const COMPILED_STORE_NAMES: &[&str] = &[
+    "webpki-roots",
+    "microsoft",
+    "apple",
+    "us-fpki-common",
+    "us-dod",
+];
 
 /// Provenance breadcrumb: where the bundle backing a given store
 /// came from. `CompiledIn` → build-time bundle; `CacheRefreshed(path)`
@@ -125,11 +130,7 @@ pub fn build_default_registry(
         ($name:literal, $bundle:expr) => {
             stores.insert(
                 $name.to_string(),
-                load_pem_store(
-                    $name,
-                    overrides.get($name),
-                    $bundle,
-                )?,
+                load_pem_store($name, overrides.get($name), $bundle)?,
             );
         };
     }
@@ -172,7 +173,10 @@ fn load_webpki_roots(override_path: Option<&PathBuf>) -> Result<LoadedStore, Str
     if let Some(path) = override_path {
         return Ok(LoadedStore {
             verifier: build_verifier_from_pem(&std::fs::read(path).map_err(|e| {
-                format!("failed to read --trust-store webpki-roots override {}: {e}", path.display())
+                format!(
+                    "failed to read --trust-store webpki-roots override {}: {e}",
+                    path.display()
+                )
             })?)?,
             source: TrustStoreSource::RuntimeOverride(path.clone()),
         });
@@ -189,9 +193,7 @@ fn load_webpki_roots(override_path: Option<&PathBuf>) -> Result<LoadedStore, Str
     let mut roots = RootCertStore::empty();
     roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
     Ok(LoadedStore {
-        verifier: WebPkiServerVerifier::builder(Arc::new(roots))
-            .build()
-            .ok(),
+        verifier: WebPkiServerVerifier::builder(Arc::new(roots)).build().ok(),
         source: TrustStoreSource::CompiledIn,
     })
 }
@@ -281,9 +283,7 @@ fn build_verifier_from_pem(pem: &[u8]) -> Result<Option<Arc<WebPkiServerVerifier
     if roots.is_empty() {
         return Ok(None);
     }
-    Ok(WebPkiServerVerifier::builder(Arc::new(roots))
-        .build()
-        .ok())
+    Ok(WebPkiServerVerifier::builder(Arc::new(roots)).build().ok())
 }
 
 fn validate_extra_name(name: &str) -> Result<(), String> {

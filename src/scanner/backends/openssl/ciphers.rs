@@ -642,10 +642,8 @@ pub async fn probe_legacy_suites(
     };
 
     for (i, t) in TARGETS.iter().enumerate() {
-        let constraint = crate::scanner::backends::HandshakeConstraint::single_cipher_at(
-            t.iana_code,
-            t.version,
-        );
+        let constraint =
+            crate::scanner::backends::HandshakeConstraint::single_cipher_at(t.iana_code, t.version);
         let (outcome, dh_snapshot, ske_sig) = match registry.route_cipher(t.iana_code) {
             Some(backend) => match backend.handshake(constraint, &ctx).await {
                 Ok(r) => (r.outcome, r.dh_parameters, r.ske_signature_name),
@@ -656,10 +654,7 @@ pub async fn probe_legacy_suites(
                 ),
             },
             None => (
-                HandshakeOutcome::Error(format!(
-                    "no_backend_routes_cipher:0x{:04X}",
-                    t.iana_code
-                )),
+                HandshakeOutcome::Error(format!("no_backend_routes_cipher:0x{:04X}", t.iana_code)),
                 None,
                 None,
             ),
@@ -935,10 +930,7 @@ mod tests {
             assert!(
                 matches!(
                     t.version,
-                    TlsVersion::Ssl3
-                        | TlsVersion::Tls10
-                        | TlsVersion::Tls11
-                        | TlsVersion::Tls12
+                    TlsVersion::Ssl3 | TlsVersion::Tls10 | TlsVersion::Tls11 | TlsVersion::Tls12
                 ),
                 "target {} has out-of-scope version {:?}",
                 t.iana_name,

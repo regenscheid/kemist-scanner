@@ -243,12 +243,8 @@ fn modp_hashes() -> &'static [([u8; 32], DhClassification)] {
         ]
         .iter()
         .map(|(hex_str, classification)| {
-            let cleaned: String = hex_str
-                .chars()
-                .filter(|c| c.is_ascii_hexdigit())
-                .collect();
-            let bytes = hex::decode(&cleaned)
-                .expect("hardcoded MODP hex must decode");
+            let cleaned: String = hex_str.chars().filter(|c| c.is_ascii_hexdigit()).collect();
+            let bytes = hex::decode(&cleaned).expect("hardcoded MODP hex must decode");
             let mut hasher = Sha256::new();
             hasher.update(&bytes);
             let hash: [u8; 32] = hasher.finalize().into();
@@ -323,10 +319,7 @@ C58EF1837D1683B2C6F34A26C1B2EFFA886B423861285C97FFFFFFFFFFFFFFFF";
             (MODP3072_HEX, 384),
         ];
         for (hex_str, expected_bytes) in cases {
-            let cleaned: String = hex_str
-                .chars()
-                .filter(|c| c.is_ascii_hexdigit())
-                .collect();
+            let cleaned: String = hex_str.chars().filter(|c| c.is_ascii_hexdigit()).collect();
             let decoded = hex::decode(&cleaned).expect("MODP hex must decode");
             assert_eq!(
                 decoded.len(),

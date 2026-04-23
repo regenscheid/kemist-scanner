@@ -86,8 +86,8 @@ pub async fn fetch_microsoft() -> Result<(Vec<u8>, BundleMetadata), String> {
     let col = |name: &str| headers.iter().position(|h| h == name);
     let msft_col = col("Microsoft Status")
         .ok_or_else(|| "v5 csv missing 'Microsoft Status' column".to_string())?;
-    let tls_col = col("TLS Capable")
-        .ok_or_else(|| "v5 csv missing 'TLS Capable' column".to_string())?;
+    let tls_col =
+        col("TLS Capable").ok_or_else(|| "v5 csv missing 'TLS Capable' column".to_string())?;
     let fp_col = col("SHA-256 Fingerprint")
         .ok_or_else(|| "v5 csv missing 'SHA-256 Fingerprint' column".to_string())?;
     for row in reader.records() {
@@ -112,8 +112,7 @@ pub async fn fetch_microsoft() -> Result<(Vec<u8>, BundleMetadata), String> {
     debug!(count = wanted.len(), "microsoft V5 filter → wanted count");
 
     // Decade pulls → PEM map.
-    let mut pems: std::collections::HashMap<String, String> =
-        std::collections::HashMap::new();
+    let mut pems: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     for decade in [1990, 2000, 2010, 2020] {
         let url = format!(
             "https://ccadb.my.salesforce-sites.com/ccadb/AllCertificatePEMsCSVFormat?NotBeforeDecade={decade}"
@@ -186,8 +185,7 @@ pub async fn fetch_microsoft() -> Result<(Vec<u8>, BundleMetadata), String> {
         bytes,
         BundleMetadata {
             source: "ccadb V5 × AllCertificatePEMs by decade".to_string(),
-            fetched_at: chrono::Utc::now()
-                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            fetched_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
             sha256: String::new(), // caller fills in after write
             entry_count: matched,
             upstream_version: None,
@@ -210,21 +208,27 @@ pub async fn fetch_us_fpki_common() -> Result<(Vec<u8>, BundleMetadata), String>
 
     // Convert p7c (DER-encoded PKCS#7) to PEM certs. Concatenate:
     // root first, then intermediates.
-    let p7 = openssl::pkcs7::Pkcs7::from_der(&p7c_bytes)
-        .map_err(|e| format!("p7c parse: {e}"))?;
-    let root_cert = openssl::x509::X509::from_der(&root_der)
-        .map_err(|e| format!("root cert parse: {e}"))?;
+    let p7 = openssl::pkcs7::Pkcs7::from_der(&p7c_bytes).map_err(|e| format!("p7c parse: {e}"))?;
+    let root_cert =
+        openssl::x509::X509::from_der(&root_der).map_err(|e| format!("root cert parse: {e}"))?;
 
     let mut out = String::new();
     out.push_str("# FPKI Common Policy bundle: FCPCA G2 + SIA-discovered intermediates.\n");
-    out.push_str(&format!("# SIA URL (read from root cert, not hardcoded): {sia_url}\n"));
+    out.push_str(&format!(
+        "# SIA URL (read from root cert, not hardcoded): {sia_url}\n"
+    ));
     out.push_str(&format!(
         "# Fetched: {}\n\n",
         chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
     ));
-    out.push_str(&String::from_utf8(
-        root_cert.to_pem().map_err(|e| format!("root to_pem: {e}"))?,
-    ).map_err(|e| format!("root pem utf8: {e}"))?);
+    out.push_str(
+        &String::from_utf8(
+            root_cert
+                .to_pem()
+                .map_err(|e| format!("root to_pem: {e}"))?,
+        )
+        .map_err(|e| format!("root pem utf8: {e}"))?,
+    );
     let mut intermediate_count = 0usize;
     if let Some(signed) = p7.signed() {
         if let Some(stack) = signed.certificates() {
@@ -233,8 +237,7 @@ pub async fn fetch_us_fpki_common() -> Result<(Vec<u8>, BundleMetadata), String>
                     .to_pem()
                     .map_err(|e| format!("intermediate to_pem: {e}"))?;
                 out.push_str(
-                    &String::from_utf8(pem)
-                        .map_err(|e| format!("intermediate pem utf8: {e}"))?,
+                    &String::from_utf8(pem).map_err(|e| format!("intermediate pem utf8: {e}"))?,
                 );
                 intermediate_count += 1;
             }
@@ -246,8 +249,7 @@ pub async fn fetch_us_fpki_common() -> Result<(Vec<u8>, BundleMetadata), String>
         out.into_bytes(),
         BundleMetadata {
             source: format!("https://http.fpki.gov/fcpca/fcpcag2.crt + SIA:{sia_url}"),
-            fetched_at: chrono::Utc::now()
-                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            fetched_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
             sha256: String::new(),
             entry_count: total,
             upstream_version: None,
@@ -259,8 +261,8 @@ pub async fn fetch_us_fpki_common() -> Result<(Vec<u8>, BundleMetadata), String>
 /// (RFC 5280 §4.2.2.2) and return the CA-Repository URI. We parse
 /// via the openssl crate — avoids lifting another DER walker in.
 fn extract_fpki_sia_url(cert_der: &[u8]) -> Result<String, String> {
-    let cert = openssl::x509::X509::from_der(cert_der)
-        .map_err(|e| format!("fpki root parse: {e}"))?;
+    let cert =
+        openssl::x509::X509::from_der(cert_der).map_err(|e| format!("fpki root parse: {e}"))?;
     // openssl-rs 0.10 doesn't expose SIA via a typed accessor;
     // fall back to the text-form dump and grep. Ugly but stable —
     // the text format is consumer-facing and hasn't changed.
@@ -305,8 +307,7 @@ pub async fn fetch_us_dod() -> Result<(Vec<u8>, BundleMetadata), String> {
     let zip_bytes = fetch_bytes(&client, URL).await?;
 
     let reader = std::io::Cursor::new(&zip_bytes);
-    let mut archive =
-        zip::ZipArchive::new(reader).map_err(|e| format!("dod zip parse: {e}"))?;
+    let mut archive = zip::ZipArchive::new(reader).map_err(|e| format!("dod zip parse: {e}"))?;
 
     // Find the combined PEM PKCS#7 (filename ends with
     // `.pem.p7b` and lacks a per-root suffix).
@@ -329,9 +330,8 @@ pub async fn fetch_us_dod() -> Result<(Vec<u8>, BundleMetadata), String> {
             }
         }
         // The combined PEM PKCS#7 has no per-root suffix.
-        let is_combined = name.ends_with(".pem.p7b")
-            && !name.contains("Root_CA_")
-            && !name.contains("Root_ECA");
+        let is_combined =
+            name.ends_with(".pem.p7b") && !name.contains("Root_CA_") && !name.contains("Root_ECA");
         if is_combined {
             let mut buf = Vec::new();
             entry
@@ -341,9 +341,8 @@ pub async fn fetch_us_dod() -> Result<(Vec<u8>, BundleMetadata), String> {
             break;
         }
     }
-    let (p7b_name, p7b_bytes) = combined_p7b.ok_or_else(|| {
-        "dod zip: no combined `.pem.p7b` entry found".to_string()
-    })?;
+    let (p7b_name, p7b_bytes) =
+        combined_p7b.ok_or_else(|| "dod zip: no combined `.pem.p7b` entry found".to_string())?;
 
     // Parse PEM-PKCS7 via openssl. The stored format is PEM; load
     // via from_pem.
@@ -365,13 +364,8 @@ pub async fn fetch_us_dod() -> Result<(Vec<u8>, BundleMetadata), String> {
     if let Some(signed) = p7.signed() {
         if let Some(stack) = signed.certificates() {
             for cert in stack {
-                let pem = cert
-                    .to_pem()
-                    .map_err(|e| format!("dod cert to_pem: {e}"))?;
-                out.push_str(
-                    &String::from_utf8(pem)
-                        .map_err(|e| format!("dod pem utf8: {e}"))?,
-                );
+                let pem = cert.to_pem().map_err(|e| format!("dod cert to_pem: {e}"))?;
+                out.push_str(&String::from_utf8(pem).map_err(|e| format!("dod pem utf8: {e}"))?);
                 cert_count += 1;
             }
         }
@@ -381,8 +375,7 @@ pub async fn fetch_us_dod() -> Result<(Vec<u8>, BundleMetadata), String> {
         out.into_bytes(),
         BundleMetadata {
             source: URL.to_string(),
-            fetched_at: chrono::Utc::now()
-                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            fetched_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
             sha256: String::new(),
             entry_count: cert_count,
             upstream_version: version_tag,
@@ -414,8 +407,7 @@ pub async fn fetch_hsts_preload() -> Result<(Vec<u8>, BundleMetadata), String> {
         decoded,
         BundleMetadata {
             source: URL.to_string(),
-            fetched_at: chrono::Utc::now()
-                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            fetched_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
             sha256: String::new(),
             entry_count,
             upstream_version: None,
@@ -461,8 +453,7 @@ async fn fetch_text(client: &reqwest::Client, url: &str) -> Result<String, Strin
 /// Minimal base64 decoder — used only for the Chromium gitiles
 /// response. Tolerates whitespace + optional padding.
 fn base64_decode(input: &str) -> Result<Vec<u8>, String> {
-    const TABLE: &[u8] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const TABLE: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut lookup = [255u8; 256];
     for (i, &c) in TABLE.iter().enumerate() {
         lookup[c as usize] = i as u8;

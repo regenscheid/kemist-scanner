@@ -19,7 +19,6 @@
 //! 1.2 ServerHello probe in `scanner/hello.rs`, or `not_applicable`
 //! on TLS 1.3 where they don't apply.
 
-
 use rustls::client::danger::ServerCertVerifier;
 use rustls::client::WebPkiServerVerifier;
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
@@ -126,10 +125,8 @@ pub struct ValidationResult {
     /// Cached-bundle manifest metadata per store. Populated only
     /// for stores whose bundle came from the manifest-backed cache;
     /// compile-time + runtime-override loads have no entry here.
-    pub trust_store_bundle_metadata: std::collections::BTreeMap<
-        String,
-        crate::scanner::bundle_cache::BundleMetadata,
-    >,
+    pub trust_store_bundle_metadata:
+        std::collections::BTreeMap<String, crate::scanner::bundle_cache::BundleMetadata>,
 }
 
 // `characterize_connection` + `StateCollector` moved to
@@ -141,7 +138,6 @@ pub use crate::scanner::backends::rustls::characterize::characterize_connection;
 
 #[allow(dead_code)]
 const _MOVED_TO_BACKENDS_RUSTLS_CHARACTERIZE: () = ();
-
 
 /// Offline validation pipeline. Runs after the handshake with the raw
 /// DER bytes + already-parsed `CertificateInfo`s. Produces three
@@ -201,10 +197,9 @@ pub fn evaluate_validation(
     let manifest = crate::scanner::bundle_cache::Manifest::load();
 
     for (name, store) in &registry.stores {
-        result.trust_store_sources.insert(
-            name.clone(),
-            store.source.to_breadcrumb(),
-        );
+        result
+            .trust_store_sources
+            .insert(name.clone(), store.source.to_breadcrumb());
         // Attach manifest metadata only for cache-refreshed stores
         // — compile-time and runtime-override loads have no
         // upstream provenance data we can accurately surface.
@@ -277,19 +272,17 @@ fn validate_one_store(
     let Some(verifier) = &store.verifier else {
         return (None, Some("trust_store_empty".to_string()));
     };
-    let first_try =
-        verifier.verify_server_cert(end_entity, intermediates, sni_srv, &[], now);
+    let first_try = verifier.verify_server_cert(end_entity, intermediates, sni_srv, &[], now);
     let _ = name;
     match &first_try {
         Ok(_) => (Some(true), None),
         Err(rustls::Error::InvalidCertificate(CertificateError::NotValidForName))
-        | Err(rustls::Error::InvalidCertificate(
-            CertificateError::NotValidForNameContext { .. },
-        )) => {
+        | Err(rustls::Error::InvalidCertificate(CertificateError::NotValidForNameContext {
+            ..
+        })) => {
             // Retry with a SAN-derived name to isolate chain validity
             // from the name-matching concern.
-            let (valid, err) =
-                retry_with_san_name(verifier, end_entity, intermediates, san, now);
+            let (valid, err) = retry_with_san_name(verifier, end_entity, intermediates, san, now);
             (Some(valid), err)
         }
         Err(e) => (Some(false), Some(classify_cert_error(e))),
@@ -354,4 +347,3 @@ fn classify_cert_error(e: &rustls::Error) -> String {
 // [`crate::scanner::trust_stores::build_default_registry`] — that
 // registry owns the webpki-roots verifier plus the four additional
 // bundles.
-

@@ -101,21 +101,18 @@ pub async fn probe_cipher_suites(
 
         let outcome = match registry.route_cipher(iana_code) {
             Some(backend) => {
-                let constraint = crate::scanner::backends::HandshakeConstraint::single_cipher(
-                    iana_code,
-                );
+                let constraint =
+                    crate::scanner::backends::HandshakeConstraint::single_cipher(iana_code);
                 match backend.handshake(constraint, &ctx).await {
                     Ok(r) => r.outcome,
-                    Err(u) => HandshakeOutcome::Error(format!(
-                        "unsatisfiable_constraint:{}",
-                        u.reason
-                    )),
+                    Err(u) => {
+                        HandshakeOutcome::Error(format!("unsatisfiable_constraint:{}", u.reason))
+                    }
                 }
             }
-            None => HandshakeOutcome::Error(format!(
-                "no_backend_routes_cipher:0x{:04X}",
-                iana_code
-            )),
+            None => {
+                HandshakeOutcome::Error(format!("no_backend_routes_cipher:0x{:04X}", iana_code))
+            }
         };
 
         results.push(CipherProbeResult {

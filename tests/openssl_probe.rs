@@ -31,7 +31,10 @@ use std::time::Duration;
 use kemist::model::protocol::TlsVersion;
 use kemist::scanner::backends::HandshakeOutcome;
 use kemist::scanner::openssl::{
-    ciphers::probe_legacy_suites, fallback_scsv, kx_groups::probe_kx_groups, protocol_versions,
+    ciphers::probe_legacy_suites,
+    fallback_scsv,
+    kx_groups::probe_kx_groups,
+    protocol_versions,
     renegotiation::{self, RenegotiationVerdict},
 };
 

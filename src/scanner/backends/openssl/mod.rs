@@ -34,8 +34,8 @@ pub mod tls13_extensions;
 
 use std::sync::OnceLock;
 
-use async_trait::async_trait;
 use ::openssl::provider::Provider;
+use async_trait::async_trait;
 
 use crate::model::errors::ScannerError;
 use crate::model::protocol::{ProtocolSupport, TlsVersion};
@@ -121,8 +121,7 @@ pub struct OpensslObservations {
     /// ROBOT / Bleichenbacher differential probe. Gated on
     /// `TLS_RSA_*` suites observed at `Supported` by the cipher
     /// probe; otherwise lands as `method: not_probed`.
-    pub bleichenbacher_oracle_probe:
-        Option<crate::model::scan_result::BleichenbacherOracleProbe>,
+    pub bleichenbacher_oracle_probe: Option<crate::model::scan_result::BleichenbacherOracleProbe>,
     /// Per-probe non-fatal errors collected during the scan. Populated so
     /// every "not probed" outcome carries a reason string rather than going
     /// silent.
@@ -219,8 +218,7 @@ pub async fn run_all_probes(cfg: &ScanConfig) -> Result<OpensslObservations, Sca
         .as_ref()
         .map(|cp| {
             cp.results.iter().any(|r| {
-                r.name.starts_with("TLS_RSA_")
-                    && matches!(r.outcome, HandshakeOutcome::Supported)
+                r.name.starts_with("TLS_RSA_") && matches!(r.outcome, HandshakeOutcome::Supported)
             })
         })
         .unwrap_or(false);
@@ -408,9 +406,7 @@ impl TlsBackend for OpensslBackend {
         }
 
         match (&c.cipher_suites, &c.groups, c.version_range) {
-            (Some(suites), None, Some((v_min, v_max)))
-                if suites.len() == 1 && v_min == v_max =>
-            {
+            (Some(suites), None, Some((v_min, v_max))) if suites.len() == 1 && v_min == v_max => {
                 let run = crate::scanner::openssl::ciphers::probe_single_by_code(
                     ctx.target,
                     &ctx.hostname,
@@ -425,9 +421,7 @@ impl TlsBackend for OpensslBackend {
                 result.ske_signature_name = run.ske_sig;
                 Ok(result)
             }
-            (None, Some(groups), Some((v_min, v_max)))
-                if groups.len() == 1 && v_min == v_max =>
-            {
+            (None, Some(groups), Some((v_min, v_max))) if groups.len() == 1 && v_min == v_max => {
                 let outcome = crate::scanner::openssl::kx_groups::probe_single_group_by_code(
                     ctx.target,
                     &ctx.hostname,
@@ -448,7 +442,9 @@ impl TlsBackend for OpensslBackend {
                     ctx.handshake_timeout,
                 )
                 .await;
-                Ok(HandshakeResult::outcome_only(protocol_support_to_outcome(ps)))
+                Ok(HandshakeResult::outcome_only(protocol_support_to_outcome(
+                    ps,
+                )))
             }
             _ => Err(UnsatisfiableConstraint::new(
                 "openssl_backend_constraint_shape_not_implemented_yet",
@@ -504,9 +500,11 @@ fn iana_sigalgs_to_openssl_string(codepoints: &[u16]) -> Option<&'static str> {
     let set: HashSet<u16> = codepoints.iter().copied().collect();
 
     // sha256_plus_only — RSA-PSS, RSA-PKCS1, ECDSA, all with SHA-256+.
-    let sha256_plus: HashSet<u16> = [0x0401, 0x0501, 0x0601, 0x0403, 0x0503, 0x0603, 0x0804, 0x0805, 0x0806]
-        .into_iter()
-        .collect();
+    let sha256_plus: HashSet<u16> = [
+        0x0401, 0x0501, 0x0601, 0x0403, 0x0503, 0x0603, 0x0804, 0x0805, 0x0806,
+    ]
+    .into_iter()
+    .collect();
     let ecdsa_only: HashSet<u16> = [0x0403, 0x0503, 0x0603].into_iter().collect();
     let rsa_pss_only: HashSet<u16> = [0x0804, 0x0805, 0x0806].into_iter().collect();
     let rsa_pkcs1_only: HashSet<u16> = [0x0401, 0x0501, 0x0601].into_iter().collect();
@@ -557,10 +555,7 @@ fn sigalg_constrained_to_handshake_result(
             // Setup failures marked as NotProbed + Error. Tag the Error
             // message with a `setup:` prefix so the composer can
             // distinguish from wire-level failures.
-            HandshakeOutcome::Error(format!(
-                "setup:{}",
-                r.reason.clone().unwrap_or_default()
-            ))
+            HandshakeOutcome::Error(format!("setup:{}", r.reason.clone().unwrap_or_default()))
         }
     };
     let mut hr = HandshakeResult::outcome_only(outcome);

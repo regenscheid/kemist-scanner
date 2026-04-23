@@ -317,10 +317,9 @@ pub async fn probe_kx_groups(
             let o = match registry.route_group(t.iana_code) {
                 Some(backend) => match backend.handshake(c, &ctx).await {
                     Ok(r) => r.outcome,
-                    Err(u) => HandshakeOutcome::Error(format!(
-                        "unsatisfiable_constraint:{}",
-                        u.reason
-                    )),
+                    Err(u) => {
+                        HandshakeOutcome::Error(format!("unsatisfiable_constraint:{}", u.reason))
+                    }
                 },
                 None => HandshakeOutcome::Error(format!(
                     "no_backend_routes_group:0x{:04X}",
@@ -344,10 +343,9 @@ pub async fn probe_kx_groups(
             match registry.route_group(t.iana_code) {
                 Some(backend) => match backend.handshake(c, &ctx).await {
                     Ok(r) => r.outcome,
-                    Err(u) => HandshakeOutcome::Error(format!(
-                        "unsatisfiable_constraint:{}",
-                        u.reason
-                    )),
+                    Err(u) => {
+                        HandshakeOutcome::Error(format!("unsatisfiable_constraint:{}", u.reason))
+                    }
                 },
                 None => HandshakeOutcome::Error(format!(
                     "no_backend_routes_group:0x{:04X}",
@@ -572,8 +570,7 @@ mod tests {
                 assert!(
                     !t.tls12_applicable,
                     "{} (0x{:04X}) is TLS 1.3 only — must not be TLS 1.2 applicable",
-                    t.display_name,
-                    t.iana_code
+                    t.display_name, t.iana_code
                 );
             }
         }

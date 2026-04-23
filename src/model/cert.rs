@@ -32,8 +32,7 @@ pub struct CertificateInfo {
     /// Structured decomposition of the signature algorithm — hash
     /// family + algorithm family + RSA-PSS parameters. Flows into
     /// `certificates.*.signature_algorithm_structured`.
-    pub signature_algorithm_structured:
-        crate::model::scan_result::SignatureAlgorithmStructured,
+    pub signature_algorithm_structured: crate::model::scan_result::SignatureAlgorithmStructured,
     /// PQC family classification — `"ml_dsa"` (FIPS 204), `"slh_dsa"`
     /// (FIPS 205), `"composite"` (IETF LAMPS drafts), or `None` for
     /// classical signatures.
@@ -98,11 +97,10 @@ impl CertificateInfo {
             .parameters
             .as_ref()
             .map(|p| p.as_bytes());
-        let signature_algorithm_structured =
-            crate::scanner::cert::signature_algorithm_structured(
-                &cert.signature_algorithm.algorithm,
-                sig_params_der,
-            );
+        let signature_algorithm_structured = crate::scanner::cert::signature_algorithm_structured(
+            &cert.signature_algorithm.algorithm,
+            sig_params_der,
+        );
         let is_self_signed = cert.subject() == cert.issuer();
 
         let now = Utc::now();
@@ -355,7 +353,11 @@ fn extract_ecc_info(pki: &SubjectPublicKeyInfo) -> (Option<String>, Option<Strin
                 133 => 521,
                 _ => (len as u16) * 4,
             };
-            (Some("unknown_ec_curve".to_string()), curve_oid, Some(approx))
+            (
+                Some("unknown_ec_curve".to_string()),
+                curve_oid,
+                Some(approx),
+            )
         }
     }
 }
@@ -403,14 +405,8 @@ mod ecc_tests {
             ec_curve_from_oid("1.2.840.10045.3.1.7"),
             Some(("secp256r1", 256))
         );
-        assert_eq!(
-            ec_curve_from_oid("1.3.132.0.34"),
-            Some(("secp384r1", 384))
-        );
-        assert_eq!(
-            ec_curve_from_oid("1.3.132.0.35"),
-            Some(("secp521r1", 521))
-        );
+        assert_eq!(ec_curve_from_oid("1.3.132.0.34"), Some(("secp384r1", 384)));
+        assert_eq!(ec_curve_from_oid("1.3.132.0.35"), Some(("secp521r1", 521)));
     }
 
     #[test]
@@ -442,14 +438,8 @@ mod ecc_tests {
 
     #[test]
     fn oid_to_curve_covers_short_secp_variants() {
-        assert_eq!(
-            ec_curve_from_oid("1.3.132.0.33"),
-            Some(("secp224r1", 224))
-        );
-        assert_eq!(
-            ec_curve_from_oid("1.3.132.0.30"),
-            Some(("secp192r1", 192))
-        );
+        assert_eq!(ec_curve_from_oid("1.3.132.0.33"), Some(("secp224r1", 224)));
+        assert_eq!(ec_curve_from_oid("1.3.132.0.30"), Some(("secp192r1", 192)));
     }
 
     #[test]

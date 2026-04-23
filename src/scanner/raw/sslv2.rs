@@ -311,7 +311,10 @@ mod tests {
             obs.ciphers_observed[1].name,
             "SSL_CK_DES_192_EDE3_CBC_WITH_MD5"
         );
-        assert_eq!(obs.ciphers_observed[2].name, "SSL_CK_RC4_128_EXPORT40_WITH_MD5");
+        assert_eq!(
+            obs.ciphers_observed[2].name,
+            "SSL_CK_RC4_128_EXPORT40_WITH_MD5"
+        );
     }
 
     #[test]
@@ -330,7 +333,10 @@ mod tests {
     #[test]
     fn cipher_name_maps_known_codes() {
         assert_eq!(sslv2_cipher_name(0x010080), "SSL_CK_RC4_128_WITH_MD5");
-        assert_eq!(sslv2_cipher_name(0x0700C0), "SSL_CK_DES_192_EDE3_CBC_WITH_MD5");
+        assert_eq!(
+            sslv2_cipher_name(0x0700C0),
+            "SSL_CK_DES_192_EDE3_CBC_WITH_MD5"
+        );
         assert_eq!(sslv2_cipher_name(0x999999), "SSL_CK_UNKNOWN");
     }
 }

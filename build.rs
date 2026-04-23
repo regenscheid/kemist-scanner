@@ -49,8 +49,8 @@ fn build_preload_phf() {
         )
     });
 
-    let parsed: PreloadFile = json5::from_str(&raw)
-        .unwrap_or_else(|e| panic!("failed to parse {}: {e}", src.display()));
+    let parsed: PreloadFile =
+        json5::from_str(&raw).unwrap_or_else(|e| panic!("failed to parse {}: {e}", src.display()));
 
     // `entries` carries force-https, pinning-only, and other variants.
     // Only `mode == "force-https"` is an HSTS preload entry. Other
@@ -82,8 +82,7 @@ fn build_preload_phf() {
          pub static HSTS_PRELOAD: phf::Map<&'static str, bool> = {};\n",
         map.build()
     );
-    fs::write(&dest, body)
-        .unwrap_or_else(|e| panic!("failed to write {}: {e}", dest.display()));
+    fs::write(&dest, body).unwrap_or_else(|e| panic!("failed to write {}: {e}", dest.display()));
 
     println!("cargo:warning=generated HSTS preload PHF with {included} entries");
 }

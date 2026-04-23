@@ -108,7 +108,10 @@ pub async fn probe(
     let Some(downgrade_target_tls) = ssl_to_tls_version(downgrade_target) else {
         return FallbackScsvResult {
             enforced: None,
-            reason: format!("downgrade_target_version_out_of_scope:{:?}", downgrade_target),
+            reason: format!(
+                "downgrade_target_version_out_of_scope:{:?}",
+                downgrade_target
+            ),
         };
     };
 
@@ -140,7 +143,6 @@ pub async fn probe(
 
     classify_probe_outcome(probe_outcome, server_max, downgrade_target)
 }
-
 
 /// Raw outcome of the inner downgrade probe, pre-interpretation.
 /// `pub(crate)` so `backends::openssl` can surface these through

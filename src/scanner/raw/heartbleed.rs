@@ -87,13 +87,7 @@ pub async fn probe(target: SocketAddr, hostname: &str, connect_timeout: Duration
 
     // Send the malformed heartbeat. Per testssl.sh: content type 0x18,
     // TLS 1.2, record length 3, type=request, claimed payload 0x4000.
-    let heartbeat_req: [u8; 8] = [
-        CT_HEARTBEAT,
-        0x03, 0x03,
-        0x00, 0x03,
-        0x01,
-        0x40, 0x00,
-    ];
+    let heartbeat_req: [u8; 8] = [CT_HEARTBEAT, 0x03, 0x03, 0x00, 0x03, 0x01, 0x40, 0x00];
     if stream.write_all(&heartbeat_req).await.is_err() {
         debug!("heartbleed: heartbeat send failed");
         return None;
@@ -180,8 +174,7 @@ fn server_advertised_heartbeat(buf: &[u8]) -> Option<bool> {
         // No extensions block at all — legacy server; heartbeat not negotiated.
         return Some(false);
     }
-    let ext_block_len =
-        u16::from_be_bytes([body[cursor], body[cursor + 1]]) as usize;
+    let ext_block_len = u16::from_be_bytes([body[cursor], body[cursor + 1]]) as usize;
     cursor += 2;
     let ext_end = cursor.saturating_add(ext_block_len).min(body.len());
     let mut i = cursor;

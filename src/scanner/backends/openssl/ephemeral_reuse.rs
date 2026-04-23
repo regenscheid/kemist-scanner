@@ -42,8 +42,8 @@ use sha2::{Digest, Sha256};
 use tracing::{debug, info};
 
 use crate::model::scan_result::{EphemeralKeyReuseObservation, ObservationBool};
-use crate::scanner::openssl::ciphers::{LegacyCipherProbeOutput, LegacyCipherResult};
 use crate::scanner::backends::HandshakeOutcome;
+use crate::scanner::openssl::ciphers::{LegacyCipherProbeOutput, LegacyCipherResult};
 
 extern "C" {
     /// `DH_get0_key(*const DH, *mut *const BIGNUM pub_key, *mut *const BIGNUM priv_key)`.
@@ -198,22 +198,28 @@ fn probe_family_blocking(
         Err(e) => return ObservationBool::error(&format!("ctx_build:{e}")),
     };
 
-    let first =
-        match single_handshake(&ctx, family, target, hostname, connect_timeout, handshake_timeout)
-        {
-            Ok(h) => h,
-            Err(reason) => {
-                return ObservationBool::not_probed(&format!("first_handshake:{reason}"))
-            }
-        };
-    let second =
-        match single_handshake(&ctx, family, target, hostname, connect_timeout, handshake_timeout)
-        {
-            Ok(h) => h,
-            Err(reason) => {
-                return ObservationBool::not_probed(&format!("second_handshake:{reason}"))
-            }
-        };
+    let first = match single_handshake(
+        &ctx,
+        family,
+        target,
+        hostname,
+        connect_timeout,
+        handshake_timeout,
+    ) {
+        Ok(h) => h,
+        Err(reason) => return ObservationBool::not_probed(&format!("first_handshake:{reason}")),
+    };
+    let second = match single_handshake(
+        &ctx,
+        family,
+        target,
+        hostname,
+        connect_timeout,
+        handshake_timeout,
+    ) {
+        Ok(h) => h,
+        Err(reason) => return ObservationBool::not_probed(&format!("second_handshake:{reason}")),
+    };
 
     ObservationBool::probe(first == second)
 }
@@ -316,7 +322,7 @@ fn dh_pub_value_bytes(dh: &openssl::dh::DhRef<openssl::pkey::Public>) -> Result<
         if bits <= 0 {
             return Err("dh_pub_key_zero_bits".to_string());
         }
-        let nbytes = ((bits as usize) + 7) / 8;
+        let nbytes = (bits as usize).div_ceil(8);
         let mut buf = vec![0u8; nbytes];
         let written = BN_bn2bin(pub_key, buf.as_mut_ptr());
         if written < 0 {
@@ -350,7 +356,10 @@ mod tests {
     fn pick_supported_prefers_canonical_aes128_gcm() {
         let out = LegacyCipherProbeOutput {
             results: vec![
-                cipher_result("TLS_DHE_RSA_WITH_AES_128_CBC_SHA", HandshakeOutcome::Supported),
+                cipher_result(
+                    "TLS_DHE_RSA_WITH_AES_128_CBC_SHA",
+                    HandshakeOutcome::Supported,
+                ),
                 cipher_result(
                     "TLS_DHE_RSA_WITH_AES_128_GCM_SHA256",
                     HandshakeOutcome::Supported,
@@ -358,7 +367,10 @@ mod tests {
             ],
         };
         let picked = pick_supported_suite(Some(&out), Family::Dhe);
-        assert_eq!(picked.as_deref(), Some("TLS_DHE_RSA_WITH_AES_128_GCM_SHA256"));
+        assert_eq!(
+            picked.as_deref(),
+            Some("TLS_DHE_RSA_WITH_AES_128_GCM_SHA256")
+        );
     }
 
     #[test]
@@ -370,7 +382,10 @@ mod tests {
             )],
         };
         let picked = pick_supported_suite(Some(&out), Family::Ecdhe);
-        assert_eq!(picked.as_deref(), Some("TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA"));
+        assert_eq!(
+            picked.as_deref(),
+            Some("TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA")
+        );
     }
 
     #[test]
@@ -410,7 +425,10 @@ mod tests {
 
     #[test]
     fn family_tokens_are_canonical() {
-        assert_eq!(Family::Dhe.openssl_suite_token(), "DHE-RSA-AES128-GCM-SHA256");
+        assert_eq!(
+            Family::Dhe.openssl_suite_token(),
+            "DHE-RSA-AES128-GCM-SHA256"
+        );
         assert_eq!(
             Family::Ecdhe.openssl_suite_token(),
             "ECDHE-RSA-AES128-GCM-SHA256"

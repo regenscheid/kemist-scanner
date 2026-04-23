@@ -47,8 +47,7 @@ pub const MANIFEST_VERSION: u32 = 1;
 /// Callers treat a `None` here as "no runtime cache available;
 /// use compile-time bundles only."
 pub fn cache_root() -> Option<PathBuf> {
-    directories::ProjectDirs::from("", "", "kemist")
-        .map(|d| d.cache_dir().to_path_buf())
+    directories::ProjectDirs::from("", "", "kemist").map(|d| d.cache_dir().to_path_buf())
 }
 
 /// Path to the trust-store cache sub-directory. Does not create
@@ -147,13 +146,13 @@ impl Manifest {
     /// Persist the manifest to disk, creating the cache root if
     /// needed. Returns the path written on success.
     pub fn save(&self) -> Result<PathBuf, String> {
-        let path = manifest_path()
-            .ok_or_else(|| "cache root unavailable (no HOME?)".to_string())?;
+        let path =
+            manifest_path().ok_or_else(|| "cache root unavailable (no HOME?)".to_string())?;
         if let Some(parent) = path.parent() {
             ensure_dir(parent)?;
         }
-        let pretty = serde_json::to_vec_pretty(self)
-            .map_err(|e| format!("manifest serialize: {e}"))?;
+        let pretty =
+            serde_json::to_vec_pretty(self).map_err(|e| format!("manifest serialize: {e}"))?;
         std::fs::write(&path, pretty)
             .map_err(|e| format!("manifest write {}: {e}", path.display()))?;
         Ok(path)
@@ -163,8 +162,7 @@ impl Manifest {
 /// Create a directory (and ancestors) if missing. Errors surface
 /// as human-readable strings for top-level CLI reporting.
 pub fn ensure_dir(path: &Path) -> Result<(), String> {
-    std::fs::create_dir_all(path)
-        .map_err(|e| format!("create {}: {e}", path.display()))
+    std::fs::create_dir_all(path).map_err(|e| format!("create {}: {e}", path.display()))
 }
 
 /// Compute SHA-256 hex of a byte slice — used for manifest
@@ -225,7 +223,9 @@ mod tests {
     fn sha256_hex_is_lowercase_64_chars() {
         let h = sha256_hex(b"");
         assert_eq!(h.len(), 64);
-        assert!(h.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+        assert!(h
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
         // Known empty-string SHA-256.
         assert_eq!(
             h,

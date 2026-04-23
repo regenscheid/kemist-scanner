@@ -103,9 +103,7 @@ fn classify_server_reply(buf: &[u8], offered: u16) -> HandshakeOutcome {
 
     // Skip the record header. The handshake message layout is
     // type(1) + length(3) + body.
-    let record_end = 5usize.saturating_add(
-        u16::from_be_bytes([buf[3], buf[4]]) as usize,
-    );
+    let record_end = 5usize.saturating_add(u16::from_be_bytes([buf[3], buf[4]]) as usize);
     let record = match buf.get(5..record_end.min(buf.len())) {
         Some(r) if !r.is_empty() => r,
         _ => return HandshakeOutcome::Error("empty_handshake_record".to_string()),
@@ -131,8 +129,7 @@ fn classify_server_reply(buf: &[u8], offered: u16) -> HandshakeOutcome {
         return HandshakeOutcome::Error("truncated_server_hello_session_id".to_string());
     }
     cur += sid_len;
-    let negotiated =
-        u16::from_be_bytes([body[cur], body[cur + 1]]);
+    let negotiated = u16::from_be_bytes([body[cur], body[cur + 1]]);
     debug!(
         offered = format!("{:#06X}", offered),
         negotiated = format!("{:#06X}", negotiated),

@@ -104,24 +104,22 @@ pub async fn update_hsts_preload() -> UpdateReport {
         }
     }
     let outcome = match bundle_fetcher::fetch_hsts_preload().await {
-        Ok((bytes, mut meta)) => {
-            match std::fs::write(&path, &bytes) {
-                Ok(()) => {
-                    meta.sha256 = sha256_hex(&bytes);
-                    manifest
-                        .bundles
-                        .insert("hsts_preload".to_string(), meta.clone());
-                    let _ = manifest.save();
-                    Ok(UpdateOk {
-                        path,
-                        entry_count: meta.entry_count,
-                        bytes: bytes.len(),
-                        sha256_prefix: meta.sha256[..16].to_string(),
-                    })
-                }
-                Err(e) => Err(format!("write cache file: {e}")),
+        Ok((bytes, mut meta)) => match std::fs::write(&path, &bytes) {
+            Ok(()) => {
+                meta.sha256 = sha256_hex(&bytes);
+                manifest
+                    .bundles
+                    .insert("hsts_preload".to_string(), meta.clone());
+                let _ = manifest.save();
+                Ok(UpdateOk {
+                    path,
+                    entry_count: meta.entry_count,
+                    bytes: bytes.len(),
+                    sha256_prefix: meta.sha256[..16].to_string(),
+                })
             }
-        }
+            Err(e) => Err(format!("write cache file: {e}")),
+        },
         Err(e) => Err(e),
     };
     UpdateReport {
@@ -173,10 +171,8 @@ fn apple_refresh_note() -> String {
     }
 }
 
-type BundleFetchFn = fn() -> futures::future::BoxFuture<
-    'static,
-    Result<(Vec<u8>, BundleMetadata), String>,
->;
+type BundleFetchFn =
+    fn() -> futures::future::BoxFuture<'static, Result<(Vec<u8>, BundleMetadata), String>>;
 
 fn per_bundle_fetchers() -> Vec<(&'static str, BundleFetchFn)> {
     vec![
