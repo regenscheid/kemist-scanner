@@ -107,10 +107,19 @@ mechanics.
   PKCS#1 v1.5 `ClientKeyExchange` variant
   (`correctly_formatted_pkcs1`, `invalid_0x00_02_prefix`,
   `invalid_version_0x00_02_byte_swap`, `null_separator_missing`,
-  `wrong_tls_version_in_pms`), sends `CKE + CCS +
-  Finished-placeholder`, and records the server's response
-  (alert category / TCP RST / timeout / graceful close) with
-  elapsed ms. No `vulnerable` boolean — the five-entry
+  `wrong_tls_version_in_pms`), then sends
+  `CKE + ChangeCipherSpec + Finished` where the Finished is
+  crypto-correct under the variant's *intended* PMS:
+  TLS 1.2 PRF (P_SHA256) master-secret derivation, key expansion
+  (client write MAC + AES-128 keys), SHA-256 transcript hash over
+  ClientHello+ServerHello+Certificate+ServerHelloDone+CKE,
+  HMAC-SHA1 MAC-then-encrypt with explicit per-record IV and
+  TLS CBC padding. For variant 1 (correct padding) our keys
+  match the server's and Finished verifies; for variants 2–5
+  the server's key derivation diverges from ours, so the
+  Finished MAC check surfaces the alert differential. Records
+  per-variant `alert_category` / `tcp_reset` / `elapsed_ms` /
+  `other_outcome`. No `vulnerable` boolean — the five-entry
   comparison table is the observation.
 
 ### Added — CLI

@@ -336,16 +336,25 @@ Notes:
   fresh TLS 1.2 handshake up through `ServerHelloDone`, extracts
   the leaf's RSA public key, `RSA_public_encrypt(Padding::NONE)`s
   the malformed plaintext into a full modulus-sized ciphertext,
-  and sends `CKE + ChangeCipherSpec + Finished-placeholder`. It
-  then records the server's response: `alert_category`
+  and sends `CKE + ChangeCipherSpec + Finished`. The Finished is
+  crypto-correct under the variant's *intended* PMS — TLS 1.2
+  PRF (P_SHA256) master-secret derivation, key expansion to
+  client-write MAC (20) + AES-128 key (16), SHA-256 transcript
+  hash over ClientHello+ServerHello+Certificate+ServerHelloDone+CKE,
+  HMAC-SHA1 MAC-then-encrypt with AES-128-CBC, explicit 16-byte
+  per-record IV, and TLS CBC padding. For variant 1 our keys
+  match the server's and Finished verifies (server responds with
+  ChangeCipherSpec + its own encrypted Finished, classified as
+  `other_outcome: unexpected_plaintext:handshake_record` by this
+  probe since we can't decrypt the server-write side). For
+  variants 2–5 the server's key derivation diverges (random PMS
+  substituted on invalid padding, or `client_version` mismatch
+  handling varies) so our MAC fails at the server and we observe
+  the alert. Scanner records `alert_category`
   (`tls_alert_bad_record_mac`, `tls_alert_decrypt_error`,
-  `tls_alert_handshake_failure`, etc.), `tcp_reset: true`
-  (`ConnectionReset`), `other_outcome: timeout | graceful_close |
-  unexpected_plaintext:* | setup_error:*`, and `elapsed_ms`. The
-  Finished placeholder is intentionally garbage — the scanner
-  never derives correct session keys; the differential signal
-  comes from whether the server rejects on CKE (earlier) or on
-  MAC failure of the placeholder (later), and with what alert.
+  `tls_alert_handshake_failure`, etc.), `tcp_reset`,
+  `other_outcome` (`timeout` | `graceful_close` |
+  `unexpected_plaintext:*` | `setup_error:*`), and `elapsed_ms`.
   Gated on `TLS_RSA_*` suites observed at `Supported` by the
   earlier cipher probe; `method: not_probed, reason:
   no_rsa_kex_suite_supported` otherwise. The scanner does **not**

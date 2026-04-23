@@ -44,9 +44,12 @@
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
-use openssl::pkey::Public;
+use openssl::hash::{Hasher, MessageDigest};
+use openssl::pkey::{PKey, Public};
 use openssl::rand::rand_bytes;
 use openssl::rsa::{Padding, Rsa};
+use openssl::sign::Signer;
+use openssl::symm::{Cipher, Crypter, Mode};
 use openssl::x509::X509;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -72,6 +75,7 @@ const HS_SERVER_HELLO: u8 = 0x02;
 const HS_CERTIFICATE: u8 = 0x0B;
 const HS_SERVER_HELLO_DONE: u8 = 0x0E;
 const HS_CLIENT_KEY_EXCHANGE: u8 = 0x10;
+const HS_FINISHED: u8 = 0x14;
 
 /// Five-entry variant table. Order is stable; downstream rule
 /// engines key on the `variant` string.
@@ -226,18 +230,22 @@ async fn drive_variant(
         Err(_) => return Outcome::SetupError("tcp_connect_timeout".to_string()),
     };
 
-    let (client_random, hello) = build_client_hello(hostname);
-    if let Err(e) = stream.write_all(&hello).await {
+    let (client_random, hello_record, client_hello_hs) = build_client_hello(hostname);
+    if let Err(e) = stream.write_all(&hello_record).await {
         return Outcome::SetupError(format!("clienthello_send:{e}"));
     }
 
-    // Read TLS records until we see ServerHelloDone (or hit an alert
-    // or EOF). Aggregate the Certificate message body for RSA pubkey
-    // extraction.
+    // Transcript accumulator for the Finished hash. ClientHello
+    // (handshake layer only) goes in first; server messages are
+    // appended inside scan_server_flight's Done branch; CKE goes in
+    // last before we compute the hash.
+    let mut transcript: Vec<u8> = Vec::new();
+    transcript.extend_from_slice(&client_hello_hs);
+
     let mut aggregated = Vec::new();
     let deadline = Instant::now() + handshake_timeout;
     let cert_msg: Option<Vec<u8>>;
-    let mut saw_server_hello = false;
+    let server_random: [u8; 32];
 
     loop {
         if Instant::now() >= deadline {
@@ -247,7 +255,7 @@ async fn drive_variant(
         let mut buf = [0u8; 4096];
         let n = match timeout(remaining, stream.read(&mut buf)).await {
             Ok(Ok(0)) => {
-                if !saw_server_hello {
+                if aggregated.is_empty() {
                     return Outcome::GracefulClose;
                 }
                 return Outcome::SetupError("eof_before_server_hello_done".to_string());
@@ -260,18 +268,20 @@ async fn drive_variant(
         };
         aggregated.extend_from_slice(&buf[..n]);
 
-        // Walk records accumulated so far. We don't remove consumed
-        // bytes — we re-scan from the start each pass until
-        // ServerHelloDone appears or an alert lands.
         match scan_server_flight(&aggregated) {
             ScanResult::Alert(cat) => return Outcome::Alert(cat),
             ScanResult::NeedMore => continue,
             ScanResult::Done {
                 cert_message,
-                server_hello_seen,
+                server_random: sr,
+                server_handshake_transcript,
             } => {
                 cert_msg = cert_message;
-                saw_server_hello = server_hello_seen;
+                match sr {
+                    Some(r) => server_random = r,
+                    None => return Outcome::SetupError("server_hello_random_unparsed".to_string()),
+                }
+                transcript.extend_from_slice(&server_handshake_transcript);
                 break;
             }
             ScanResult::UnexpectedContentType(ct) => {
@@ -280,7 +290,6 @@ async fn drive_variant(
         }
     }
 
-    let _ = saw_server_hello;
     let Some(cert_msg) = cert_msg else {
         return Outcome::SetupError("no_certificate_message".to_string());
     };
@@ -293,29 +302,46 @@ async fn drive_variant(
         Err(s) => return Outcome::SetupError(format!("rsa_from_leaf:{s}")),
     };
     let modulus_bytes = rsa.size() as usize;
+    if modulus_bytes < 64 {
+        // EME-PKCS1-v1_5 requires at least 11 padding bytes + 3
+        // framing bytes + PMS(48) = 62 bytes minimum. Anything
+        // smaller isn't a realistic server and we'd build invalid
+        // bytes below.
+        return Outcome::SetupError(format!("rsa_modulus_too_small:{modulus_bytes}"));
+    }
 
-    // Build the PKCS#1 v1.5 plaintext for this variant, encrypt
-    // (Padding::NONE so we control every byte), and wrap in CKE +
-    // CCS + Finished-placeholder records.
-    let plaintext = build_variant_plaintext(variant, modulus_bytes);
+    let payload = build_variant_payload(variant, modulus_bytes);
     let mut ciphertext = vec![0u8; modulus_bytes];
-    if let Err(e) = rsa.public_encrypt(&plaintext, &mut ciphertext, Padding::NONE) {
+    if let Err(e) = rsa.public_encrypt(&payload.full_plaintext, &mut ciphertext, Padding::NONE) {
         return Outcome::SetupError(format!("rsa_public_encrypt:{e}"));
     }
-    let _ = client_random; // client_random only matters if we were deriving keys; not needed here.
 
-    let cke_record = build_cke_record(&ciphertext);
+    let (cke_record, cke_hs) = build_cke_record(&ciphertext);
+    transcript.extend_from_slice(&cke_hs);
+
+    // Derive session keys from the variant's intended PMS.
+    // For variant 1 (correct), this matches the server's keys
+    // exactly — Finished verifies and the server proceeds. For
+    // variants 2–5 the server's decryption diverges from ours, so
+    // the Finished MAC fails on the server side and we observe the
+    // resulting alert.
+    let master_secret = derive_master_secret(&payload.pms, &client_random, &server_random);
+    let client_keys = derive_client_keys(&master_secret, &client_random, &server_random);
+    let finished_record = build_finished_record(
+        &master_secret,
+        &client_keys.mac_key,
+        &client_keys.enc_key,
+        &transcript,
+    );
+
     let ccs_record = build_ccs_record();
-    let finished_placeholder = build_finished_placeholder();
-
-    // Send all three records back-to-back.
     if let Err(e) = stream.write_all(&cke_record).await {
         return classify_post_cke_io_err(e);
     }
     if let Err(e) = stream.write_all(&ccs_record).await {
         return classify_post_cke_io_err(e);
     }
-    if let Err(e) = stream.write_all(&finished_placeholder).await {
+    if let Err(e) = stream.write_all(&finished_record).await {
         return classify_post_cke_io_err(e);
     }
 
@@ -419,7 +445,12 @@ enum ScanResult {
     Alert(String),
     Done {
         cert_message: Option<Vec<u8>>,
-        server_hello_seen: bool,
+        server_random: Option<[u8; 32]>,
+        /// Concatenated handshake-layer bytes (with 4-byte hs
+        /// headers, without record-layer framing) for every server
+        /// handshake message seen up to and including
+        /// ServerHelloDone. Fed into the Finished transcript hash.
+        server_handshake_transcript: Vec<u8>,
     },
     UnexpectedContentType(u8),
 }
@@ -430,7 +461,8 @@ enum ScanResult {
 fn scan_server_flight(bytes: &[u8]) -> ScanResult {
     let mut i = 0usize;
     let mut cert_message: Option<Vec<u8>> = None;
-    let mut server_hello_seen = false;
+    let mut server_random: Option<[u8; 32]> = None;
+    let mut transcript: Vec<u8> = Vec::new();
 
     while i + 5 <= bytes.len() {
         let ct = bytes[i];
@@ -460,9 +492,19 @@ fn scan_server_flight(bytes: &[u8]) -> ScanResult {
                     if hs_end > rec_body.len() {
                         break;
                     }
+                    // Every handshake message goes into the
+                    // transcript, in wire order.
+                    transcript.extend_from_slice(&rec_body[j..hs_end]);
                     match hs_type {
                         HS_SERVER_HELLO => {
-                            server_hello_seen = true;
+                            // ServerHello body = version(2) +
+                            // random(32) + …
+                            if hs_end - (j + 4) >= 34 {
+                                let r_start = j + 4 + 2;
+                                let mut sr = [0u8; 32];
+                                sr.copy_from_slice(&rec_body[r_start..r_start + 32]);
+                                server_random = Some(sr);
+                            }
                         }
                         HS_CERTIFICATE => {
                             cert_message = Some(rec_body[j..hs_end].to_vec());
@@ -470,7 +512,8 @@ fn scan_server_flight(bytes: &[u8]) -> ScanResult {
                         HS_SERVER_HELLO_DONE => {
                             return ScanResult::Done {
                                 cert_message,
-                                server_hello_seen,
+                                server_random,
+                                server_handshake_transcript: transcript,
                             };
                         }
                         _ => {}
@@ -529,10 +572,21 @@ fn rsa_from_leaf_der(leaf_der: &[u8]) -> Result<Rsa<Public>, String> {
     Ok(rsa)
 }
 
+/// Intended 48-byte PMS the scanner *would* derive keys from on
+/// behalf of this variant, plus the full modulus-sized RSA-encryption
+/// input. A well-configured server that decrypts the ciphertext to
+/// our plaintext extracts exactly `pms` from the last 48 bytes.
+struct VariantPayload {
+    full_plaintext: Vec<u8>,
+    pms: [u8; 48],
+}
+
 /// Build a `modulus_bytes`-long plaintext to feed to
 /// `RSA_public_encrypt(Padding::NONE)`. `modulus_bytes` is typically
-/// 256 (RSA-2048) or 384 (RSA-3072).
-fn build_variant_plaintext(variant: VariantKind, modulus_bytes: usize) -> Vec<u8> {
+/// 256 (RSA-2048) or 384 (RSA-3072). Also returns the 48-byte PMS
+/// so the caller can derive session keys for the correct-variant
+/// case (where the server's key derivation matches ours).
+fn build_variant_payload(variant: VariantKind, modulus_bytes: usize) -> VariantPayload {
     // The 48-byte PreMasterSecret (RFC 5246 §7.4.7.1): 2-byte
     // client_version + 46-byte random.
     const PMS_LEN: usize = 48;
@@ -594,13 +648,29 @@ fn build_variant_plaintext(variant: VariantKind, modulus_bytes: usize) -> Vec<u8
     }
 
     debug_assert_eq!(out.len(), modulus_bytes);
-    out
+
+    // The PMS a correct server will extract is the last 48 bytes of
+    // our plaintext — that's what RFC 5246 §7.4.7.1 unwraps after
+    // padding validation. For variants 2–4 (broken padding) the
+    // server will substitute a random PMS internally per the
+    // Bleichenbacher countermeasure, so our derived keys won't match
+    // the server's. For variant 5 (wrong PMS version) compliance
+    // varies by implementation. Those are exactly the divergences
+    // the per-variant observation surfaces.
+    let mut extracted_pms = [0u8; PMS_LEN];
+    extracted_pms.copy_from_slice(&out[modulus_bytes - PMS_LEN..]);
+
+    VariantPayload {
+        full_plaintext: out,
+        pms: extracted_pms,
+    }
 }
 
-/// Build the ClientKeyExchange record wrapping the RSA ciphertext.
-/// Layout: record(5) + handshake(4) + encrypted_pms_len(2) + ciphertext.
-fn build_cke_record(ciphertext: &[u8]) -> Vec<u8> {
-    let hs_body_len = 2 + ciphertext.len(); // uint16 length prefix + ciphertext
+/// Build the ClientKeyExchange record wrapping the RSA ciphertext,
+/// returning both the full record (for the wire) and the handshake
+/// portion (type + len + body) for the transcript.
+fn build_cke_record(ciphertext: &[u8]) -> (Vec<u8>, Vec<u8>) {
+    let hs_body_len = 2 + ciphertext.len();
     let mut hs = Vec::with_capacity(4 + hs_body_len);
     hs.push(HS_CLIENT_KEY_EXCHANGE);
     hs.push(((hs_body_len >> 16) & 0xff) as u8);
@@ -614,7 +684,7 @@ fn build_cke_record(ciphertext: &[u8]) -> Vec<u8> {
     rec.extend_from_slice(&[0x03, 0x03]); // TLS 1.2
     rec.extend_from_slice(&(hs.len() as u16).to_be_bytes());
     rec.extend_from_slice(&hs);
-    rec
+    (rec, hs)
 }
 
 /// ChangeCipherSpec record: content_type + version + length(1) + value(0x01).
@@ -622,31 +692,202 @@ fn build_ccs_record() -> Vec<u8> {
     vec![CT_CHANGE_CIPHER_SPEC, 0x03, 0x03, 0x00, 0x01, 0x01]
 }
 
-/// Finished-placeholder record. Under CBC, a real Finished record
-/// would be: 16-byte IV + AES-CBC(MAC(plaintext)). We emit 16 + 48
-/// bytes of zeros inside a handshake record — right content type,
-/// plausible length for TLS_RSA_WITH_AES_128_CBC_SHA, guaranteed
-/// MAC failure regardless of the PMS the server derived. The
-/// differential signal across variants comes from whether the
-/// server rejected earlier (at CKE) or at the MAC check here.
-fn build_finished_placeholder() -> Vec<u8> {
-    // TLS_RSA_WITH_AES_128_CBC_SHA: explicit IV(16) + ciphertext
-    // aligned to block(16). Finished handshake plaintext is 16
-    // bytes (type + length + 12-byte verify_data) + 20-byte SHA-1
-    // MAC + PKCS#7 padding to block boundary = 48 ciphertext bytes.
-    let body_len = 16 + 48;
-    let mut rec = Vec::with_capacity(5 + body_len);
+// ───────────────────────── TLS 1.2 cryptographic helpers ─────────────────────────
+
+/// HMAC with a given digest. Thin wrapper over `openssl::sign::Signer`.
+fn hmac(md: MessageDigest, key: &[u8], data: &[u8]) -> Vec<u8> {
+    let pkey = PKey::hmac(key).expect("PKey::hmac");
+    let mut signer = Signer::new(md, &pkey).expect("Signer::new");
+    signer.update(data).expect("Signer::update");
+    signer.sign_to_vec().expect("Signer::sign_to_vec")
+}
+
+fn hmac_sha256(key: &[u8], data: &[u8]) -> Vec<u8> {
+    hmac(MessageDigest::sha256(), key, data)
+}
+
+fn hmac_sha1(key: &[u8], data: &[u8]) -> Vec<u8> {
+    hmac(MessageDigest::sha1(), key, data)
+}
+
+/// TLS 1.2 PRF per RFC 5246 §5 — P_SHA256 of `secret` over
+/// `label || seed`, expanded to `out_len` bytes.
+///
+/// `PRF(secret, label, seed) = P_<hash>(secret, label || seed)`
+/// where `P_hash` is the HMAC-based iteration:
+/// ```text
+/// A(0) = label || seed
+/// A(i) = HMAC(secret, A(i-1))
+/// P_hash = HMAC(secret, A(1) || label || seed) ||
+///          HMAC(secret, A(2) || label || seed) || …
+/// ```
+fn tls12_prf(secret: &[u8], label: &[u8], seed: &[u8], out_len: usize) -> Vec<u8> {
+    let mut label_seed = Vec::with_capacity(label.len() + seed.len());
+    label_seed.extend_from_slice(label);
+    label_seed.extend_from_slice(seed);
+
+    let mut a = hmac_sha256(secret, &label_seed); // A(1)
+    let mut out = Vec::with_capacity(out_len + 32);
+    while out.len() < out_len {
+        let mut block_input = Vec::with_capacity(a.len() + label_seed.len());
+        block_input.extend_from_slice(&a);
+        block_input.extend_from_slice(&label_seed);
+        out.extend_from_slice(&hmac_sha256(secret, &block_input));
+        a = hmac_sha256(secret, &a); // A(n+1)
+    }
+    out.truncate(out_len);
+    out
+}
+
+/// Master secret derivation (RFC 5246 §8.1).
+fn derive_master_secret(pms: &[u8], client_random: &[u8; 32], server_random: &[u8; 32]) -> Vec<u8> {
+    let mut seed = Vec::with_capacity(64);
+    seed.extend_from_slice(client_random);
+    seed.extend_from_slice(server_random);
+    tls12_prf(pms, b"master secret", &seed, 48)
+}
+
+/// Client-side write keys for TLS_RSA_WITH_AES_128_CBC_SHA. Key
+/// block layout (RFC 5246 §6.3):
+/// `client_write_MAC_key(20) || server_write_MAC_key(20) ||
+///  client_write_key(16) || server_write_key(16)`.
+/// Only the client side is needed for the Finished record.
+struct ClientWriteKeys {
+    mac_key: [u8; 20],
+    enc_key: [u8; 16],
+}
+
+fn derive_client_keys(
+    master_secret: &[u8],
+    client_random: &[u8; 32],
+    server_random: &[u8; 32],
+) -> ClientWriteKeys {
+    // Note the flipped order vs master-secret derivation: key
+    // expansion seed is server_random || client_random.
+    let mut seed = Vec::with_capacity(64);
+    seed.extend_from_slice(server_random);
+    seed.extend_from_slice(client_random);
+    let block = tls12_prf(master_secret, b"key expansion", &seed, 72);
+    let mut mac_key = [0u8; 20];
+    mac_key.copy_from_slice(&block[0..20]);
+    // Skip server MAC key (20..40). Then:
+    let mut enc_key = [0u8; 16];
+    enc_key.copy_from_slice(&block[40..56]);
+    ClientWriteKeys { mac_key, enc_key }
+}
+
+/// Compute `verify_data` for the client's Finished message
+/// (RFC 5246 §7.4.9): `PRF(ms, "client finished", SHA-256(handshake))[0..12]`.
+fn client_finished_verify_data(master_secret: &[u8], transcript_hash: &[u8]) -> Vec<u8> {
+    tls12_prf(master_secret, b"client finished", transcript_hash, 12)
+}
+
+/// SHA-256 of a byte slice.
+fn sha256(data: &[u8]) -> Vec<u8> {
+    let mut h = Hasher::new(MessageDigest::sha256()).expect("Hasher::new");
+    h.update(data).expect("hasher.update");
+    h.finish().expect("hasher.finish").to_vec()
+}
+
+/// Build the plaintext handshake bytes for the client's Finished
+/// message: `type(0x14) || length(3) = 12 || verify_data(12)`.
+fn build_finished_plaintext(verify_data: &[u8]) -> Vec<u8> {
+    debug_assert_eq!(verify_data.len(), 12);
+    let mut v = Vec::with_capacity(16);
+    v.push(HS_FINISHED);
+    v.extend_from_slice(&[0x00, 0x00, 0x0C]);
+    v.extend_from_slice(verify_data);
+    v
+}
+
+/// HMAC-SHA1 MAC over the per-record input per RFC 5246 §6.2.3.1:
+/// `seq_num(8) || content_type(1) || version(2) || length(2) || plaintext`.
+fn tls12_mac_sha1(
+    mac_key: &[u8],
+    seq_num: u64,
+    content_type: u8,
+    version: (u8, u8),
+    plaintext: &[u8],
+) -> Vec<u8> {
+    let mut input = Vec::with_capacity(13 + plaintext.len());
+    input.extend_from_slice(&seq_num.to_be_bytes());
+    input.push(content_type);
+    input.push(version.0);
+    input.push(version.1);
+    input.extend_from_slice(&(plaintext.len() as u16).to_be_bytes());
+    input.extend_from_slice(plaintext);
+    hmac_sha1(mac_key, &input)
+}
+
+/// AES-128-CBC encrypt with explicit per-record IV (RFC 5246
+/// §6.2.3.2) and TLS CBC padding. Input is the
+/// `plaintext || MAC` bytes; output is `IV(16) || ciphertext`, ready
+/// to land as the fragment of a TLSCiphertext record.
+fn aes128_cbc_encrypt_with_tls_padding(enc_key: &[u8], plaintext_with_mac: &[u8]) -> Vec<u8> {
+    const BLOCK: usize = 16;
+    let pad_len = BLOCK - (plaintext_with_mac.len() % BLOCK); // 1..=16
+    let pad_byte = (pad_len - 1) as u8;
+    let mut padded = Vec::with_capacity(plaintext_with_mac.len() + pad_len);
+    padded.extend_from_slice(plaintext_with_mac);
+    padded.extend(std::iter::repeat(pad_byte).take(pad_len));
+
+    let mut iv = [0u8; 16];
+    let _ = rand_bytes(&mut iv);
+
+    let mut crypter = Crypter::new(Cipher::aes_128_cbc(), Mode::Encrypt, enc_key, Some(&iv))
+        .expect("Crypter::new aes_128_cbc");
+    crypter.pad(false);
+    let mut ciphertext = vec![0u8; padded.len() + BLOCK];
+    let n1 = crypter
+        .update(&padded, &mut ciphertext)
+        .expect("Crypter::update");
+    let n2 = crypter
+        .finalize(&mut ciphertext[n1..])
+        .expect("Crypter::finalize");
+    ciphertext.truncate(n1 + n2);
+
+    let mut out = Vec::with_capacity(BLOCK + ciphertext.len());
+    out.extend_from_slice(&iv);
+    out.extend_from_slice(&ciphertext);
+    out
+}
+
+/// Build a fully-framed, crypto-correct Finished record for
+/// TLS_RSA_WITH_AES_128_CBC_SHA. `transcript` is the concatenation
+/// of all handshake messages sent/received so far (ClientHello,
+/// ServerHello, Certificate, ServerHelloDone, ClientKeyExchange),
+/// with 4-byte handshake headers but no record-layer framing.
+fn build_finished_record(
+    master_secret: &[u8],
+    mac_key: &[u8],
+    enc_key: &[u8],
+    transcript: &[u8],
+) -> Vec<u8> {
+    let th = sha256(transcript);
+    let verify_data = client_finished_verify_data(master_secret, &th);
+    let plaintext = build_finished_plaintext(&verify_data);
+    let mac = tls12_mac_sha1(mac_key, 0, CT_HANDSHAKE, (0x03, 0x03), &plaintext);
+    let mut plaintext_with_mac = Vec::with_capacity(plaintext.len() + mac.len());
+    plaintext_with_mac.extend_from_slice(&plaintext);
+    plaintext_with_mac.extend_from_slice(&mac);
+    let fragment = aes128_cbc_encrypt_with_tls_padding(enc_key, &plaintext_with_mac);
+
+    let mut rec = Vec::with_capacity(5 + fragment.len());
     rec.push(CT_HANDSHAKE);
     rec.extend_from_slice(&[0x03, 0x03]);
-    rec.extend_from_slice(&(body_len as u16).to_be_bytes());
-    rec.resize(rec.len() + body_len, 0x00);
+    rec.extend_from_slice(&(fragment.len() as u16).to_be_bytes());
+    rec.extend_from_slice(&fragment);
     rec
 }
 
 /// Minimal TLS 1.2 ClientHello pinning cipher suite
 /// `TLS_RSA_WITH_AES_128_CBC_SHA`. Compatibility extensions present
 /// so CDNs don't drop the connection as unparseable.
-fn build_client_hello(hostname: &str) -> ([u8; 32], Vec<u8>) {
+/// Build the minimal TLS 1.2 ClientHello record. Returns the 32-byte
+/// client_random, the wire-ready record, and the handshake-layer
+/// portion (after the 5-byte record header) so the caller can seed
+/// the Finished transcript without re-parsing the record.
+fn build_client_hello(hostname: &str) -> ([u8; 32], Vec<u8>, Vec<u8>) {
     let mut client_random = [0u8; 32];
     let _ = rand_bytes(&mut client_random);
 
@@ -717,7 +958,7 @@ fn build_client_hello(hostname: &str) -> ([u8; 32], Vec<u8>) {
     record.extend_from_slice(&(handshake.len() as u16).to_be_bytes());
     record.extend_from_slice(&handshake);
 
-    (client_random, record)
+    (client_random, record, handshake)
 }
 
 #[cfg(test)]
@@ -744,53 +985,57 @@ mod tests {
 
     #[test]
     fn correct_pkcs1_variant_has_canonical_prefix_and_separator() {
-        let p = build_variant_plaintext(VariantKind::CorrectlyFormattedPkcs1, MOD_BYTES);
+        let payload = build_variant_payload(VariantKind::CorrectlyFormattedPkcs1, MOD_BYTES);
+        let p = &payload.full_plaintext;
         assert_eq!(p.len(), MOD_BYTES);
         assert_eq!(p[0], 0x00);
         assert_eq!(p[1], 0x02);
-        // Padding bytes (indices 2..MOD_BYTES-49) must all be non-zero.
         for (idx, &b) in p[2..MOD_BYTES - 49].iter().enumerate() {
             assert_ne!(b, 0x00, "padding byte {idx} was zero");
         }
-        // Separator at MOD_BYTES-49 = 0x00.
         assert_eq!(p[MOD_BYTES - 49], 0x00);
-        // PMS client_version = 0x0303 (TLS 1.2).
         assert_eq!(p[MOD_BYTES - 48], 0x03);
         assert_eq!(p[MOD_BYTES - 47], 0x03);
+        // PMS accessor matches last 48 bytes.
+        assert_eq!(&payload.pms[..], &p[MOD_BYTES - 48..]);
+        // PMS version prefix = 0x0303.
+        assert_eq!(payload.pms[0], 0x03);
+        assert_eq!(payload.pms[1], 0x03);
     }
 
     #[test]
     fn invalid_0x00_02_prefix_variant_has_wrong_second_byte() {
-        let p = build_variant_plaintext(VariantKind::Invalid0002Prefix, MOD_BYTES);
+        let p = build_variant_payload(VariantKind::Invalid0002Prefix, MOD_BYTES).full_plaintext;
         assert_eq!(p[0], 0x00);
         assert_eq!(p[1], 0x17);
     }
 
     #[test]
     fn byte_swap_variant_has_transposed_prefix() {
-        let p = build_variant_plaintext(VariantKind::InvalidVersion0002ByteSwap, MOD_BYTES);
+        let p =
+            build_variant_payload(VariantKind::InvalidVersion0002ByteSwap, MOD_BYTES).full_plaintext;
         assert_eq!(p[0], 0x02);
         assert_eq!(p[1], 0x00);
     }
 
     #[test]
     fn null_separator_missing_variant_replaces_separator() {
-        let p = build_variant_plaintext(VariantKind::NullSeparatorMissing, MOD_BYTES);
-        // Separator slot was overwritten — no zero byte between
-        // padding and PMS.
+        let p = build_variant_payload(VariantKind::NullSeparatorMissing, MOD_BYTES).full_plaintext;
         assert_eq!(p[MOD_BYTES - 49], 0xFF);
     }
 
     #[test]
     fn wrong_tls_version_in_pms_variant_flips_pms_version() {
-        let p = build_variant_plaintext(VariantKind::WrongTlsVersionInPms, MOD_BYTES);
-        // Envelope still legal.
+        let payload = build_variant_payload(VariantKind::WrongTlsVersionInPms, MOD_BYTES);
+        let p = &payload.full_plaintext;
         assert_eq!(p[0], 0x00);
         assert_eq!(p[1], 0x02);
         assert_eq!(p[MOD_BYTES - 49], 0x00);
-        // PMS client_version = 0x0302.
         assert_eq!(p[MOD_BYTES - 48], 0x03);
         assert_eq!(p[MOD_BYTES - 47], 0x02);
+        // PMS surfaces the malformed version.
+        assert_eq!(payload.pms[0], 0x03);
+        assert_eq!(payload.pms[1], 0x02);
     }
 
     #[test]
@@ -816,7 +1061,7 @@ mod tests {
     #[test]
     fn cke_record_shape_wraps_ciphertext() {
         let ct = vec![0xAA; 256];
-        let rec = build_cke_record(&ct);
+        let (rec, hs) = build_cke_record(&ct);
         assert_eq!(rec[0], CT_HANDSHAKE);
         assert_eq!(&rec[1..3], &[0x03, 0x03]);
         let rec_len = u16::from_be_bytes([rec[3], rec[4]]) as usize;
@@ -824,11 +1069,13 @@ mod tests {
         assert_eq!(rec[5], HS_CLIENT_KEY_EXCHANGE);
         let ct_len = u16::from_be_bytes([rec[9], rec[10]]) as usize;
         assert_eq!(ct_len, 256);
+        // hs slice matches record body after the 5-byte record header.
+        assert_eq!(hs, rec[5..]);
     }
 
     #[test]
     fn client_hello_framing_valid() {
-        let (_, ch) = build_client_hello("example.com");
+        let (_, ch, _hs) = build_client_hello("example.com");
         assert_eq!(ch[0], CT_HANDSHAKE);
         let rec_len = u16::from_be_bytes([ch[3], ch[4]]) as usize;
         assert_eq!(rec_len, ch.len() - 5);
@@ -865,6 +1112,101 @@ mod tests {
 
         let parsed = extract_leaf_der(&msg).expect("leaf extracted");
         assert_eq!(parsed, leaf);
+    }
+
+    #[test]
+    fn tls12_prf_is_deterministic_and_respects_length() {
+        let s = b"secret";
+        let out_a = tls12_prf(s, b"label", b"seed", 64);
+        let out_b = tls12_prf(s, b"label", b"seed", 64);
+        assert_eq!(out_a, out_b);
+        assert_eq!(out_a.len(), 64);
+    }
+
+    #[test]
+    fn tls12_prf_differs_on_different_inputs() {
+        let a = tls12_prf(b"k", b"client finished", b"h1", 12);
+        let b = tls12_prf(b"k", b"client finished", b"h2", 12);
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn derive_master_secret_outputs_48_bytes() {
+        let pms = [0x42u8; 48];
+        let cr = [0x11u8; 32];
+        let sr = [0x22u8; 32];
+        let ms = derive_master_secret(&pms, &cr, &sr);
+        assert_eq!(ms.len(), 48);
+    }
+
+    #[test]
+    fn derive_client_keys_extracts_correct_slices() {
+        let ms = vec![0x33u8; 48];
+        let cr = [0x44u8; 32];
+        let sr = [0x55u8; 32];
+        let keys = derive_client_keys(&ms, &cr, &sr);
+        // Re-derive the full key block and compare.
+        let mut seed = Vec::new();
+        seed.extend_from_slice(&sr);
+        seed.extend_from_slice(&cr);
+        let block = tls12_prf(&ms, b"key expansion", &seed, 72);
+        assert_eq!(&keys.mac_key[..], &block[0..20]);
+        assert_eq!(&keys.enc_key[..], &block[40..56]);
+    }
+
+    #[test]
+    fn build_finished_plaintext_structure() {
+        let vd = [0x77u8; 12];
+        let p = build_finished_plaintext(&vd);
+        assert_eq!(p.len(), 16);
+        assert_eq!(p[0], HS_FINISHED);
+        assert_eq!(&p[1..4], &[0x00, 0x00, 0x0C]);
+        assert_eq!(&p[4..], &vd[..]);
+    }
+
+    #[test]
+    fn aes128_cbc_pads_to_block_boundary_and_ivs_differ() {
+        let key = [0x00u8; 16];
+        // 10-byte plaintext-with-mac → 6 bytes of pad value 5.
+        let out_a = aes128_cbc_encrypt_with_tls_padding(&key, &[0xAAu8; 10]);
+        let out_b = aes128_cbc_encrypt_with_tls_padding(&key, &[0xAAu8; 10]);
+        // 16-byte IV + 16-byte ciphertext block.
+        assert_eq!(out_a.len(), 32);
+        assert_eq!(out_b.len(), 32);
+        // IVs are fresh per record (RFC 5246 §6.2.3.2).
+        assert_ne!(&out_a[..16], &out_b[..16]);
+    }
+
+    #[test]
+    fn aes128_cbc_full_block_of_pad() {
+        // When input is already aligned, TLS mandates one full
+        // block of padding (pad_len=16, pad_byte=15).
+        let key = [0x00u8; 16];
+        let out = aes128_cbc_encrypt_with_tls_padding(&key, &[0xCCu8; 16]);
+        // 16-byte IV + 32-byte ciphertext (plaintext 16 + pad 16).
+        assert_eq!(out.len(), 48);
+    }
+
+    #[test]
+    fn tls12_mac_sha1_is_20_bytes() {
+        let mac = tls12_mac_sha1(&[0u8; 20], 0, CT_HANDSHAKE, (0x03, 0x03), b"hello");
+        assert_eq!(mac.len(), 20);
+    }
+
+    #[test]
+    fn build_finished_record_is_well_framed() {
+        let ms = vec![0u8; 48];
+        let mac_key = vec![0u8; 20];
+        let enc_key = vec![0u8; 16];
+        let transcript = b"synthetic transcript";
+        let rec = build_finished_record(&ms, &mac_key, &enc_key, transcript);
+        assert_eq!(rec[0], CT_HANDSHAKE);
+        assert_eq!(&rec[1..3], &[0x03, 0x03]);
+        let len = u16::from_be_bytes([rec[3], rec[4]]) as usize;
+        assert_eq!(len, rec.len() - 5);
+        // Finished plaintext = 16 bytes, MAC = 20 bytes, subtotal 36.
+        // Padded to 48 bytes. Fragment = 16 (IV) + 48 = 64.
+        assert_eq!(len, 64);
     }
 
     #[test]
