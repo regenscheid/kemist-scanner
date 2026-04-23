@@ -949,10 +949,36 @@ pub struct Validation {
     /// were produced.
     #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub per_store_validation_errors: std::collections::BTreeMap<String, String>,
-    /// Provenance breadcrumb per store — `"compiled_in"` or
-    /// `"runtime_override:<path>"`. One entry per store attempted.
+    /// Provenance breadcrumb per store — `"compiled_in"`,
+    /// `"cache_refreshed:<path>"` (loaded from the platform
+    /// cache written by `kemist --update-trust-stores`), or
+    /// `"runtime_override:<path>"` (loaded from a user-supplied
+    /// `--trust-store name:path`). One entry per store attempted.
     #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub trust_store_sources: std::collections::BTreeMap<String, String>,
+    /// Per-store bundle metadata — upstream source URL,
+    /// fetched_at timestamp, entry count, upstream version. Populated
+    /// only for stores whose bundle came from the cache (refreshed
+    /// via `--update-trust-stores`); compile-time and runtime-
+    /// override bundles have no accompanying manifest metadata.
+    /// Lets rule engines pin observations to a specific snapshot.
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub trust_store_bundle_metadata:
+        std::collections::BTreeMap<String, TrustStoreBundleMetadata>,
+}
+
+/// Output-side projection of [`crate::scanner::bundle_cache::BundleMetadata`].
+/// Same shape, but lives in the scan-result tree so schema changes
+/// land in one place.
+#[derive(Serialize, Debug, Clone)]
+pub struct TrustStoreBundleMetadata {
+    pub source: String,
+    pub fetched_at: String,
+    /// SHA-256 of the bundle file on disk (lower-case hex).
+    pub sha256: String,
+    pub entry_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub upstream_version: Option<String>,
 }
 
 #[derive(Serialize, Debug, Clone)]

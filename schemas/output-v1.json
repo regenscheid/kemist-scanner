@@ -386,10 +386,26 @@
         },
         "trust_store_sources": {
           "type": "object",
-          "description": "Provenance per trust store: `compiled_in` or `runtime_override:<path>`. One entry per store attempted.",
+          "description": "Provenance per trust store: `compiled_in` (build-time bundle), `cache_refreshed:<path>` (loaded from the cache written by `kemist --update-trust-stores`), or `runtime_override:<path>` (loaded from a user-supplied `--trust-store NAME:PATH`). One entry per store attempted.",
           "additionalProperties": {
             "type": "string",
-            "pattern": "^(compiled_in|runtime_override:.+)$"
+            "pattern": "^(compiled_in|cache_refreshed:.+|runtime_override:.+)$"
+          }
+        },
+        "trust_store_bundle_metadata": {
+          "type": "object",
+          "description": "Per-store manifest metadata for cache-refreshed bundles. Populated only for stores whose breadcrumb is `cache_refreshed:...`; compile-time and runtime-override loads omit their entry. Lets rule engines pin observations to a specific snapshot.",
+          "additionalProperties": {
+            "type": "object",
+            "required": ["source", "fetched_at", "sha256", "entry_count"],
+            "properties": {
+              "source": { "type": "string" },
+              "fetched_at": { "type": "string", "format": "date-time" },
+              "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+              "entry_count": { "type": "integer", "minimum": 0 },
+              "upstream_version": { "type": "string" }
+            },
+            "additionalProperties": false
           }
         }
       },

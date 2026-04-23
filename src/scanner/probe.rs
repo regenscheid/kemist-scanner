@@ -127,11 +127,16 @@ pub struct ValidationResult {
     /// names). Populated only for stores that produced an error.
     /// Same error-string taxonomy as `validation_error`.
     pub per_store_validation_errors: std::collections::BTreeMap<String, String>,
-    /// Provenance breadcrumb — `"compiled_in"` for the build-time
-    /// bundle or `"runtime_override:<path>"` when a runtime
-    /// override is in effect. One entry per store that was
-    /// attempted (compiled or extra).
+    /// Provenance breadcrumb — `"compiled_in"` / `"cache_refreshed:<path>"`
+    /// / `"runtime_override:<path>"`. One entry per store attempted.
     pub trust_store_sources: std::collections::BTreeMap<String, String>,
+    /// Cached-bundle manifest metadata per store. Populated only
+    /// for stores whose bundle came from the manifest-backed cache;
+    /// compile-time + runtime-override loads have no entry here.
+    pub trust_store_bundle_metadata: std::collections::BTreeMap<
+        String,
+        crate::scanner::bundle_cache::BundleMetadata,
+    >,
 }
 
 const DEFAULT_ALPN: &[&[u8]] = &[b"h2", b"http/1.1"];
@@ -305,11 +310,28 @@ fn evaluate_validation(
         return result;
     };
 
+    // Read the manifest once so per-store metadata attachment is
+    // O(n_stores) with zero I/O per lookup.
+    let manifest = crate::scanner::bundle_cache::Manifest::load();
+
     for (name, store) in &registry.stores {
         result.trust_store_sources.insert(
             name.clone(),
             store.source.to_breadcrumb(),
         );
+        // Attach manifest metadata only for cache-refreshed stores
+        // — compile-time and runtime-override loads have no
+        // upstream provenance data we can accurately surface.
+        if matches!(
+            store.source,
+            crate::scanner::trust_stores::TrustStoreSource::CacheRefreshed(_)
+        ) {
+            if let Some(meta) = manifest.bundles.get(name) {
+                result
+                    .trust_store_bundle_metadata
+                    .insert(name.clone(), meta.clone());
+            }
+        }
         let (valid, error) = validate_one_store(
             name,
             store,

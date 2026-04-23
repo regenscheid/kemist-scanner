@@ -28,12 +28,45 @@ anchors to validate against.
 - `--trust-store <name>:<path>` replaces a compiled-in bundle with
   the file at `<path>`. Accepted names: `webpki-roots`,
   `microsoft`, `apple`, `us-fpki-common`, `us-dod`. Output surfaces
-  `certificates.validation.trust_store_sources.<name>:
-  "runtime_override:<path>"`.
+  `validation.trust_store_sources.<name>: "runtime_override:<path>"`.
 - `--extra-trust-store <name>:<path>` adds a new named bundle (not
   a replacement). Name must be lowercase-ASCII + hyphens; must not
   collide with a compiled name. Surfaces under
-  `certificates.validation.chain_valid_to_custom_roots.<name>`.
+  `validation.chain_valid_to_custom_roots.<name>`.
+
+## Automated refresh (`--update-trust-stores`)
+
+Run `kemist --update-trust-stores` to fetch the latest bundles
+from upstream (Microsoft via CCADB, DoD via DISA, FPKI via fcpca)
+and write them to the platform cache directory:
+
+| Platform | Cache root |
+|---|---|
+| Linux | `$XDG_CACHE_HOME/kemist/` (default `~/.cache/kemist/`) |
+| macOS | `~/Library/Caches/kemist/` |
+| Windows | `%LOCALAPPDATA%\kemist\cache\` |
+
+Trust-store files land in `$cache/trust_stores/*.pem`; HSTS
+preload refresh via `kemist --update-hsts-preload` lands in
+`$cache/hsts_preload_list.json`. A sibling `$cache/manifest.json`
+records per-bundle provenance (source URL, fetched_at timestamp,
+SHA-256 hash, entry count, upstream version when available).
+
+The scanner reads cache-first at startup: cache file + manifest
+SHA-256 match → use cache. Falls back to the compile-time bundle
+when the cache is empty, unverifiable, or corrupt. Output
+`validation.trust_store_sources.<name>` surfaces `compiled_in` /
+`cache_refreshed:<path>` / `runtime_override:<path>` so consumers
+know which snapshot drove each observation.
+
+Apple is the one exception — no portable way to extract the
+macOS System Roots keychain from a non-Mac host. On macOS, refresh
+manually with `security find-certificate -a -p` (see the "Apple"
+section below); on other platforms, rely on the compile-time
+bundle or supply one via `--trust-store apple:<path>`.
+
+webpki-roots is refreshed via `cargo update` — it's a Rust crate,
+not an on-disk bundle.
 
 ## Refresh
 

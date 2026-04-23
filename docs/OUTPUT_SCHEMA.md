@@ -607,7 +607,8 @@ land in `chain_valid_to_custom_roots`.
 | `name_matches_sni` | Store-agnostic SAN/CN match per RFC 6125. |
 | `validation_error` | **Legacy.** Error from webpki-roots validation only, kept for backwards-compatible consumers. New integrations should consume `per_store_validation_errors`. |
 | `per_store_validation_errors.<name>` | Per-store error category string. Populated only for stores whose chain validation failed. Same taxonomy as `validation_error`. |
-| `trust_store_sources.<name>` | Provenance: `"compiled_in"` (default) or `"runtime_override:<path>"` when a `--trust-store <name>:<path>` override is in effect. |
+| `trust_store_sources.<name>` | Provenance: `"compiled_in"` / `"cache_refreshed:<path>"` (loaded from `kemist --update-trust-stores` output) / `"runtime_override:<path>"` (user-supplied via `--trust-store NAME:PATH`). |
+| `trust_store_bundle_metadata.<name>` | Per-bundle manifest: `source`, `fetched_at` (ISO 8601), `sha256`, `entry_count`, optional `upstream_version`. Populated only when the store was loaded from the refreshed cache — compile-time + runtime-override loads omit metadata. Lets rule engines pin observations to a specific snapshot. |
 
 Canonical per-store error strings:
 `"expired"`, `"not_valid_yet"`, `"untrusted_root"`, `"revoked"`,

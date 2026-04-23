@@ -199,10 +199,12 @@ static PRELOAD_OVERRIDE: std::sync::OnceLock<PreloadOverride> = std::sync::OnceL
 /// PHF — host → `include_subdomains`.
 #[derive(Debug, Clone)]
 pub struct PreloadOverride {
-    /// Absolute path the map was loaded from. Surfaces in the output
-    /// as `preload_list_source: "runtime_override:<path>"` so
-    /// consumers know which snapshot the observation was made against.
-    pub source_path: String,
+    /// Fully-formatted provenance breadcrumb — emitted verbatim as
+    /// `http.preload_list_source`. Callers supply one of:
+    /// `"runtime_override:<path>"` (user `--hsts-preload-list-path`)
+    /// or `"cache_refreshed:<path>"` (platform cache file from
+    /// `kemist --update-hsts-preload`).
+    pub source_breadcrumb: String,
     map: std::collections::HashMap<String, bool>,
 }
 
@@ -211,6 +213,52 @@ pub struct PreloadOverride {
 /// subsequent calls (OnceLock semantics).
 pub fn install_preload_override(override_: PreloadOverride) {
     let _ = PRELOAD_OVERRIDE.set(override_);
+}
+
+/// Install the cache-refreshed preload list when the cache file
+/// exists AND its SHA-256 matches the manifest. Called by main.rs
+/// at startup *after* checking for a user-supplied
+/// `--hsts-preload-list-path`, so operator intent always wins
+/// over cached data.
+///
+/// Source breadcrumb surfaces as
+/// `"cache_refreshed:<path>"` in `http.preload_list_source` to
+/// distinguish from `"compiled_in"` and `"runtime_override:<path>"`.
+pub fn install_preload_from_cache_if_fresh() {
+    if PRELOAD_OVERRIDE.get().is_some() {
+        // User supplied an explicit override; don't shadow it.
+        return;
+    }
+    let Some(path) = crate::scanner::bundle_cache::hsts_preload_path() else {
+        return;
+    };
+    let Some(bytes) = crate::scanner::bundle_cache::read_verified(&path, "hsts_preload")
+    else {
+        return;
+    };
+    // Parse in-place; we already own the verified bytes. Rebuild
+    // a minimal PreloadOverride with a cache-sourced path tag so
+    // the breadcrumb reads `cache_refreshed:<path>` rather than
+    // `runtime_override:<path>`.
+    let Ok(text) = String::from_utf8(bytes) else {
+        return;
+    };
+    let Ok(parsed) = json5::from_str::<PreloadOverrideFile>(&text) else {
+        return;
+    };
+    let mut map = std::collections::HashMap::new();
+    for entry in parsed.entries {
+        if entry.mode.as_deref() == Some("force-https") {
+            map.insert(entry.name.to_ascii_lowercase(), entry.include_subdomains);
+        }
+    }
+    if map.is_empty() {
+        return;
+    }
+    let _ = PRELOAD_OVERRIDE.set(PreloadOverride {
+        source_breadcrumb: format!("cache_refreshed:{}", path.display()),
+        map,
+    });
 }
 
 /// Load a runtime preload override from a file path. Expected format
@@ -240,7 +288,7 @@ pub fn load_preload_override_from_path(path: &str) -> Result<PreloadOverride, St
         ));
     }
     Ok(PreloadOverride {
-        source_path: path.to_string(),
+        source_breadcrumb: format!("runtime_override:{path}"),
         map,
     })
 }
@@ -265,7 +313,7 @@ struct PreloadOverrideEntry {
 /// effect. Surfaces in schema as `http.preload_list_source`.
 pub fn preload_list_source() -> String {
     match PRELOAD_OVERRIDE.get() {
-        Some(ov) => format!("runtime_override:{}", ov.source_path),
+        Some(ov) => ov.source_breadcrumb.clone(),
         None => "compiled_in".to_string(),
     }
 }
@@ -890,7 +938,10 @@ mod tests {
         .unwrap();
         drop(f);
         let ov = load_preload_override_from_path(path.to_str().unwrap()).unwrap();
-        assert_eq!(ov.source_path, path.to_str().unwrap());
+        assert_eq!(
+            ov.source_breadcrumb,
+            format!("runtime_override:{}", path.to_str().unwrap())
+        );
         assert!(ov.map.contains_key("foo.invalid"));
         let _ = std::fs::remove_file(path);
     }

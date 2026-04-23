@@ -1,5 +1,10 @@
 pub mod alpn_matrix;
 pub mod backends;
+pub mod bundle_cache;
+#[cfg(all(feature = "http-checks", feature = "legacy-probes"))]
+pub mod bundle_fetcher;
+#[cfg(all(feature = "http-checks", feature = "legacy-probes"))]
+pub mod bundle_updater;
 pub mod cert;
 pub mod ciphers;
 #[cfg(feature = "http-checks")]

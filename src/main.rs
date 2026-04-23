@@ -154,6 +154,26 @@ struct Args {
     #[arg(long, value_name = "NAME:PATH")]
     extra_trust_store: Vec<String>,
 
+    /// Refresh every compiled-in trust store from its upstream
+    /// source and write to the platform cache directory
+    /// (`~/.cache/kemist/trust_stores/` on Linux, `~/Library/Caches/
+    /// kemist/trust_stores/` on macOS). Scan operation does not run
+    /// when this flag is set — the process fetches bundles, writes
+    /// `manifest.json`, and exits. Requires `http-checks` +
+    /// `legacy-probes` features (both default on).
+    #[cfg(all(feature = "http-checks", feature = "legacy-probes"))]
+    #[arg(long)]
+    update_trust_stores: bool,
+
+    /// Refresh the HSTS preload list from the Chromium snapshot
+    /// and write to the platform cache directory. Process exits
+    /// after the fetch. Requires `http-checks` +
+    /// `legacy-probes` features (shared with `--update-trust-stores`
+    /// since both share the fetch infrastructure).
+    #[cfg(all(feature = "http-checks", feature = "legacy-probes"))]
+    #[arg(long)]
+    update_hsts_preload: bool,
+
     /// Increase logging verbosity (-v info, -vv debug, -vvv trace).
     #[arg(short, long, action = clap::ArgAction::Count)]
     verbose: u8,
@@ -233,9 +253,31 @@ async fn run() -> Result<()> {
         .install_default()
         .expect("failed to install rustls crypto provider");
 
-    // Runtime HSTS-preload override. Loaded before any scan so the
-    // `OnceLock` settles; subsequent `preload_list_status` calls see
-    // the override. Load failure is a fatal user error — operators
+    // Refresh subcommands run to completion then exit — no scan
+    // runs in the same invocation. Each prints a per-bundle report
+    // and exits non-zero if any fetch failed.
+    #[cfg(all(feature = "http-checks", feature = "legacy-probes"))]
+    if args.update_trust_stores {
+        let reports = kemist::scanner::bundle_updater::update_all_trust_stores().await;
+        let all_ok =
+            kemist::scanner::bundle_updater::print_reports("trust-stores", &reports);
+        std::process::exit(if all_ok { 0 } else { 1 });
+    }
+    #[cfg(all(feature = "http-checks", feature = "legacy-probes"))]
+    if args.update_hsts_preload {
+        let report = kemist::scanner::bundle_updater::update_hsts_preload().await;
+        let all_ok = kemist::scanner::bundle_updater::print_reports(
+            "hsts-preload",
+            std::slice::from_ref(&report),
+        );
+        std::process::exit(if all_ok { 0 } else { 1 });
+    }
+
+    // Runtime HSTS-preload override. Priority:
+    //   1. --hsts-preload-list-path (explicit user intent wins)
+    //   2. $cache/hsts_preload_list.json if manifest-verified
+    //   3. Compile-time PHF (default fallback inside http.rs)
+    // Load failure is a fatal user error — operators
     // who supply the flag expect the override to take effect; silent
     // fall-through to the compile-time list would hide bugs.
     if let Some(path) = &args.hsts_preload_list_path {
@@ -246,6 +288,10 @@ async fn run() -> Result<()> {
                 "failed to load HSTS preload override from {path_str}: {e}"
             ),
         }
+    } else {
+        // No explicit override — try the cache. This is a no-op
+        // when the cache is empty or the manifest is unverifiable.
+        kemist::scanner::http::install_preload_from_cache_if_fresh();
     }
 
     // Multi-trust-store registry. Parse CLI flags into name->path

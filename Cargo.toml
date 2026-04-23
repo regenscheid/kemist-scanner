@@ -111,6 +111,25 @@ phf = { version = "0.11", features = ["macros"] }
 # this runtime copy is only for the override path.
 json5 = "0.4"
 
+# Cross-platform app cache / config directory resolution. Powers
+# the bundle-refresh subsystem: `kemist --update-trust-stores`
+# writes refreshed PEMs + a manifest into the platform's per-user
+# cache directory (~/.cache/kemist/ on Linux, ~/Library/Caches/kemist/
+# on macOS, %LOCALAPPDATA%\kemist\ on Windows); the scanner reads
+# cache-first at startup and falls back to the compile-time
+# bundles when the cache is empty or stale.
+directories = "5"
+
+# ZIP extractor — only used by the bundle-updater to unpack the
+# DoD PKI-PKE archive from dl.dod.cyber.mil (PKCS#7 certificates
+# inside a ZIP). Small dep; off the hot path (update-time only).
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+# CSV parser for the CCADB metadata + PEM-by-decade exports
+# consumed by the Microsoft bundle updater. Used only at update
+# time, not on scan path.
+csv = "1"
+
 [build-dependencies]
 chrono = { version = "0.4", features = ["serde"] }
 # Must also appear in [build-dependencies] — feature unification under

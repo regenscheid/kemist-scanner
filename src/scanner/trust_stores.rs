@@ -43,11 +43,18 @@ pub const COMPILED_STORE_NAMES: &[&str] =
     &["webpki-roots", "microsoft", "apple", "us-fpki-common", "us-dod"];
 
 /// Provenance breadcrumb: where the bundle backing a given store
-/// came from. `CompiledIn` → build-time bundle; `RuntimeOverride(path)`
-/// → loaded from disk at startup.
+/// came from. `CompiledIn` → build-time bundle; `CacheRefreshed(path)`
+/// → loaded from the platform cache written by
+/// `kemist --update-trust-stores`; `RuntimeOverride(path)` →
+/// loaded from a user-supplied path via `--trust-store name:path`.
 #[derive(Debug, Clone)]
 pub enum TrustStoreSource {
     CompiledIn,
+    /// Loaded from the app cache directory after a successful
+    /// `--update-trust-stores` refresh. The path is the concrete
+    /// cache file that was read (e.g.
+    /// `~/Library/Caches/kemist/trust_stores/microsoft.pem`).
+    CacheRefreshed(PathBuf),
     RuntimeOverride(PathBuf),
 }
 
@@ -55,6 +62,9 @@ impl TrustStoreSource {
     pub fn to_breadcrumb(&self) -> String {
         match self {
             Self::CompiledIn => "compiled_in".to_string(),
+            Self::CacheRefreshed(p) => {
+                format!("cache_refreshed:{}", p.display())
+            }
             Self::RuntimeOverride(p) => {
                 format!("runtime_override:{}", p.display())
             }
@@ -156,8 +166,8 @@ pub fn build_default_registry(
     Ok(TrustStoreRegistry { stores })
 }
 
-/// Load the webpki-roots-backed store. Override path, when set,
-/// supplies PEM bundle replacing the crate bundle.
+/// Load the webpki-roots-backed store. Override path wins over
+/// cache wins over the built-in crate bundle.
 fn load_webpki_roots(override_path: Option<&PathBuf>) -> Result<LoadedStore, String> {
     if let Some(path) = override_path {
         return Ok(LoadedStore {
@@ -166,6 +176,14 @@ fn load_webpki_roots(override_path: Option<&PathBuf>) -> Result<LoadedStore, Str
             })?)?,
             source: TrustStoreSource::RuntimeOverride(path.clone()),
         });
+    }
+
+    // webpki-roots refresh: the updater doesn't refetch the crate —
+    // users get fresh roots via `cargo update`. Still check the
+    // cache path in case an operator placed a manual override
+    // there via `kemist --update-trust-stores` fetched metadata.
+    if let Some(loaded) = try_load_from_cache("webpki-roots") {
+        return Ok(loaded);
     }
 
     let mut roots = RootCertStore::empty();
@@ -178,7 +196,11 @@ fn load_webpki_roots(override_path: Option<&PathBuf>) -> Result<LoadedStore, Str
     })
 }
 
-/// Load a compiled-in PEM bundle (or its runtime override).
+/// Load a compiled-in PEM bundle. Precedence:
+/// 1. `--trust-store name:<path>` runtime override → load that path.
+/// 2. Cache file (`$cache/trust_stores/<name>.pem`) that matches
+///    the manifest's SHA-256 → load cache.
+/// 3. Compile-time `include_bytes!` bundle.
 fn load_pem_store(
     name: &str,
     override_path: Option<&PathBuf>,
@@ -196,10 +218,33 @@ fn load_pem_store(
             source: TrustStoreSource::RuntimeOverride(path.clone()),
         });
     }
+    if let Some(loaded) = try_load_from_cache(name) {
+        return Ok(loaded);
+    }
     Ok(LoadedStore {
         verifier: build_verifier_from_pem(compiled_pem)?,
         source: TrustStoreSource::CompiledIn,
     })
+}
+
+/// Try the cache directory: `$cache/trust_stores/<name>.pem`. A
+/// hit requires the file exists AND its SHA-256 matches the
+/// manifest's record. Both safeguards prevent the scanner from
+/// honoring tampered or stale on-disk state.
+fn try_load_from_cache(name: &str) -> Option<LoadedStore> {
+    let dir = crate::scanner::bundle_cache::trust_store_dir()?;
+    let path = dir.join(format!("{name}.pem"));
+    let bytes = crate::scanner::bundle_cache::read_verified(&path, name)?;
+    match build_verifier_from_pem(&bytes) {
+        Ok(verifier) => Some(LoadedStore {
+            verifier,
+            source: TrustStoreSource::CacheRefreshed(path),
+        }),
+        Err(e) => {
+            tracing::debug!(%name, error = %e, "cached bundle failed to parse; falling back to compiled");
+            None
+        }
+    }
 }
 
 fn load_store_from_path(path: &PathBuf) -> Result<LoadedStore, String> {

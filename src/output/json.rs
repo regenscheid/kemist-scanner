@@ -1113,6 +1113,22 @@ fn build_validation(results: &ScanResults) -> Validation {
         validation_error: v.validation_error.clone(),
         per_store_validation_errors: v.per_store_validation_errors.clone(),
         trust_store_sources: v.trust_store_sources.clone(),
+        trust_store_bundle_metadata: v
+            .trust_store_bundle_metadata
+            .iter()
+            .map(|(name, meta)| {
+                (
+                    name.clone(),
+                    crate::model::scan_result::TrustStoreBundleMetadata {
+                        source: meta.source.clone(),
+                        fetched_at: meta.fetched_at.clone(),
+                        sha256: meta.sha256.clone(),
+                        entry_count: meta.entry_count,
+                        upstream_version: meta.upstream_version.clone(),
+                    },
+                )
+            })
+            .collect(),
     }
 }
 
