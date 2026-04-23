@@ -551,16 +551,35 @@ pub struct TlsExtensions {
     /// `not_probed` / `error` — the probe did not reach a parseable
     /// ServerHello; reason carries the failure mode.
     pub hello_retry_request: ObservationBool,
-    /// OCSP-over-HTTP fallback results — one entry per AIA `OCSP`
-    /// URL in the leaf cert. Populated only when
-    /// `--enable-revocation-fetch` is set AND the leaf's AIA lists
-    /// OCSP responders AND both leaf + issuer DER are available from
-    /// the chain. Empty otherwise. Complements
-    /// `ocsp_stapling` — the two can coexist in one record (stapled
-    /// + fetched), and rule engines comparing freshness should
-    /// consult both.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub ocsp_http_fallback: Vec<OcspHttpFallbackEntry>,
+}
+
+/// Single CRL fetch + revocation-check result.
+#[derive(Serialize, Debug, Clone)]
+pub struct CrlFetchEntry {
+    pub url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub http_status: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub this_update: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_update: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub crl_issuer: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revoked_cert_count: Option<usize>,
+    /// `true` — leaf's serial found in this CRL's revoked list
+    /// (definitive revocation signal). `false` — CRL fetched,
+    /// parsed, searched, and leaf NOT present (definitive "not
+    /// revoked" signal). `null` — fetch / parse failed; see
+    /// `error`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub leaf_revoked: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revocation_time: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revocation_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// Single OCSP-over-HTTP fetch result.
@@ -821,6 +840,31 @@ pub struct CertificateFacts {
     /// serializes to `{}` when no sub-fields are populated. See
     /// [`crate::model::cert_extensions::CertExtensions`].
     pub extensions: crate::model::cert_extensions::CertExtensions,
+    /// Out-of-band revocation observations for this cert —
+    /// `crl_fetch` results (from `CRLDistributionPoints` URLs) +
+    /// `ocsp_http_fallback` results (from AIA `OCSP` URLs).
+    /// Populated only when `--enable-revocation-fetch` is set AND
+    /// this is the leaf. Other chain entries render as `None`
+    /// (intermediate-cert revocation checking is a future
+    /// workstream). Distinct from `tls.extensions.ocsp_stapling`,
+    /// which captures the server's in-band stapling *behavior* at
+    /// the TLS layer regardless of cert scope.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revocation: Option<CertRevocation>,
+}
+
+/// Out-of-band revocation observations scoped to a single cert.
+/// Both fields are opt-in via `--enable-revocation-fetch` and absent
+/// when the corresponding URL list on the cert is empty.
+#[derive(Serialize, Debug, Clone, Default)]
+pub struct CertRevocation {
+    /// OCSP-over-HTTP fetches against the leaf's AIA `OCSP` URLs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ocsp_http_fallback: Vec<OcspHttpFallbackEntry>,
+    /// CRL downloads against the leaf's `CRLDistributionPoints`
+    /// URLs, with a per-URL `leaf_revoked` decision.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub crl_fetch: Vec<CrlFetchEntry>,
 }
 
 #[derive(Serialize, Debug, Clone)]

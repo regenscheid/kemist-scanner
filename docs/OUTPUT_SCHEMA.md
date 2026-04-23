@@ -299,19 +299,12 @@ Notes:
   correctly); `{value: false}` = regular ServerHello (either TLS
   1.2 fallback or an unexpected non-HRR response from a TLS 1.3
   server). This probe adds one extra handshake per target.
-- **`ocsp_http_fallback`** — opt-in (`--enable-revocation-fetch`).
-  For each AIA `OCSP` URL the leaf cert advertises, the scanner
-  builds an OCSPRequest (CertID over leaf + issuer, SHA-1 digest
-  for interop) via `openssl::ocsp` and POSTs it with
-  `Content-Type: application/ocsp-request`. The parsed response
-  lands in `content` with the same shape as
-  `ocsp_stapling.content`. Complements stapled OCSP — the two
-  can coexist on the same record and legitimately differ on
-  timing/issuer. Cap: 256 KB response body, 10 s per-URL
-  timeout. Error categories surface in `error` as
-  `post_failed:<...>`, `http_status_<code>`,
-  `response_exceeds_size_cap:<bytes>`, `leaf_parse_failed:<...>`,
-  `issuer_parse_failed:<...>`, `response_parse_failed:<...>`.
+
+**Note on revocation.** `ocsp_stapling` is a TLS-handshake
+observation (server stapled or not). Out-of-band revocation
+probes (CRL fetch, OCSP-over-HTTP) live under
+`certificates.leaf.revocation` — they're cert-scoped, not
+TLS-layer.
 
 See [CHECKS.md](CHECKS.md) for how each observation is obtained.
 
@@ -512,6 +505,7 @@ RFC 7677 / RFC 5802 SCRAM channel-binding requirements.
 | `signature_algorithm_structured` | `{hash?, algorithm, parameters?}` | Structured decomposition of the signature AlgorithmIdentifier. `hash` is the canonical hash family (`"sha256"`, `"sha384"`, `"sha512"`, `"sha1"`); absent when the scheme hashes internally (Ed25519, Ed448, ML-DSA, SLH-DSA). `algorithm` is the family name: `"rsa"`, `"rsa_pss"`, `"ecdsa"`, `"ed25519"`, `"ed448"`, `"ml_dsa_44"` / `"ml_dsa_65"` / `"ml_dsa_87"`, `"slh_dsa_sha2_128s"` etc. `parameters` carries `"mgf1-<hash>"` for RSA-PSS (or `"rfc4055_defaults"` when PSS parameters were absent). |
 | `pqc_signature_family` | `string?` | `"ml_dsa"` (FIPS 204) / `"slh_dsa"` (FIPS 205) / `"composite"` (IETF LAMPS) when the signature OID is PQC; absent otherwise. Replaces the earlier `is_pqc_signature: bool` — `has_pqc = pqc_signature_family !== undefined` recovers the old semantics. |
 | `public_key` | `{algorithm, size_bits, curve?, curve_oid?, rsa_exponent?}` | `curve_oid` carries the named-curve OID (e.g. `"1.2.840.10045.3.1.7"` for secp256r1) — parsed from `AlgorithmIdentifier.parameters`, not byte-length matched. `rsa_exponent` populated for RSA keys only (values observed: 3, 17, 65537); lets rule engines flag small-exponent keys. |
+| `revocation` | `{ocsp_http_fallback?: [...], crl_fetch?: [...]}` | Out-of-band revocation observations — fetched only for the leaf, only when `--enable-revocation-fetch` is set. Absent on chain entries. See the **Revocation observations** section below for field-level detail. |
 | `embedded_scts` | `int` | Count from extension 1.3.6.1.4.1.11129.2.4.2 |
 | `fingerprint_sha256` | `string` | Hex |
 | `fingerprint_sha1` | `string` | Hex |
@@ -536,6 +530,50 @@ RFC 7677 / RFC 5802 SCRAM channel-binding requirements.
 `SctDetail = {log_id: hex, timestamp: RFC3339, signature_hash_algorithm: string, signature_algorithm: string, signature_hex: hex}`.
 The cert-level `embedded_scts` count remains for backwards
 compatibility and equals `scts.len()`.
+
+### Revocation observations (`certificates.leaf.revocation`)
+
+Out-of-band revocation probes scoped to the leaf cert. Populated
+only for the leaf and only when `--enable-revocation-fetch` is
+set. Distinct from `tls.extensions.ocsp_stapling`, which captures
+the server's TLS-handshake stapling *behavior* regardless of cert
+scope. Non-leaf chain entries render `revocation` as absent.
+
+```
+{
+  ocsp_http_fallback?: [
+    {url, http_status?, response_length, content?, error?}, ...
+  ],
+  crl_fetch?: [
+    {url, http_status?, this_update?, next_update?, crl_issuer?,
+     revoked_cert_count?, leaf_revoked?, revocation_time?,
+     revocation_reason?, error?}, ...
+  ]
+}
+```
+
+**`ocsp_http_fallback`** — For each AIA `OCSP` URL the leaf
+advertises, the scanner builds an OCSPRequest (CertID over leaf +
+issuer, SHA-1 digest for interop) via `openssl::ocsp` and POSTs
+it with `Content-Type: application/ocsp-request`. The parsed
+response lands in `content` with the same shape as
+`tls.extensions.ocsp_stapling.content`. Cap: 256 KB response
+body, 10 s per-URL timeout. Error categories in `error`:
+`post_failed:<...>`, `http_status_<code>`,
+`response_exceeds_size_cap:<bytes>`, `leaf_parse_failed:<...>`,
+`issuer_parse_failed:<...>`, `response_parse_failed:<...>`.
+
+**`crl_fetch`** — For each URL in `extensions.crl_distribution_points.urls`,
+GET + parse the CRL and scan for the leaf's serial. `leaf_revoked`
+is `true` (leaf serial in the list), `false` (fetched + parsed +
+searched + absent — canonical "not revoked"), or `null`
+(fetch / parse failed). On positive revocation,
+`revocation_time` + `revocation_reason` (RFC 5280 §5.3.1 names:
+`Unspecified`, `KeyCompromise`, `CACompromise`,
+`AffiliationChanged`, `Superseded`, `CessationOfOperation`,
+`CertificateHold`, `RemoveFromCRL`, `PrivilegeWithdrawn`,
+`AaCompromise`). PEM-wrapped CRLs handled transparently. Caps:
+5 MB body, 10 s per-URL timeout. Per-scan cache keyed on URL.
 
 ### `validation`
 Trust observations — **three independent fields**, deliberately not

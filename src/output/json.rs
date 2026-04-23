@@ -62,7 +62,7 @@ pub fn build_scan_result(results: &ScanResults, ctx: &JsonEmitContext) -> ScanRe
             duration_ms,
         },
         tls: build_tls(results, ctx),
-        certificates: build_certificates(&results.certificate_chain),
+        certificates: build_certificates(results),
         validation: build_validation(results),
         http: build_http(results),
         raw_handshakes: None,
@@ -773,7 +773,6 @@ fn build_extensions(results: &ScanResults, ctx: &JsonEmitContext) -> TlsExtensio
         None => ObservationBool::not_probed("hrr_probe_not_run"),
     };
 
-    let ocsp_http_fallback = build_ocsp_http_fallback(results);
 
     TlsExtensions {
         ems,
@@ -799,8 +798,37 @@ fn build_extensions(results: &ScanResults, ctx: &JsonEmitContext) -> TlsExtensio
         compress_certificate_algorithms,
         grease_echoed,
         hello_retry_request,
-        ocsp_http_fallback,
     }
+}
+
+#[cfg(feature = "http-checks")]
+fn build_crl_fetch(results: &ScanResults) -> Vec<crate::model::scan_result::CrlFetchEntry> {
+    use crate::model::scan_result::CrlFetchEntry;
+    let Some(out) = results.crl_fetch.as_ref() else {
+        return Vec::new();
+    };
+    out.results
+        .iter()
+        .map(|r| CrlFetchEntry {
+            url: r.url.clone(),
+            http_status: r.http_status,
+            this_update: r.this_update.clone(),
+            next_update: r.next_update.clone(),
+            crl_issuer: r.crl_issuer.clone(),
+            revoked_cert_count: r.revoked_cert_count,
+            leaf_revoked: r.leaf_revoked,
+            revocation_time: r.revocation_time.clone(),
+            revocation_reason: r.revocation_reason.clone(),
+            error: r.error.clone(),
+        })
+        .collect()
+}
+
+#[cfg(not(feature = "http-checks"))]
+fn build_crl_fetch(
+    _results: &ScanResults,
+) -> Vec<crate::model::scan_result::CrlFetchEntry> {
+    Vec::new()
 }
 
 /// Render the OCSP-over-HTTP fallback entries from
@@ -937,12 +965,36 @@ fn build_tls13_ee_observations(results: &ScanResults) -> (Option<u16>, Vec<Strin
     }
 }
 
-fn build_certificates(chain: &[CertificateInfo]) -> Certificates {
-    let facts: Vec<CertificateFacts> = chain.iter().map(cert_to_facts).collect();
+fn build_certificates(results: &ScanResults) -> Certificates {
+    let chain = &results.certificate_chain;
+    let mut facts: Vec<CertificateFacts> = chain.iter().map(cert_to_facts).collect();
+    // Attach revocation observations to the leaf only. Intermediate-
+    // cert revocation checking is a future workstream; non-leaf
+    // entries keep `revocation: None`, which is skipped in JSON.
+    if let Some(leaf_facts) = facts.first_mut() {
+        let rev = build_cert_revocation(results);
+        if rev.ocsp_http_fallback.is_empty() && rev.crl_fetch.is_empty() {
+            leaf_facts.revocation = None;
+        } else {
+            leaf_facts.revocation = Some(rev);
+        }
+    }
     Certificates {
         leaf: facts.first().cloned(),
         chain: facts.clone(),
         chain_length: facts.len(),
+    }
+}
+
+/// Assemble the leaf's out-of-band revocation observations:
+/// OCSP-over-HTTP fetches + CRL fetches. Empty values render as
+/// `None` on `CertificateFacts.revocation`.
+fn build_cert_revocation(
+    results: &ScanResults,
+) -> crate::model::scan_result::CertRevocation {
+    crate::model::scan_result::CertRevocation {
+        ocsp_http_fallback: build_ocsp_http_fallback(results),
+        crl_fetch: build_crl_fetch(results),
     }
 }
 
@@ -973,6 +1025,7 @@ fn cert_to_facts(c: &CertificateInfo) -> CertificateFacts {
         fingerprint_sha256: c.fingerprint_sha256.clone(),
         fingerprint_sha1: c.fingerprint_sha1.clone(),
         extensions: c.extensions.clone(),
+        revocation: None,
     }
 }
 

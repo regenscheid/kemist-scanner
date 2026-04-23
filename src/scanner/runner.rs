@@ -346,6 +346,8 @@ fn empty_scan_results(target: &Target, addr: SocketAddr) -> crate::scanner::Scan
         alpn_matrix: None,
         #[cfg(all(feature = "http-checks", feature = "legacy-probes"))]
         ocsp_http_fetch: None,
+        #[cfg(feature = "http-checks")]
+        crl_fetch: None,
         cert_chain_der: Vec::new(),
         http_observations: None,
         #[cfg(feature = "legacy-probes")]

@@ -349,7 +349,7 @@ Requires features `http-checks` + `legacy-probes` (both default-on).
 
 | Observation | How | Output field |
 |---|---|---|
-| OCSP-HTTP fetch per AIA URL | `openssl::ocsp::OcspRequest::new()` + `OcspCertId::from_cert(sha1, leaf, issuer)` → DER → `reqwest` POST to AIA URL with `Content-Type: application/ocsp-request`. Response parsed via the shared [src/model/ocsp_response.rs](../src/model/ocsp_response.rs) parser. | `tls.extensions.ocsp_http_fallback[]` |
+| OCSP-HTTP fetch per AIA URL | `openssl::ocsp::OcspRequest::new()` + `OcspCertId::from_cert(sha1, leaf, issuer)` → DER → `reqwest` POST to AIA URL with `Content-Type: application/ocsp-request`. Response parsed via the shared [src/model/ocsp_response.rs](../src/model/ocsp_response.rs) parser. | `certificates.leaf.revocation.ocsp_http_fallback[]` |
 
 **CertID digest: SHA-1.** RFC 6960 §A.2 calls out SHA-1 as the
 interoperable default; production responders frequently reject
@@ -377,6 +377,31 @@ do so against a trust bundle they control.
 server already stapled — the two responses can differ on
 timing and both are useful observations. `ocsp_stapling`
 continues to carry whatever came in-band.
+
+### CRL fetch + revocation check
+
+Source: [src/scanner/crl_fetch.rs](../src/scanner/crl_fetch.rs).
+Requires feature `http-checks` (default-on); does not require
+`legacy-probes` (no OpenSSL involvement — only `reqwest` +
+`x509-parser`).
+
+| Observation | How | Output field |
+|---|---|---|
+| CRL fetch per DP URL | `reqwest::Client::get(url)` with 10 s timeout and 5 MB body cap. Response bytes handed to `x509_parser::revocation_list::CertificateRevocationList::from_der`; PEM-armored CAs detected via `-----BEGIN X509 CRL-----` sentinel and base64-decoded before parse. | `certificates.leaf.revocation.crl_fetch[]` |
+| Leaf revocation state | Iterate `revoked_certificates`; match `raw_serial()` bit-for-bit against the leaf's raw serial. Positive match → `leaf_revoked: true` + `revocation_time` + `revocation_reason`. | same block |
+
+**Per-scan cache.** A `HashMap<url, CrlFetchResult>` within each
+scan avoids re-downloading the same CRL when multiple DPs share
+a URL (or when leaf + intermediate share a CRL).
+
+**No signature validation.** x509-parser exposes
+`verify_signature(&issuer_spki)` but kemist is a sensor — we
+report what the CRL *says* about the leaf, not whether the CRL
+was signed by a trusted issuer. Rule engines that want
+signature-validated revocation can cross-check using
+`tls.extensions.crl_fetch[].crl_issuer` + the captured chain.
+
+**No Delta CRL chasing.** Only base CRLs are fetched.
 
 ## ALPN probe matrix
 

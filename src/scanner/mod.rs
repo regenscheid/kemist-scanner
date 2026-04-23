@@ -2,6 +2,8 @@ pub mod alpn_matrix;
 pub mod backends;
 pub mod cert;
 pub mod ciphers;
+#[cfg(feature = "http-checks")]
+pub mod crl_fetch;
 pub mod groups;
 pub mod hello;
 pub mod http;
@@ -148,6 +150,13 @@ pub struct ScanResults {
     #[cfg(all(feature = "http-checks", feature = "legacy-probes"))]
     #[serde(skip_serializing)]
     pub ocsp_http_fetch: Option<crate::scanner::ocsp_http::OcspHttpFetchOutput>,
+    /// CRL fetch + revocation-check results — one entry per CRL DP
+    /// URL on the leaf. Populated only when
+    /// `--enable-revocation-fetch` is set. Feeds
+    /// `tls.extensions.crl_fetch` in schema. `None` otherwise.
+    #[cfg(feature = "http-checks")]
+    #[serde(skip_serializing)]
+    pub crl_fetch: Option<crate::scanner::crl_fetch::CrlFetchOutput>,
     /// Raw DER bytes of every cert in the chain the server delivered
     /// during the characterization handshake. Retained on the
     /// results so post-handshake probes (OCSP-over-HTTP, CRL fetch)
@@ -213,6 +222,8 @@ impl SslScanner {
             alpn_matrix: None,
             #[cfg(all(feature = "http-checks", feature = "legacy-probes"))]
             ocsp_http_fetch: None,
+            #[cfg(feature = "http-checks")]
+            crl_fetch: None,
             cert_chain_der: Vec::new(),
             http_observations: None,
             #[cfg(feature = "legacy-probes")]
@@ -412,6 +423,51 @@ impl SslScanner {
                             )
                             .await,
                         );
+                    }
+                }
+            }
+            pause().await;
+        }
+
+        // CRL fetch + revocation check. Shares the
+        // `--enable-revocation-fetch` gate with OCSP-over-HTTP.
+        // Unlike OCSP-HTTP, this only needs the leaf cert + its DP
+        // URLs — the issuer cert is used by the CA that signed the
+        // CRL, not by the scanner. Leaf serial comes from the
+        // captured chain DER so it matches the exact bytes the CA
+        // stored in `revokedCertificates`.
+        #[cfg(feature = "http-checks")]
+        if self.config.enable_revocation_fetch {
+            if let Some(leaf_info) = results.certificate_chain.first() {
+                let urls: Vec<String> = leaf_info
+                    .extensions
+                    .crl_distribution_points
+                    .as_ref()
+                    .map(|crl| crl.urls.clone())
+                    .unwrap_or_default();
+                if !urls.is_empty() {
+                    // Re-parse the leaf DER to pull the raw serial —
+                    // the CertificateInfo view stringifies it, which
+                    // is lossy for CRL matching (no leading zero
+                    // preservation, no sign bit). Raw bytes match
+                    // the CRL's `user_certificate` INTEGER exactly.
+                    if let Some(leaf_der) = results.cert_chain_der.first() {
+                        use x509_parser::prelude::FromDer;
+                        if let Ok((_, cert)) =
+                            x509_parser::certificate::X509Certificate::from_der(
+                                leaf_der,
+                            )
+                        {
+                            let serial_bytes = cert.raw_serial().to_vec();
+                            results.crl_fetch = Some(
+                                crate::scanner::crl_fetch::probe_crl(
+                                    &urls,
+                                    &serial_bytes,
+                                    self.config.timeout,
+                                )
+                                .await,
+                            );
+                        }
                     }
                 }
             }

@@ -221,23 +221,7 @@
               "description": "RFC 8879 — server-advertised certificate compression algorithms. Populated via the OpenSSL EncryptedExtensions probe."
             },
             "grease_echoed": { "$ref": "#/$defs/observationBool" },
-            "hello_retry_request": { "$ref": "#/$defs/observationBool" },
-            "ocsp_http_fallback": {
-              "type": "array",
-              "description": "OCSP-over-HTTP fetch results — one entry per AIA OCSP URL queried. Populated only when `--enable-revocation-fetch` is set. Complements `ocsp_stapling`; both can be present on a single record.",
-              "items": {
-                "type": "object",
-                "required": ["url", "response_length"],
-                "properties": {
-                  "url": { "type": "string" },
-                  "http_status": { "type": "integer", "minimum": 100, "maximum": 599 },
-                  "response_length": { "type": "integer", "minimum": 0 },
-                  "content": { "$ref": "#/$defs/ocspResponseContent" },
-                  "error": { "type": "string" }
-                },
-                "additionalProperties": false
-              }
-            }
+            "hello_retry_request": { "$ref": "#/$defs/observationBool" }
           },
           "additionalProperties": false
         },
@@ -702,7 +686,51 @@
         "embedded_scts": { "type": "integer", "minimum": 0 },
         "fingerprint_sha256": { "type": "string" },
         "fingerprint_sha1": { "type": "string" },
-        "extensions": { "$ref": "#/$defs/certExtensions" }
+        "extensions": { "$ref": "#/$defs/certExtensions" },
+        "revocation": {
+          "type": "object",
+          "description": "Out-of-band revocation observations scoped to this cert. Populated only for the leaf and only when `--enable-revocation-fetch` is set. Distinct from `tls.extensions.ocsp_stapling`, which captures the server's in-band stapling behavior at the TLS layer (delivered regardless of cert scope).",
+          "properties": {
+            "ocsp_http_fallback": {
+              "type": "array",
+              "description": "OCSP-over-HTTP fetch results — one entry per AIA OCSP URL queried.",
+              "items": {
+                "type": "object",
+                "required": ["url", "response_length"],
+                "properties": {
+                  "url": { "type": "string" },
+                  "http_status": { "type": "integer", "minimum": 100, "maximum": 599 },
+                  "response_length": { "type": "integer", "minimum": 0 },
+                  "content": { "$ref": "#/$defs/ocspResponseContent" },
+                  "error": { "type": "string" }
+                },
+                "additionalProperties": false
+              }
+            },
+            "crl_fetch": {
+              "type": "array",
+              "description": "CRL fetch + revocation-check results — one entry per CRLDistributionPoints URL. `leaf_revoked: true/false/null` distinguishes definite revocation / definite not-revoked / inconclusive.",
+              "items": {
+                "type": "object",
+                "required": ["url"],
+                "properties": {
+                  "url": { "type": "string" },
+                  "http_status": { "type": "integer", "minimum": 100, "maximum": 599 },
+                  "this_update": { "type": "string" },
+                  "next_update": { "type": "string" },
+                  "crl_issuer": { "type": "string" },
+                  "revoked_cert_count": { "type": "integer", "minimum": 0 },
+                  "leaf_revoked": { "type": ["boolean", "null"] },
+                  "revocation_time": { "type": "string" },
+                  "revocation_reason": { "type": "string" },
+                  "error": { "type": "string" }
+                },
+                "additionalProperties": false
+              }
+            }
+          },
+          "additionalProperties": false
+        }
       },
       "additionalProperties": false
     },
