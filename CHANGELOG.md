@@ -6,6 +6,10 @@ numbers follow [semver](https://semver.org/).
 
 ## [Unreleased]
 
+(no changes yet)
+
+## [0.3.0] — 2026-04-23
+
 ### Added — Observation expansion workstream
 
 Extends the raw-observation surface so downstream rule engines

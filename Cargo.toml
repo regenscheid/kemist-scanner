@@ -1,8 +1,8 @@
 [package]
 name = "kemist"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
-authors = ["Chris Yuan <chris.yuan@0x0.tw>", "kemist contributors"]
+authors = ["kemist contributors"]
 description = "TLS + PQC observation scanner: records what servers support, emits structured JSON"
 license = "MIT OR Apache-2.0"
 keywords = ["tls", "pqc", "ml-kem", "scanner", "cryptography"]

@@ -97,7 +97,7 @@ Example record shape (abridged):
 ```jsonc
 {
   "schema_version": "1.0.0",
-  "scanner": { "name": "kemist", "version": "0.2.0" },
+  "scanner": { "name": "kemist", "version": "0.3.0" },
   "capabilities": {
     "rustls_version": "0.23",
     "openssl_version": "300.5.5",
