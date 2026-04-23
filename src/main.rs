@@ -135,6 +135,25 @@ struct Args {
     #[arg(long)]
     enable_revocation_fetch: bool,
 
+    /// Override a compiled-in trust store with a PEM bundle loaded
+    /// at startup. Format: `NAME:PATH`. Accepted names:
+    /// `webpki-roots`, `microsoft`, `apple`, `us-fpki-common`,
+    /// `us-dod`. Repeatable — pass once per store you want to
+    /// override. The output's `certificates.validation.trust_store_sources.<name>`
+    /// breadcrumb surfaces `runtime_override:<path>` when active.
+    #[arg(long, value_name = "NAME:PATH")]
+    trust_store: Vec<String>,
+
+    /// Add a new named trust store beyond the compiled-in set.
+    /// Format: `NAME:PATH`. Name must be lowercase ASCII + digits
+    /// + hyphens and must not collide with a compiled-in store.
+    /// Validation against this store surfaces at
+    /// `certificates.validation.chain_valid_to_custom_roots.<name>`.
+    /// Use for corporate PKI bundles, PIV-I roots, industry-
+    /// specific trust programs, etc. Repeatable.
+    #[arg(long, value_name = "NAME:PATH")]
+    extra_trust_store: Vec<String>,
+
     /// Increase logging verbosity (-v info, -vv debug, -vvv trace).
     #[arg(short, long, action = clap::ArgAction::Count)]
     verbose: u8,
@@ -145,6 +164,35 @@ enum OutputFormat {
     Text,
     Json,
     JsonPretty,
+}
+
+/// Parse a list of `NAME:PATH` CLI values into an ordered map.
+/// Duplicate names produce a fatal error — ambiguity about which
+/// override wins would be a surprising silent behavior.
+fn parse_name_path_flags(
+    flag: &str,
+    raw: &[String],
+) -> anyhow::Result<std::collections::BTreeMap<String, std::path::PathBuf>> {
+    let mut out = std::collections::BTreeMap::new();
+    for entry in raw {
+        let (name, path) = entry.split_once(':').ok_or_else(|| {
+            anyhow::anyhow!(
+                "{flag}: expected NAME:PATH, got `{entry}` (no colon separator)"
+            )
+        })?;
+        let name = name.trim();
+        let path = path.trim();
+        if name.is_empty() || path.is_empty() {
+            anyhow::bail!("{flag}: empty name or path in `{entry}`");
+        }
+        if out
+            .insert(name.to_string(), std::path::PathBuf::from(path))
+            .is_some()
+        {
+            anyhow::bail!("{flag}: duplicate entry for `{name}`");
+        }
+    }
+    Ok(out)
 }
 
 fn parse_tls_version(s: &str) -> std::result::Result<kemist::model::protocol::TlsVersion, String> {
@@ -199,6 +247,21 @@ async fn run() -> Result<()> {
             ),
         }
     }
+
+    // Multi-trust-store registry. Parse CLI flags into name->path
+    // maps, then build the registry (compiled bundles + overrides
+    // + extras). Must happen before any scan since probe-time
+    // validation reads the registry.
+    let ts_overrides = parse_name_path_flags("--trust-store", &args.trust_store)?;
+    let ts_extras = parse_name_path_flags("--extra-trust-store", &args.extra_trust_store)?;
+    let registry = match kemist::scanner::trust_stores::build_default_registry(
+        &ts_overrides,
+        &ts_extras,
+    ) {
+        Ok(r) => r,
+        Err(e) => anyhow::bail!("trust-store setup failed: {e}"),
+    };
+    kemist::scanner::trust_stores::install_registry(registry);
 
     // Collect targets from all three input sources.
     let targets = collect_targets(&args)?;

@@ -251,13 +251,47 @@ From [scanner/cert.rs](../src/scanner/cert.rs) and
 
 ## Trust validation
 
-From [scanner/probe.rs::evaluate_validation](../src/scanner/probe.rs):
+From [scanner/probe.rs::evaluate_validation](../src/scanner/probe.rs)
+plus [scanner/trust_stores.rs](../src/scanner/trust_stores.rs) for
+bundle loading.
 
-| Observation | How |
+Every compiled-in trust store runs its own `WebPkiServerVerifier`
+attempt against the server's chain. Results land as independent
+`ObservationBool` fields under `validation.chain_valid_to_<name>_roots`,
+with per-store error strings collected under
+`validation.per_store_validation_errors` and provenance
+(`compiled_in` vs `runtime_override:<path>`) under
+`validation.trust_store_sources`.
+
+| Store | Source | Notes |
+|---|---|---|
+| `webpki-roots` | [webpki-roots](https://crates.io/crates/webpki-roots) crate (Mozilla CCADB) | Always available; refresh via `cargo update`. |
+| `microsoft` | [data/trust_stores/microsoft_ccadb.pem](../data/trust_stores/microsoft_ccadb.pem) | Placeholder today — supply via `--trust-store microsoft:<path>`. |
+| `apple` | [data/trust_stores/apple_pki.pem](../data/trust_stores/apple_pki.pem) | macOS System Roots keychain (~160 TLS roots). NOT Apple's own PKI; see [data/trust_stores/README.md](../data/trust_stores/README.md). |
+| `us-fpki-common` | [data/trust_stores/us_fpki_common.pem](../data/trust_stores/us_fpki_common.pem) | Federal Common Policy CA G2 + SIA-discovered agency intermediates. |
+| `us-dod` | [data/trust_stores/us_dod.pem](../data/trust_stores/us_dod.pem) | Placeholder today. |
+
+**Runtime overrides.** `--trust-store <name>:<path>` replaces a
+compiled-in bundle; `--extra-trust-store <name>:<path>` adds a new
+named bundle surfaced under
+`validation.chain_valid_to_custom_roots.<name>`. Extra-store names
+must be lowercase ASCII + digits + hyphens.
+
+**Per-store retry.** Each verifier retries with a SAN-derived
+name when the first pass fails on `NotValidForName`, isolating
+chain validity from name-match issues (same pattern as the legacy
+single-store path).
+
+**Empty bundle handling.** Placeholder PEMs (Microsoft + DoD
+today) load successfully but produce no `WebPkiServerVerifier`;
+the corresponding `chain_valid_to_<name>_roots` renders as
+`{method: not_probed, reason: "trust_store_empty"}`, and the same
+string lands in `per_store_validation_errors.<name>`.
+
+| Other observation | How |
 |---|---|
-| `chain_valid_to_webpki_roots` | rustls `WebPkiServerVerifier` against `webpki-roots` Mozilla CA bundle. Retries with a SAN-derived name if first pass fails on `NotValidForName`, isolating chain validity from name mismatch. |
-| `name_matches_sni` | Independent SAN/CN match using RFC 6125 wildcard semantics. Runs regardless of chain validity. |
-| `validation_error` | Canonical error string when chain is invalid — see [OUTPUT_SCHEMA.md](OUTPUT_SCHEMA.md). |
+| `name_matches_sni` | Independent SAN/CN match using RFC 6125 wildcard semantics. Runs regardless of chain validity; trust-store-agnostic. |
+| `validation_error` | **Legacy** — webpki-roots error string only. New integrations should key on `per_store_validation_errors` instead. |
 
 ## Extension observations
 

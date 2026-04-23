@@ -26,7 +26,7 @@ use std::time::Duration;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::client::WebPkiServerVerifier;
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
-use rustls::{CertificateError, DigitallySignedStruct, RootCertStore, SignatureScheme};
+use rustls::{CertificateError, DigitallySignedStruct, SignatureScheme};
 use tokio::net::TcpStream;
 use tokio::time::timeout;
 use tokio_rustls::{rustls, TlsConnector};
@@ -90,20 +90,48 @@ pub struct CharacterizationOutput {
     pub validation: ValidationResult,
 }
 
-/// Three independent trust observations. See `validation.*` in the schema.
-/// All fields are `Option` because a failed/absent handshake leaves each
-/// unevaluated (`not_probed` in the emitted JSON).
+/// Multi-trust-store validation output. Each compiled-in store gets
+/// its own `(valid, error)` pair. `chain_valid_to_custom_roots`
+/// holds entries for `--extra-trust-store` stores. `trust_store_sources`
+/// records provenance per store (`"compiled_in"` vs
+/// `"runtime_override:<path>"`).
+///
+/// All `*_chain_valid_*` fields are `Option<bool>` because a
+/// failed/absent handshake leaves them unevaluated, and empty
+/// bundles (placeholder PEMs) render as `None` with reason
+/// `"trust_store_empty"`.
 #[derive(Debug, Clone, Default)]
 pub struct ValidationResult {
     pub chain_valid_to_webpki_roots: Option<bool>,
+    pub chain_valid_to_microsoft_roots: Option<bool>,
+    pub chain_valid_to_apple_roots: Option<bool>,
+    pub chain_valid_to_us_fpki_common_roots: Option<bool>,
+    pub chain_valid_to_us_dod_roots: Option<bool>,
+    /// `--extra-trust-store` entries, keyed on the user-supplied
+    /// name.
+    pub chain_valid_to_custom_roots: std::collections::BTreeMap<String, Option<bool>>,
     pub name_matches_sni: Option<bool>,
-    /// Spec-canonical error strings when chain validation fails:
+    /// Spec-canonical error strings when chain validation fails
+    /// against **webpki-roots** specifically:
     /// `"expired"`, `"not_valid_yet"`, `"untrusted_root"`, `"revoked"`,
     /// `"bad_signature"`, `"bad_encoding"`, `"unsupported_signature_algorithm"`,
     /// `"name_mismatch"` (only populated when chain is otherwise valid but
     /// name fails — see probe module docs), or `"other:<rustls_error>"` for
     /// unexpected categories. `None` when the chain validated cleanly.
+    /// Legacy field — new integrations should consume
+    /// `per_store_validation_errors` instead.
     pub validation_error: Option<String>,
+    /// Per-store validation error messages, keyed by canonical
+    /// store name (`"webpki-roots"`, `"microsoft"`, `"apple"`,
+    /// `"us-fpki-common"`, `"us-dod"`, plus any `--extra-trust-store`
+    /// names). Populated only for stores that produced an error.
+    /// Same error-string taxonomy as `validation_error`.
+    pub per_store_validation_errors: std::collections::BTreeMap<String, String>,
+    /// Provenance breadcrumb — `"compiled_in"` for the build-time
+    /// bundle or `"runtime_override:<path>"` when a runtime
+    /// override is in effect. One entry per store that was
+    /// attempted (compiled or extra).
+    pub trust_store_sources: std::collections::BTreeMap<String, String>,
 }
 
 const DEFAULT_ALPN: &[&[u8]] = &[b"h2", b"http/1.1"];
@@ -245,60 +273,118 @@ fn evaluate_validation(
         return ValidationResult::default();
     }
 
-    // 1. Name match (independent of chain check).
+    // 1. Name match — trust-store-agnostic.
     let leaf = &certificates[0];
     let name_matches = cert_ops::name_matches_sni(&leaf.san, &leaf.subject, sni);
 
-    // 2. Chain validity.
     let end_entity = CertificateDer::from(cert_der[0].clone());
     let intermediates: Vec<CertificateDer<'static>> = cert_der[1..]
         .iter()
         .map(|der| CertificateDer::from(der.clone()))
         .collect();
 
-    let verifier = match build_webpki_verifier() {
-        Some(v) => v,
-        None => {
-            // webpki-roots build failure (rare) — can't probe chain validity.
-            return ValidationResult {
-                chain_valid_to_webpki_roots: None,
-                name_matches_sni: Some(name_matches),
-                validation_error: Some("webpki_verifier_unavailable".to_string()),
-            };
-        }
-    };
-
     let now = UnixTime::now();
     let sni_srv = match ServerName::try_from(sni.to_string()) {
         Ok(s) => s,
-        Err(_) => {
-            // Can't construct ServerName (e.g. numeric IP without brackets).
-            // Fall back to SAN-derived probe name below.
-            ServerName::try_from("invalid.kemist-placeholder.invalid".to_string())
-                .expect("literal placeholder always valid")
-        }
+        Err(_) => ServerName::try_from("invalid.kemist-placeholder.invalid".to_string())
+            .expect("literal placeholder always valid"),
     };
 
-    let first_try = verifier.verify_server_cert(&end_entity, &intermediates, &sni_srv, &[], now);
-
-    // If first-try fails on name only, retry with a SAN-derived name to
-    // isolate chain validity from the name match.
-    let (chain_valid, error) = match &first_try {
-        Ok(_) => (true, None),
-        Err(rustls::Error::InvalidCertificate(CertificateError::NotValidForName)) => {
-            retry_with_san_name(&verifier, &end_entity, &intermediates, &leaf.san, now)
-        }
-        Err(rustls::Error::InvalidCertificate(CertificateError::NotValidForNameContext {
-            ..
-        })) => retry_with_san_name(&verifier, &end_entity, &intermediates, &leaf.san, now),
-        Err(e) => (false, Some(classify_cert_error(e))),
-    };
-
-    ValidationResult {
-        chain_valid_to_webpki_roots: Some(chain_valid),
+    // 2. Multi-store chain validation. Run every loaded store
+    // independently; collect per-store (valid, error) pairs plus
+    // source breadcrumbs.
+    let mut result = ValidationResult {
         name_matches_sni: Some(name_matches),
-        // Spec: only populate validation_error when chain invalid.
-        validation_error: if chain_valid { None } else { error },
+        ..Default::default()
+    };
+
+    let Some(registry) = crate::scanner::trust_stores::registry() else {
+        // Registry not installed (shouldn't happen — main.rs calls
+        // install_registry early). Emit a single diagnostic.
+        result.validation_error = Some("trust_store_registry_not_installed".to_string());
+        return result;
+    };
+
+    for (name, store) in &registry.stores {
+        result.trust_store_sources.insert(
+            name.clone(),
+            store.source.to_breadcrumb(),
+        );
+        let (valid, error) = validate_one_store(
+            name,
+            store,
+            &end_entity,
+            &intermediates,
+            &sni_srv,
+            &leaf.san,
+            now,
+        );
+
+        match name.as_str() {
+            "webpki-roots" => {
+                result.chain_valid_to_webpki_roots = valid;
+                // Legacy single-error field keeps webpki-roots' error
+                // so existing rule engines that read `validation_error`
+                // keep working.
+                if let (Some(false), Some(e)) = (&valid, &error) {
+                    result.validation_error = Some(e.clone());
+                }
+            }
+            "microsoft" => result.chain_valid_to_microsoft_roots = valid,
+            "apple" => result.chain_valid_to_apple_roots = valid,
+            "us-fpki-common" => result.chain_valid_to_us_fpki_common_roots = valid,
+            "us-dod" => result.chain_valid_to_us_dod_roots = valid,
+            _ => {
+                // --extra-trust-store entry.
+                result
+                    .chain_valid_to_custom_roots
+                    .insert(name.clone(), valid);
+            }
+        }
+
+        if let Some(e) = error {
+            result.per_store_validation_errors.insert(name.clone(), e);
+        }
+    }
+
+    result
+}
+
+/// Run chain validation against a single loaded trust store. Returns
+/// `(Option<bool>, Option<String>)` matching the per-store slots in
+/// [`ValidationResult`]: value-level `None` means "could not probe"
+/// (empty bundle, verifier-build failure), `Some(true)` / `Some(false)`
+/// is a definite answer. Error string populates only when
+/// `valid = Some(false)` OR when probing was structurally impossible
+/// (no verifier → reason `trust_store_empty`).
+fn validate_one_store(
+    name: &str,
+    store: &crate::scanner::trust_stores::LoadedStore,
+    end_entity: &CertificateDer<'static>,
+    intermediates: &[CertificateDer<'static>],
+    sni_srv: &ServerName<'static>,
+    san: &[String],
+    now: UnixTime,
+) -> (Option<bool>, Option<String>) {
+    let Some(verifier) = &store.verifier else {
+        return (None, Some("trust_store_empty".to_string()));
+    };
+    let first_try =
+        verifier.verify_server_cert(end_entity, intermediates, sni_srv, &[], now);
+    let _ = name;
+    match &first_try {
+        Ok(_) => (Some(true), None),
+        Err(rustls::Error::InvalidCertificate(CertificateError::NotValidForName))
+        | Err(rustls::Error::InvalidCertificate(
+            CertificateError::NotValidForNameContext { .. },
+        )) => {
+            // Retry with a SAN-derived name to isolate chain validity
+            // from the name-matching concern.
+            let (valid, err) =
+                retry_with_san_name(verifier, end_entity, intermediates, san, now);
+            (Some(valid), err)
+        }
+        Err(e) => (Some(false), Some(classify_cert_error(e))),
     }
 }
 
@@ -354,13 +440,12 @@ fn classify_cert_error(e: &rustls::Error) -> String {
     }
 }
 
-fn build_webpki_verifier() -> Option<std::sync::Arc<WebPkiServerVerifier>> {
-    let mut roots = RootCertStore::empty();
-    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    WebPkiServerVerifier::builder(std::sync::Arc::new(roots))
-        .build()
-        .ok()
-}
+// `build_webpki_verifier` was the pre-S1 single-store entry point.
+// Multi-store validation in [`evaluate_validation`] now drives
+// verifier construction via
+// [`crate::scanner::trust_stores::build_default_registry`] — that
+// registry owns the webpki-roots verifier plus the four additional
+// bundles.
 
 fn to_model_version(v: rustls::ProtocolVersion) -> Option<TlsVersion> {
     // rustls may surface TLS 1.0/1.1 if anyone ever asks, but current builds

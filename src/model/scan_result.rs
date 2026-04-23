@@ -927,9 +927,32 @@ pub struct SignatureAlgorithmStructured {
 #[derive(Serialize, Debug, Clone)]
 pub struct Validation {
     pub chain_valid_to_webpki_roots: ObservationBool,
+    pub chain_valid_to_microsoft_roots: ObservationBool,
+    pub chain_valid_to_apple_roots: ObservationBool,
+    pub chain_valid_to_us_fpki_common_roots: ObservationBool,
+    pub chain_valid_to_us_dod_roots: ObservationBool,
+    /// `--extra-trust-store` entries, keyed on the user-supplied
+    /// name. Empty object when no extras were configured. Values
+    /// follow the same three-state ObservationBool semantics as the
+    /// compiled-in stores.
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub chain_valid_to_custom_roots: std::collections::BTreeMap<String, ObservationBool>,
     pub name_matches_sni: ObservationBool,
+    /// Error string from the webpki-roots validation attempt (legacy
+    /// single-store field). `None` when webpki-roots validated cleanly.
+    /// New integrations should consume `per_store_validation_errors`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub validation_error: Option<String>,
+    /// Per-store validation error strings, keyed by canonical store
+    /// name. Populated only for stores whose chain validation
+    /// failed. Empty when every store validated or when no errors
+    /// were produced.
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub per_store_validation_errors: std::collections::BTreeMap<String, String>,
+    /// Provenance breadcrumb per store — `"compiled_in"` or
+    /// `"runtime_override:<path>"`. One entry per store attempted.
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub trust_store_sources: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Serialize, Debug, Clone)]

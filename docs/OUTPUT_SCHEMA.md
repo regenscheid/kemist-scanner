@@ -576,28 +576,53 @@ searched + absent — canonical "not revoked"), or `null`
 5 MB body, 10 s per-URL timeout. Per-scan cache keyed on URL.
 
 ### `validation`
-Trust observations — **three independent fields**, deliberately not
-collapsed into a single bool.
+Trust observations — **multi-store chain validation** plus a
+trust-store-agnostic name-match check. Every compiled-in store
+produces its own `ObservationBool`; `--extra-trust-store` entries
+land in `chain_valid_to_custom_roots`.
 
 ```
 {
-  chain_valid_to_webpki_roots: ObservationBool,
-  name_matches_sni: ObservationBool,
-  validation_error?: string
+  chain_valid_to_webpki_roots:         ObservationBool,
+  chain_valid_to_microsoft_roots:      ObservationBool,
+  chain_valid_to_apple_roots:          ObservationBool,
+  chain_valid_to_us_fpki_common_roots: ObservationBool,
+  chain_valid_to_us_dod_roots:         ObservationBool,
+  chain_valid_to_custom_roots?:        { <name>: ObservationBool, ... },
+  name_matches_sni:                    ObservationBool,
+  validation_error?:                   string,                         // legacy — webpki-roots error
+  per_store_validation_errors?:        { <name>: string, ... },
+  trust_store_sources?:                { <name>: string, ... }          // compiled_in | runtime_override:<path>
 }
 ```
 
-| Value | Meaning |
+| Field | Source / semantics |
 |---|---|
-| `chain_valid_to_webpki_roots.value` | Did webpki (against Mozilla roots) validate the chain with the SNI name? Ignores name failures when retried with a SAN-derived name. |
-| `name_matches_sni.value` | Does the leaf's SAN/CN match the SNI sent, using RFC 6125 wildcard semantics? Independent check — runs even when chain is invalid. |
-| `validation_error` | Canonical error string when chain is invalid. Only populated when `chain_valid_to_webpki_roots.value == false`. |
+| `chain_valid_to_webpki_roots` | Mozilla root store via the `webpki-roots` crate. |
+| `chain_valid_to_microsoft_roots` | `data/trust_stores/microsoft_ccadb.pem`. Microsoft CCADB export (placeholder in current snapshot — supply via `--trust-store microsoft:<path>`). |
+| `chain_valid_to_apple_roots` | `data/trust_stores/apple_pki.pem`. Apple Root CA G2 + G3. |
+| `chain_valid_to_us_fpki_common_roots` | `data/trust_stores/us_fpki_common.pem`. Federal Common Policy CA G2 + 11 SIA-discovered agency intermediates (DigiCert Federal SSP, Entrust Federal Root, Federal Bridge CA G4, State Dept AD Root, Treasury Root, WidePoint ORC). |
+| `chain_valid_to_us_dod_roots` | `data/trust_stores/us_dod.pem`. DoD PKI (placeholder in current snapshot). |
+| `chain_valid_to_custom_roots.<name>` | Per-entry `--extra-trust-store` bundle. |
+| `name_matches_sni` | Store-agnostic SAN/CN match per RFC 6125. |
+| `validation_error` | **Legacy.** Error from webpki-roots validation only, kept for backwards-compatible consumers. New integrations should consume `per_store_validation_errors`. |
+| `per_store_validation_errors.<name>` | Per-store error category string. Populated only for stores whose chain validation failed. Same taxonomy as `validation_error`. |
+| `trust_store_sources.<name>` | Provenance: `"compiled_in"` (default) or `"runtime_override:<path>"` when a `--trust-store <name>:<path>` override is in effect. |
 
-Canonical `validation_error` strings:
+Canonical per-store error strings:
 `"expired"`, `"not_valid_yet"`, `"untrusted_root"`, `"revoked"`,
 `"bad_signature"`, `"bad_encoding"`, `"unsupported_signature_algorithm"`,
 `"unhandled_critical_extension"`, `"unknown_revocation_status"`,
-`"name_mismatch"`, `"other:<rustls_variant>"`.
+`"name_mismatch"`, `"trust_store_empty"` (placeholder / empty
+bundle — see `--trust-store`), `"other:<rustls_variant>"`.
+
+**Placeholder bundles.** Stores shipping as empty placeholder PEM
+(Microsoft + DoD today) render as
+`{value: null, method: "not_probed", reason: "trust_store_empty"}`
+with `per_store_validation_errors.<name>: "trust_store_empty"`.
+Supply a current bundle via `--trust-store <name>:<path>` to
+replace; see [data/trust_stores/README.md](../data/trust_stores/README.md)
+for refresh commands.
 
 ### `http` (optional)
 Present iff `--enable-http-checks` was passed AND the HTTP probe

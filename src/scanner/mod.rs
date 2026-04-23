@@ -13,6 +13,7 @@ pub mod probe;
 pub mod raw;
 pub mod runner;
 pub mod sni;
+pub mod trust_stores;
 
 // Backwards-compatible alias. The entire OpenSSL subsystem lives
 // under `backends::openssl`; this re-export keeps

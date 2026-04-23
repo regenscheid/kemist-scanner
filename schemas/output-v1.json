@@ -358,11 +358,40 @@
     },
     "validation": {
       "type": "object",
-      "required": ["chain_valid_to_webpki_roots", "name_matches_sni"],
+      "required": [
+        "chain_valid_to_webpki_roots",
+        "chain_valid_to_microsoft_roots",
+        "chain_valid_to_apple_roots",
+        "chain_valid_to_us_fpki_common_roots",
+        "chain_valid_to_us_dod_roots",
+        "name_matches_sni"
+      ],
       "properties": {
         "chain_valid_to_webpki_roots": { "$ref": "#/$defs/observationBool" },
+        "chain_valid_to_microsoft_roots": { "$ref": "#/$defs/observationBool" },
+        "chain_valid_to_apple_roots": { "$ref": "#/$defs/observationBool" },
+        "chain_valid_to_us_fpki_common_roots": { "$ref": "#/$defs/observationBool" },
+        "chain_valid_to_us_dod_roots": { "$ref": "#/$defs/observationBool" },
+        "chain_valid_to_custom_roots": {
+          "type": "object",
+          "description": "--extra-trust-store entries keyed by user-supplied name. Each value is a three-state observationBool under the same semantics as the compiled-in stores.",
+          "additionalProperties": { "$ref": "#/$defs/observationBool" }
+        },
         "name_matches_sni": { "$ref": "#/$defs/observationBool" },
-        "validation_error": { "type": ["string", "null"] }
+        "validation_error": { "type": ["string", "null"] },
+        "per_store_validation_errors": {
+          "type": "object",
+          "description": "Per-store error strings — populated only for stores whose chain-validation attempt failed. Keys are canonical store names.",
+          "additionalProperties": { "type": "string" }
+        },
+        "trust_store_sources": {
+          "type": "object",
+          "description": "Provenance per trust store: `compiled_in` or `runtime_override:<path>`. One entry per store attempted.",
+          "additionalProperties": {
+            "type": "string",
+            "pattern": "^(compiled_in|runtime_override:.+)$"
+          }
+        }
       },
       "additionalProperties": false
     },

@@ -1066,16 +1066,53 @@ fn build_sni_behavior(results: &ScanResults) -> SniBehavior {
 
 fn build_validation(results: &ScanResults) -> Validation {
     let v = &results.validation;
-    Validation {
-        chain_valid_to_webpki_roots: match v.chain_valid_to_webpki_roots {
+
+    // Helper: map Option<bool> from a store slot to an
+    // ObservationBool. `None` at this layer means the probe couldn't
+    // run — either the characterization handshake failed, or the
+    // trust store was empty (placeholder PEM / empty override). The
+    // `per_store_validation_errors` map carries the specific reason;
+    // we surface it in the ObservationBool's `reason` when present.
+    let to_obs = |store_name: &str, slot: Option<bool>| -> ObservationBool {
+        match slot {
             Some(b) => ObservationBool::probe(b),
-            None => ObservationBool::not_probed("characterization_handshake_failed"),
-        },
+            None => {
+                let reason = v
+                    .per_store_validation_errors
+                    .get(store_name)
+                    .cloned()
+                    .unwrap_or_else(|| "characterization_handshake_failed".to_string());
+                ObservationBool::not_probed(&reason)
+            }
+        }
+    };
+
+    let custom_roots: std::collections::BTreeMap<String, ObservationBool> = v
+        .chain_valid_to_custom_roots
+        .iter()
+        .map(|(name, slot)| (name.clone(), to_obs(name, *slot)))
+        .collect();
+
+    Validation {
+        chain_valid_to_webpki_roots: to_obs("webpki-roots", v.chain_valid_to_webpki_roots),
+        chain_valid_to_microsoft_roots: to_obs(
+            "microsoft",
+            v.chain_valid_to_microsoft_roots,
+        ),
+        chain_valid_to_apple_roots: to_obs("apple", v.chain_valid_to_apple_roots),
+        chain_valid_to_us_fpki_common_roots: to_obs(
+            "us-fpki-common",
+            v.chain_valid_to_us_fpki_common_roots,
+        ),
+        chain_valid_to_us_dod_roots: to_obs("us-dod", v.chain_valid_to_us_dod_roots),
+        chain_valid_to_custom_roots: custom_roots,
         name_matches_sni: match v.name_matches_sni {
             Some(b) => ObservationBool::probe(b),
             None => ObservationBool::not_probed("characterization_handshake_failed"),
         },
         validation_error: v.validation_error.clone(),
+        per_store_validation_errors: v.per_store_validation_errors.clone(),
+        trust_store_sources: v.trust_store_sources.clone(),
     }
 }
 
