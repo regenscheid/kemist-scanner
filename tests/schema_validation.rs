@@ -356,26 +356,34 @@ fn fully_populated_openssl_observations_match_schema_v1() {
         },
     };
 
-    // Sigalg policy probe. All four constraints populated,
+    // Sigalg policy probe. All five constraints populated,
     // mirroring the cloudflare.com real-scan shape (three complete
     // with distinct selected sigalgs, rsa_pkcs1_only refused).
-    let complete = |sigalg: &str| ConstrainedProbeResult {
+    // ecdsa_only carries a different leaf fingerprint from the
+    // other complete probes to exercise the dual-cert observation.
+    let ecdsa_leaf_fp = "a".repeat(64);
+    let rsa_leaf_fp = "b".repeat(64);
+    let complete = |sigalg: &str, fp: &str| ConstrainedProbeResult {
         outcome: SigalgOutcome::HandshakeComplete,
         selected_sigalg: Some(sigalg.to_string()),
         alert: None,
         method: ScanMethod::Probe,
         reason: None,
+        leaf_fingerprint_sha256: Some(fp.to_string()),
+        leaf_subject_dn: Some("CN=example.com, O=Test, C=US".to_string()),
     };
     let sigalg_policy = SignatureAlgorithmPolicyProbe {
-        sha256_plus_only: complete("ecdsa_secp256r1_sha256"),
-        ecdsa_only: complete("ecdsa_secp256r1_sha256"),
-        rsa_pss_only: complete("rsa_pss_rsae_sha256"),
+        sha256_plus_only: complete("ecdsa_secp256r1_sha256", &ecdsa_leaf_fp),
+        ecdsa_only: complete("ecdsa_secp256r1_sha256", &ecdsa_leaf_fp),
+        rsa_pss_only: complete("rsa_pss_rsae_sha256", &rsa_leaf_fp),
         rsa_pkcs1_only: ConstrainedProbeResult {
             outcome: SigalgOutcome::HandshakeFailure,
             selected_sigalg: None,
             alert: Some("tls_alert_handshake_failure".to_string()),
             method: ScanMethod::Probe,
             reason: Some("tls_alert_handshake_failure".to_string()),
+            leaf_fingerprint_sha256: None,
+            leaf_subject_dn: None,
         },
         eddsa_only: ConstrainedProbeResult {
             outcome: SigalgOutcome::HandshakeFailure,
@@ -383,6 +391,8 @@ fn fully_populated_openssl_observations_match_schema_v1() {
             alert: Some("tls_alert_handshake_failure".to_string()),
             method: ScanMethod::Probe,
             reason: Some("tls_alert_handshake_failure".to_string()),
+            leaf_fingerprint_sha256: None,
+            leaf_subject_dn: None,
         },
     };
 

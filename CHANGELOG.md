@@ -73,6 +73,12 @@ mechanics.
   outcome, selected sigalg on completion, alert category on
   refusal. New `--sigalg-probe-skip=<csv>` CLI flag opts out
   individual constraints.
+- `tls.signature_algorithm_policy_probe.*.leaf_fingerprint_sha256`
+  + `.leaf_subject_dn` — captured after every successful
+  constrained handshake so downstream rule engines can detect
+  dual-cert deployments (e.g. RSA + ECDSA leaves on the same
+  endpoint). Two distinct fingerprints across the five probes is
+  the downstream-comparable signal; the scanner only records.
 
 ### Added — CLI
 

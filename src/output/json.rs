@@ -1397,6 +1397,8 @@ fn build_sigalg_policy(
         alert: None,
         method: Method::NotProbed,
         reason: Some("feature_disabled".to_string()),
+        leaf_fingerprint_sha256: None,
+        leaf_subject_dn: None,
     };
     SignatureAlgorithmPolicyProbe {
         sha256_plus_only: slot(),

@@ -26,7 +26,8 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use openssl::ssl::{HandshakeError, Ssl, SslContext, SslMethod, SslVerifyMode, SslVersion};
+use openssl::ssl::{HandshakeError, Ssl, SslContext, SslMethod, SslRef, SslVerifyMode, SslVersion};
+use sha2::{Digest, Sha256};
 use tracing::{debug, info};
 
 use crate::model::scan_result::{
@@ -176,6 +177,7 @@ async fn run_one(
             alert: None,
             method: Method::Probe,
             reason: None,
+            ..Default::default()
         },
         HandshakeOutcome::NotSupported => {
             let cat = hr.alert.unwrap_or_default();
@@ -186,6 +188,7 @@ async fn run_one(
                 alert,
                 method: Method::Probe,
                 reason: Some(cat),
+                ..Default::default()
             }
         }
         HandshakeOutcome::Error(msg) => {
@@ -267,12 +270,15 @@ pub(crate) fn probe_blocking(
     match ssl.connect(tcp) {
         Ok(stream) => {
             let selected = ske_sig::snapshot(stream.ssl());
+            let (leaf_fingerprint_sha256, leaf_subject_dn) = leaf_observation(stream.ssl());
             ConstrainedProbeResult {
                 outcome: SigalgOutcome::HandshakeComplete,
                 selected_sigalg: selected,
                 alert: None,
                 method: Method::Probe,
                 reason: None,
+                leaf_fingerprint_sha256,
+                leaf_subject_dn,
             }
         }
         Err(HandshakeError::Failure(mid)) => {
@@ -284,6 +290,7 @@ pub(crate) fn probe_blocking(
                 alert,
                 method: Method::Probe,
                 reason: Some(se.category),
+                ..Default::default()
             }
         }
         Err(HandshakeError::SetupFailure(e)) => ConstrainedProbeResult {
@@ -318,6 +325,42 @@ fn classify_failure(category: &str) -> (SigalgOutcome, Option<String>) {
         // can match on the raw string if needed.
         (SigalgOutcome::OtherAlert, Some(category.to_string()))
     }
+}
+
+/// Capture the leaf fingerprint (SHA-256 of DER) and subject DN from
+/// a completed handshake. Returns `(None, None)` when the peer cert
+/// can't be read or its DER can't be extracted — the constrained
+/// probe still completed, so these are observation gaps, not errors.
+///
+/// Formatting matches `CertificateFacts.subject_dn` (x509-parser
+/// `Display`) so downstream correlation against the main cert chain
+/// is a byte-equality check.
+fn leaf_observation(ssl: &SslRef) -> (Option<String>, Option<String>) {
+    let Some(cert) = ssl.peer_certificate() else {
+        return (None, None);
+    };
+    let Ok(der) = cert.to_der() else {
+        return (None, None);
+    };
+    let fingerprint = fingerprint_der(&der);
+    let subject_dn = parse_subject_dn(&der);
+    (Some(fingerprint), subject_dn)
+}
+
+/// Lowercase hex SHA-256 of a DER blob. Matches the fingerprint
+/// format used throughout `certificates.*.fingerprint_sha256`.
+fn fingerprint_der(der: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(der);
+    hex::encode(hasher.finalize())
+}
+
+/// Parse the DN out of the leaf DER via x509-parser so the emitted
+/// string formatting matches `CertificateFacts.subject_dn` exactly.
+fn parse_subject_dn(der: &[u8]) -> Option<String> {
+    use x509_parser::prelude::FromDer;
+    let (_, cert) = x509_parser::certificate::X509Certificate::from_der(der).ok()?;
+    Some(cert.subject().to_string())
 }
 
 fn build_context(sigalgs: &str) -> Result<SslContext, openssl::error::ErrorStack> {
@@ -388,6 +431,26 @@ mod tests {
         let (outcome, alert) = classify_failure("connection_refused");
         assert_eq!(outcome, SigalgOutcome::ConnectionClosed);
         assert_eq!(alert, None);
+    }
+
+    #[test]
+    fn fingerprint_der_emits_64_lowercase_hex_chars() {
+        let der: &[u8] = b"\x30\x82\x00\x03\x02\x01\x00";
+        let fp = fingerprint_der(der);
+        assert_eq!(fp.len(), 64);
+        assert!(fp.chars().all(|c| c.is_ascii_hexdigit()));
+        assert!(fp.chars().all(|c| !c.is_ascii_uppercase()));
+    }
+
+    #[test]
+    fn fingerprint_der_is_deterministic_for_same_input() {
+        let der: &[u8] = b"some_fake_der_bytes";
+        assert_eq!(fingerprint_der(der), fingerprint_der(der));
+    }
+
+    #[test]
+    fn parse_subject_dn_returns_none_on_unparseable_bytes() {
+        assert!(parse_subject_dn(&[0x00, 0x01, 0x02]).is_none());
     }
 
     #[test]

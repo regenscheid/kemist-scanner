@@ -377,10 +377,12 @@ implement them.
 
 ConstrainedProbeResult = {
   outcome: "handshake_complete" | "handshake_failure" | "connection_closed" | "other_alert" | "not_probed",
-  selected_sigalg?: string,        // server's chosen sigalg on complete
-  alert?:           string,        // alert category on refusal
-  method:           Method,
-  reason?:          string
+  selected_sigalg?:         string,   // server's chosen sigalg on complete
+  alert?:                   string,   // alert category on refusal
+  method:                   Method,
+  reason?:                  string,
+  leaf_fingerprint_sha256?: string,   // SHA-256 (lowercase hex) of leaf DER on complete
+  leaf_subject_dn?:         string    // leaf subject DN on complete
 }
 ```
 
@@ -398,6 +400,14 @@ skipped slots emit `method: not_probed, reason: cli_skipped`.
 Rule-engine note: `rsa_pkcs1_only` returning `handshake_failure` is
 the modern-posture "good" signal — the server is refusing PKCS#1
 v1.5 signatures.
+
+**Differential cert-selection observation.** When the handshake
+completes, each constrained probe records `leaf_fingerprint_sha256`
+(SHA-256 of the leaf DER, lowercase hex) and `leaf_subject_dn` (same
+formatting as `certificates.leaf.subject_dn`). ≥2 distinct
+fingerprints across the five probes signal a dual-cert deployment
+(e.g. RSA + ECDSA leaves on one endpoint); the scanner records the
+fingerprints, downstream rule engines compute the comparison.
 
 ### `tls.alpn_probe`
 ```

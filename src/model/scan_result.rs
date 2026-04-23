@@ -252,6 +252,21 @@ pub struct ConstrainedProbeResult {
     /// Human-readable reason for non-probe outcomes.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// SHA-256 fingerprint (lowercase hex) of the leaf certificate
+    /// the server returned under this constraint. Populated only
+    /// when the handshake completed and the leaf cert was readable.
+    /// Two distinct fingerprints across the probe set are the
+    /// downstream signal for a dual-cert deployment (e.g. RSA +
+    /// ECDSA leaves on the same endpoint). The scanner records the
+    /// fingerprints; it does not compute the comparison.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub leaf_fingerprint_sha256: Option<String>,
+    /// Subject DN of the leaf (same formatting as
+    /// `certificates.leaf.subject_dn`). Convenience for downstream
+    /// log correlation; the authoritative identifier is
+    /// `leaf_fingerprint_sha256`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub leaf_subject_dn: Option<String>,
 }
 
 impl Default for ConstrainedProbeResult {
@@ -262,6 +277,8 @@ impl Default for ConstrainedProbeResult {
             alert: None,
             method: Method::NotProbed,
             reason: None,
+            leaf_fingerprint_sha256: None,
+            leaf_subject_dn: None,
         }
     }
 }

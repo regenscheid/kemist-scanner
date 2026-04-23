@@ -952,7 +952,16 @@
         "selected_sigalg": { "type": "string" },
         "alert":           { "type": "string" },
         "method":          { "$ref": "#/$defs/method" },
-        "reason":          { "type": "string" }
+        "reason":          { "type": "string" },
+        "leaf_fingerprint_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "description": "Lowercase hex SHA-256 of the DER of the leaf cert the server returned under this constraint. Populated only when the handshake completed. Two distinct values across the sigalg probe set signal a dual-cert deployment (e.g. RSA + ECDSA leaves)."
+        },
+        "leaf_subject_dn": {
+          "type": "string",
+          "description": "Subject DN of the leaf cert returned under this constraint. Same formatting as `certificates.leaf.subject_dn`. Convenience for log correlation; the authoritative identifier is `leaf_fingerprint_sha256`."
+        }
       },
       "additionalProperties": false
     },
