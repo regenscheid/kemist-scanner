@@ -9,17 +9,19 @@ are, and how to extend it.
 
 | Group | IANA | aws-lc-rs ships | Probe outcome |
 |---|---|---|---|
-| X25519MLKEM768 | 0x11EC | **yes** | `supported: true/false, method: probe` |
-| secp256r1MLKEM768 | 0x11EB | **yes** | same |
-| MLKEM768 (standalone) | 0x0201 | **yes** | same |
-| secp384r1MLKEM1024 | 0x11ED | no | `supported: null, method: not_probed` |
-| MLKEM512 | 0x0200 | no | `not_probed` |
-| MLKEM1024 | 0x0202 | no | `not_probed` |
-| X25519Kyber768Draft00 | 0x6399 | no | `not_probed` (pre-standard) |
+| X25519MLKEM768 | 0x11EC | **yes** | aws-lc-rs probe |
+| secp256r1MLKEM768 | 0x11EB | **yes** | aws-lc-rs probe |
+| MLKEM768 (standalone) | 0x0201 | **yes** | aws-lc-rs probe |
+| secp384r1MLKEM1024 | 0x11ED | no (OpenSSL 3.5) | OpenSSL named-group probe |
+| MLKEM512 | 0x0200 | no (OpenSSL 3.5) | OpenSSL named-group probe |
+| MLKEM1024 | 0x0202 | no (OpenSSL 3.5) | OpenSSL named-group probe |
 
 The aws-lc-rs-exposed set is whatever your build's pinned version
-ships. Check `capabilities.provider_kx_groups` in any emitted record
-to see what was actually in scope for probing.
+ships. Groups aws-lc-rs doesn't ship are filled by the OpenSSL
+named-group probe (see
+[openssl/kx_groups.rs](../src/scanner/openssl/kx_groups.rs)). Check
+`capabilities.probed_kx_groups` in any emitted record to see what
+aws-lc-rs covered directly.
 
 ### Signatures (certificate OID match)
 
@@ -61,7 +63,7 @@ Three paths for probing groups beyond the aws-lc-rs ship set:
 
 NIST-standardized parameter sets land in aws-lc-rs on AWS's release
 cadence. Pinning to a newer aws-lc-rs version picks them up without
-code changes. Check `capabilities.provider_kx_groups` in new builds —
+code changes. Check `capabilities.probed_kx_groups` in new builds —
 any time a group moves from `not_probed` to a real result, that's
 aws-lc-rs catching up.
 

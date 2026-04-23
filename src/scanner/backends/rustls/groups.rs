@@ -6,16 +6,16 @@
 //! specific reason — never `supported: false` without a real probe.
 //!
 //! ## Target list
-//! Hardcoded below per the kemist spec. PR 13 plans to move this to a YAML
-//! config so new groups can be added without a code release. Until then the
-//! defaults cover the groups the spec acceptance criteria exercise:
+//! Hardcoded below per the kemist spec. A future workstream could move this
+//! to a YAML config so new groups can be added without a code release.
+//! Until then the defaults cover the groups the spec acceptance criteria
+//! exercise:
 //!
 //! - Classical: X25519, X448, secp256r1/384r1/521r1
 //! - PQC hybrids: X25519MLKEM768 (0x11EC), SecP256r1MLKEM768 (0x11EB),
 //!   SecP384r1MLKEM1024 (0x11ED)
 //! - Standalone ML-KEM: MLKEM512 (0x0200), MLKEM768 (0x0201), MLKEM1024
 //!   (0x0202)
-//! - Pre-standard: X25519Kyber768Draft00 (0x6399)
 //!
 //! ## Restricted to TLS 1.3
 //! rustls applies `kx_groups` to both TLS 1.2 ECDHE and TLS 1.3 key share,
@@ -25,9 +25,10 @@
 //! classify cleanly as group rejection.
 //!
 //! ## Future: extending probe coverage for un-shipped groups
-//! Groups aws-lc-rs does not expose (`MLKEM512`, `MLKEM1024`, `X448`,
-//! `secp521r1`, `secp384r1MLKEM1024`, `X25519Kyber768Draft00`) currently
-//! emit `not_probed`. Two paths, not mutually exclusive:
+//! Groups aws-lc-rs does not expose are covered by the OpenSSL path in
+//! [`crate::scanner::openssl::kx_groups`] where OpenSSL 3.5 ships them
+//! (X448, secp521r1, MLKEM512/1024, secp384r1MLKEM1024). For any future
+//! codepoints neither backend ships, two paths are available:
 //!
 //! **(a) Raw-ClientHello probing.** Hand-craft a TLS 1.3 ClientHello with
 //! the target codepoint in `key_share` plus a dummy payload — see
@@ -61,8 +62,11 @@ use tokio_rustls::{rustls, TlsConnector};
 use tracing::debug;
 
 use crate::model::errors::ScannerError;
+use crate::scanner::backends::{is_wire_rejection, HandshakeOutcome, TlsBackend};
 
-/// One per-group probe result.
+/// One per-group probe result at a specific TLS version. Same codepoint
+/// may appear twice (once for TLS 1.2 ECDHE, once for TLS 1.3
+/// key_share) for curves that are valid across versions.
 #[derive(Debug, Clone)]
 pub struct GroupProbeResult {
     /// Human-readable name matching rustls's `NamedGroup` Debug output
@@ -70,20 +74,9 @@ pub struct GroupProbeResult {
     pub name: String,
     /// IANA codepoint (e.g. `0x11EC`).
     pub iana_code: u16,
-    pub outcome: GroupProbeOutcome,
-}
-
-#[derive(Debug, Clone)]
-pub enum GroupProbeOutcome {
-    /// Handshake succeeded with this group alone.
-    Supported,
-    /// Server rejected the single-group offer — handshake alert or reset.
-    NotSupported,
-    /// Probe itself failed (TCP timeout, DNS, unexpected error).
-    Error(String),
-    /// Probe not attempted — aws-lc-rs doesn't ship this group at build
-    /// time. Carries a specific reason for downstream consumers.
-    NotProbed(String),
+    /// TLS version this probe targeted.
+    pub version: crate::model::protocol::TlsVersion,
+    pub outcome: HandshakeOutcome,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -105,27 +98,29 @@ pub struct GroupProbeOutput {
 pub fn iana_code_for(name: &str) -> Option<u16> {
     TARGET_GROUPS
         .iter()
-        .find(|(n, _)| *n == name)
-        .map(|(_, code)| *code)
+        .find(|(n, _, _)| *n == name)
+        .map(|(_, code, _)| *code)
 }
 
-const TARGET_GROUPS: &[(&str, u16)] = &[
-    // Classical elliptic curves
-    ("X25519", 0x001d),
-    ("X448", 0x001e),
-    ("secp256r1", 0x0017),
-    ("secp384r1", 0x0018),
-    ("secp521r1", 0x0019),
-    // Standalone ML-KEM (NIST FIPS 203)
-    ("MLKEM512", 0x0200),
-    ("MLKEM768", 0x0201),
-    ("MLKEM1024", 0x0202),
-    // PQC hybrids (IETF TLS WG codepoints)
-    ("secp256r1MLKEM768", 0x11eb),
-    ("X25519MLKEM768", 0x11ec),
-    ("secp384r1MLKEM1024", 0x11ed),
-    // Pre-standard (Cloudflare research codepoint)
-    ("X25519Kyber768Draft00", 0x6399),
+/// `(name, iana_code, tls12_eligible)`. TLS 1.2 eligibility is
+/// per-codepoint: classical ECC curves ride TLS 1.2 ECDHE + TLS 1.3
+/// key_share; standalone ML-KEM and PQC hybrids are defined only at
+/// TLS 1.3, so probing them at 1.2 is a category error.
+const TARGET_GROUPS: &[(&str, u16, bool)] = &[
+    // Classical elliptic curves — valid at TLS 1.2 (ECDHE) and TLS 1.3.
+    ("X25519", 0x001d, true),
+    ("X448", 0x001e, true),
+    ("secp256r1", 0x0017, true),
+    ("secp384r1", 0x0018, true),
+    ("secp521r1", 0x0019, true),
+    // Standalone ML-KEM (NIST FIPS 203) — TLS 1.3 only.
+    ("MLKEM512", 0x0200, false),
+    ("MLKEM768", 0x0201, false),
+    ("MLKEM1024", 0x0202, false),
+    // PQC hybrids (IETF TLS WG codepoints) — TLS 1.3 only.
+    ("secp256r1MLKEM768", 0x11eb, false),
+    ("X25519MLKEM768", 0x11ec, false),
+    ("secp384r1MLKEM1024", 0x11ed, false),
 ];
 
 /// Probe every target group. Respects `per_probe_delay` between
@@ -138,105 +133,140 @@ pub async fn probe_kx_groups(
     handshake_timeout: Duration,
     per_probe_delay: Duration,
 ) -> GroupProbeOutput {
-    // aws-lc-rs ships a subset of NamedGroups. Build a lookup of what's
-    // available at runtime so the probe loop can honestly distinguish
-    // "probed and rejected" from "can't be probed by this build".
-    let available: Vec<&'static dyn SupportedKxGroup> = aws_lc_rs::ALL_KX_GROUPS.to_vec();
+    // Registry-driven per-group probing. Every `TARGET_GROUPS` entry
+    // still appears in the output — codepoints aws-lc-rs doesn't ship
+    // emit `NotProbed` here and are filled in later by the OpenSSL
+    // group probe loop via the JSON merge logic. A follow-up could
+    // push the merge into `BackendRegistry` so this rustls-path loop
+    // skips OpenSSL-routed codepoints instead of emitting NotProbed,
+    // but that requires reshaping the downstream output merger.
+    let registry = crate::scanner::backends::BackendRegistry::new();
+    let ctx = crate::scanner::backends::ProbeContext {
+        target,
+        hostname: hostname.to_string(),
+        connect_timeout,
+        handshake_timeout,
+    };
+    let rustls_group_codes: std::collections::HashSet<u16> = registry
+        .rustls
+        .inventory()
+        .group_codepoints
+        .iter()
+        .copied()
+        .collect();
 
-    let mut results = Vec::with_capacity(TARGET_GROUPS.len());
+    let mut results = Vec::with_capacity(TARGET_GROUPS.len() * 2);
 
-    for (name, iana_code) in TARGET_GROUPS {
-        let matched = available
-            .iter()
-            .find(|g| format!("{:?}", g.name()) == *name)
-            .copied();
+    for (name, iana_code, tls12_eligible) in TARGET_GROUPS {
+        // Every classical ECDHE curve gets probed at both TLS 1.2 and
+        // TLS 1.3 — two handshakes per curve, results tagged with the
+        // version so the JSON emitter can route them into the right
+        // per-version bucket. ML-KEM / PQC hybrids are TLS 1.3 only;
+        // their TLS 1.2 slot renders as `not_applicable` in the
+        // downstream merge rather than a real probe.
+        let mut versions = vec![crate::model::protocol::TlsVersion::Tls13];
+        if *tls12_eligible {
+            versions.insert(0, crate::model::protocol::TlsVersion::Tls12);
+        }
 
-        let outcome = match matched {
-            Some(group) => {
-                probe_single_group(target, hostname, group, connect_timeout, handshake_timeout)
-                    .await
-            }
-            None => {
+        for version in versions {
+            let outcome = if rustls_group_codes.contains(iana_code) {
+                let constraint = crate::scanner::backends::HandshakeConstraint::single_group_at(
+                    *iana_code, version,
+                );
+                match registry.rustls.handshake(constraint, &ctx).await {
+                    Ok(r) => r.outcome,
+                    Err(u) => {
+                        HandshakeOutcome::Error(format!("unsatisfiable_constraint:{}", u.reason))
+                    }
+                }
+            } else {
                 debug!("group {} not exposed by aws-lc-rs, skipping probe", name);
-                GroupProbeOutcome::NotProbed(format!(
-                    "aws_lc_rs_no_{}_support",
-                    name.to_lowercase()
-                ))
+                HandshakeOutcome::NotProbed(format!("aws_lc_rs_no_{}_support", name.to_lowercase()))
+            };
+
+            results.push(GroupProbeResult {
+                name: (*name).to_string(),
+                iana_code: *iana_code,
+                version,
+                outcome,
+            });
+
+            if !per_probe_delay.is_zero()
+                && !matches!(
+                    results.last().unwrap().outcome,
+                    HandshakeOutcome::NotProbed(_)
+                )
+            {
+                tokio::time::sleep(per_probe_delay).await;
             }
-        };
-
-        results.push(GroupProbeResult {
-            name: (*name).to_string(),
-            iana_code: *iana_code,
-            outcome,
-        });
-
-        if !per_probe_delay.is_zero()
-            && !matches!(
-                results.last().unwrap().outcome,
-                GroupProbeOutcome::NotProbed(_)
-            )
-        {
-            tokio::time::sleep(per_probe_delay).await;
         }
     }
 
     GroupProbeOutput { results }
 }
 
-async fn probe_single_group(
+pub(crate) async fn probe_single_group(
     target: SocketAddr,
     hostname: &str,
     group: &'static dyn SupportedKxGroup,
+    version: crate::model::protocol::TlsVersion,
     connect_timeout: Duration,
     handshake_timeout: Duration,
-) -> GroupProbeOutcome {
+) -> HandshakeOutcome {
     let mut provider = aws_lc_rs::default_provider();
     provider.kx_groups = vec![group];
 
+    let proto = match version {
+        crate::model::protocol::TlsVersion::Tls12 => &rustls::version::TLS12,
+        crate::model::protocol::TlsVersion::Tls13 => &rustls::version::TLS13,
+        other => {
+            return HandshakeOutcome::Error(format!(
+                "rustls_group_probe_version_out_of_scope:{:?}",
+                other
+            ));
+        }
+    };
+
     let config = match rustls::ClientConfig::builder_with_provider(Arc::new(provider))
-        .with_protocol_versions(&[&rustls::version::TLS13])
+        .with_protocol_versions(&[proto])
     {
         Ok(b) => b
             .dangerous()
             .with_custom_certificate_verifier(Arc::new(PermissiveVerifier))
             .with_no_client_auth(),
-        Err(e) => return GroupProbeOutcome::Error(format!("config_builder:{e}")),
+        Err(e) => return HandshakeOutcome::Error(format!("config_builder:{e}")),
     };
 
     let connector = TlsConnector::from(Arc::new(config));
 
     let tcp = match timeout(connect_timeout, TcpStream::connect(&target)).await {
-        Err(_) => return GroupProbeOutcome::Error("tcp_connect_timeout".to_string()),
+        Err(_) => return HandshakeOutcome::Error("tcp_connect_timeout".to_string()),
         Ok(Err(e)) => {
             let err = ScannerError::from_io("tcp_connect", e);
-            return GroupProbeOutcome::Error(err.category);
+            return HandshakeOutcome::Error(err.category);
         }
         Ok(Ok(s)) => s,
     };
 
     let domain = match ServerName::try_from(hostname.to_string()) {
         Ok(d) => d,
-        Err(_) => return GroupProbeOutcome::Error(format!("invalid_sni:{hostname}")),
+        Err(_) => return HandshakeOutcome::Error(format!("invalid_sni:{hostname}")),
     };
 
     match timeout(handshake_timeout, connector.connect(domain, tcp)).await {
-        Err(_) => GroupProbeOutcome::Error("handshake_timeout".to_string()),
-        Ok(Ok(_)) => GroupProbeOutcome::Supported,
+        Err(_) => HandshakeOutcome::Error("handshake_timeout".to_string()),
+        Ok(Ok(_)) => HandshakeOutcome::Supported,
         Ok(Err(e)) => classify_probe_error(e),
     }
 }
 
-fn classify_probe_error(e: std::io::Error) -> GroupProbeOutcome {
+fn classify_probe_error(e: std::io::Error) -> HandshakeOutcome {
     let scanner_err = ScannerError::from_io("handshake", e);
-    let is_rejection = scanner_err.category.starts_with("tls_alert_")
-        || scanner_err.category == "connection_refused";
-    if is_rejection {
-        GroupProbeOutcome::NotSupported
+    if is_wire_rejection(&scanner_err) {
+        HandshakeOutcome::NotSupported
     } else {
-        // Preserve the context for diagnosis; see the matching
-        // comment in `ciphers::classify_probe_error`.
-        GroupProbeOutcome::Error(format!("{}: {}", scanner_err.category, scanner_err.context))
+        HandshakeOutcome::Error(format!("{}: {}", scanner_err.category, scanner_err.context))
     }
 }
 

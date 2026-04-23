@@ -35,7 +35,7 @@ use foreign_types::ForeignTypeRef;
 use openssl::ssl::{HandshakeError, Ssl, SslContext, SslMethod, SslVerifyMode, SslVersion};
 use tracing::{debug, info};
 
-use crate::scanner::openssl::alerts;
+use super::alerts;
 
 // Control codes from `<openssl/ssl.h>`. Kept as literals rather than
 // plumbed through openssl-sys because that crate doesn't re-export the

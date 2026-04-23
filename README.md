@@ -2,286 +2,190 @@
 
 A TLS + PQC observation scanner that records what servers support and emits structured JSON for downstream rule engines.
 
-**kemist** is a pure sensor — it faithfully records TLS configuration, PQC key agreement support, and certificate details without producing compliance verdicts, grades, or pass/fail judgments. Rule evaluation belongs in separate downstream projects that consume kemist's JSON output.
+**kemist** is a pure sensor. It faithfully records TLS configuration, PQC key-agreement support, and certificate details without producing compliance verdicts, grades, or pass/fail judgments. Rule evaluation belongs in separate downstream projects that consume kemist's JSON output.
 
 Forked from [shyuan/tlsferret](https://github.com/shyuan/tlsferret). Retains dual MIT / Apache-2.0 licensing.
 
-## 🚀 Features
+## What kemist observes
 
-### Protocol Support
-- **Complete SSL/TLS Coverage**: SSLv2, SSLv3, TLS 1.0, TLS 1.1, TLS 1.2, TLS 1.3
-- **Dual TLS Engine**: rustls for modern protocols + native-tls for legacy support
-- **Post-Quantum Cryptography**: ML-KEM support via aws-lc-rs
-- **IPv4 and IPv6**: Full dual-stack support with address family selection
+### Protocol versions
+SSLv2, SSLv3, TLS 1.0, TLS 1.1, TLS 1.2, TLS 1.3 — one probe per version. Each entry reports `offered: true | false | null` plus the method that produced it.
 
-### STARTTLS Support
-TLSferret supports STARTTLS for the following protocols:
-- **SMTP** - Email submission (port 587, 25)
-- **IMAP** - Email retrieval (port 143)
-- **POP3** - Email retrieval (port 110)
-- **FTP** - File transfer (port 21)
-- **LDAP** - Directory services (port 389)
-- **XMPP** - Instant messaging (port 5222)
-- **PostgreSQL** - Database (port 5432)
-- **MySQL** - Database (port 3306)
+### Cipher suites (40 codepoints probed)
+- **Modern AEAD / ECDHE** (9): via rustls + aws-lc-rs
+- **Legacy RSA-kex, CBC, RC4, 3DES, NULL, anon-DH, PSK family, Camellia, SEED, ARIA, static DH/ECDH** (31): via vendored OpenSSL 3.5 (RSA / ECDH static-cert suites via raw-socket ClientHello where OpenSSL 3.x no longer drives them)
 
-### Security Analysis
-- **Vulnerability Detection**: Heartbleed (CVE-2014-0160), CRIME, TLS compression
-- **Downgrade Protection**: TLS Fallback SCSV (RFC 7507) testing
-- **Renegotiation Security**: RFC 5746 secure renegotiation analysis
-- **Certificate Validation**: Comprehensive X.509 certificate chain analysis
-- **Cipher Strength Assessment**: Security grading of cipher suites and key exchange
+Each probe is a separate handshake against the target. Output carries `provider: "aws_lc_rs" | "openssl"` attribution per codepoint.
 
-### Certificate Analysis
-- **X.509 Parsing**: Complete certificate chain analysis
-- **Security Assessment**: Weak keys, deprecated algorithms, expiry validation
-- **Extensions**: Subject Alternative Names (SAN), key usage analysis
-- **Fingerprinting**: SHA256 and SHA1 certificate fingerprints
-- **Trust Chain**: Full certificate chain verification and analysis
+### Key-exchange groups (16 codepoints)
+Classical (X25519, secp256r1/384r1/521r1, X448), FFDHE 2048-8192, standalone ML-KEM (512/768/1024), PQC hybrids (X25519MLKEM768, secp256r1MLKEM768, secp384r1MLKEM1024).
 
-### Output & Integration
-- **Multiple Formats**: Human-readable text, JSON, XML
-- **Colored Output**: Security-graded color coding for easy assessment
-- **File Export**: Save scan results for compliance and reporting
-- **Detailed Logging**: Configurable verbosity levels for debugging
+### Post-handshake observations
+- TLS_FALLBACK_SCSV (RFC 7507) enforcement
+- Client-initiated renegotiation behavior (RFC 5246 alert classification)
+- CertificateRequest content (certificate types, signature algorithms, CA DNs, OID filters)
+- TLS 1.3 EncryptedExtensions (record_size_limit per RFC 8449, compress_certificate per RFC 8879)
+- Session resumption — TLS 1.2 tickets + rotation, TLS 1.3 PSK resumption + 0-RTT
+- Signature-algorithm policy (four constrained handshakes)
+- DH parameter capture (classification against RFC 7919) + SKE signature algorithm
 
-## 🛠️ Installation
+### Byte-level extension observations
+Extended Master Secret, secure renegotiation, OCSP stapling, SCT delivery path, Encrypt-then-MAC, heartbeat extension presence, compression, TLS 1.3 downgrade sentinel, SNI behavior.
 
-### 📦 Pre-compiled Binaries (Recommended)
+### Active vulnerability / misconfiguration probes
+- Heartbleed (CVE-2014-0160) via the pre-handshake heartbeat technique
+- SNI omission comparison (IP-literal handshake vs SNI-bearing)
+- Chain validation to webpki-roots
 
-Download the latest release for your platform from the [Releases page](https://github.com/shyuan/tlsferret/releases):
+### HTTP-layer observations (optional, `--enable-http-checks`)
+HSTS header (raw value + parsed directives), `security.txt`, static preload-list membership.
 
-#### Linux
-```bash
-# x86_64
-curl -L https://github.com/shyuan/tlsferret/releases/latest/download/tlsferret-v0.1.0-x86_64-unknown-linux-gnu.tar.gz | tar xz
-./tlsferret --help
-```
+Full catalog in [docs/CHECKS.md](docs/CHECKS.md).
 
-#### macOS
-```bash
-# Intel Mac
-curl -L https://github.com/shyuan/tlsferret/releases/latest/download/tlsferret-v0.1.0-x86_64-apple-darwin.tar.gz | tar xz
+## Installation
 
-# Apple Silicon (M1/M2)
-curl -L https://github.com/shyuan/tlsferret/releases/latest/download/tlsferret-v0.1.0-aarch64-apple-darwin.tar.gz | tar xz
-```
-
-#### Windows
-Download `tlsferret-v0.1.0-x86_64-pc-windows-msvc.zip` from the releases page and extract.
-
-### 🔧 From Source
-
-#### Prerequisites
-- Rust 1.70+ and Cargo
+### From source
+Prerequisite: Rust toolchain (recent stable). OpenSSL is vendored via `openssl-src`; no system `libssl` required at build or runtime.
 
 ```bash
-git clone https://github.com/shyuan/tlsferret.git
-cd tlsferret
+git clone https://github.com/regenscheid/kemist-scanner.git
+cd kemist-scanner
 cargo build --release
 ```
 
-The binary will be available at `target/release/tlsferret`
+Binary at `target/release/kemist`.
 
-## 📖 Usage
+### Cargo features
+- `legacy-probes` *(default on)* — vendored OpenSSL 3.5 LTS for legacy protocol/cipher/group probes. `--no-default-features --features http-checks` skips the OpenSSL dep entirely (saves ~40s build time; drops SSLv3/TLS1.0/1.1 + legacy cipher coverage).
+- `http-checks` *(default on)* — HSTS / security.txt / preload-list probes.
 
-### Basic Scanning
-```bash
-# Basic HTTPS scan
-tlsferret example.com
-
-# Specific port
-tlsferret example.com:8443
-
-# IPv4 only
-tlsferret example.com --ipv4
-
-# IPv6 only
-tlsferret example.com --ipv6
-```
-
-### STARTTLS Scanning
-```bash
-# SMTP STARTTLS
-tlsferret mail.example.com:587 --starttls smtp
-
-# IMAP STARTTLS
-tlsferret mail.example.com:143 --starttls imap
-
-# PostgreSQL SSL
-tlsferret db.example.com:5432 --starttls postgres
-
-# LDAP STARTTLS
-tlsferret ldap.example.com:389 --starttls ldap
-```
-
-### Advanced Options
-```bash
-# Test specific TLS version
-tlsferret example.com --tls-version tls1.3
-
-# Custom SNI hostname
-tlsferret 192.168.1.100 --sni-name example.com
-
-# Disable cipher suite testing (faster)
-tlsferret example.com --no-ciphersuites
-
-# Custom timeout
-tlsferret example.com --timeout 10
-
-# Verbose output
-tlsferret example.com -vv
-```
-
-### Output Formats
-```bash
-# JSON output
-tlsferret example.com --format json
-
-# XML output
-tlsferret example.com --format xml
-
-# Save to file
-tlsferret example.com --output scan-results.json --format json
-
-# Show certificate details
-tlsferret example.com --show-certificate
-```
-
-## 📊 Example Output
+## Usage
 
 ```bash
-$ tlsferret google.com
+# Single target, human-readable text output
+kemist --target example.com:443
 
-SSL/TLS Scanner - Rust Edition
-==============================
-Powered by: rustls 0.23 + aws-lc-rs (post-quantum) | native-tls 0.2 | tlsferret v0.1.0
+# Pretty-printed JSON (one file per target into a directory)
+kemist --target example.com:443 --format json-pretty --output-dir ./scan-results
 
-Testing SSL/TLS on google.com:443
+# NDJSON stream (one record per line; good for piping into jq or rule engines)
+kemist --target example.com:443 --target otherhost.example:443 --format json
 
-SSL/TLS Scan Results
+# Concurrent targets from a file, with HTTP-layer checks on
+kemist --targets-file hosts.txt --concurrency 10 --enable-http-checks \
+       --user-agent-info-url https://example.com/scanner-info
 
-Target:
-  Host: google.com
-  IP: 142.250.77.14:443
-  Port: 443
+# Restrict to one TLS version
+kemist --target example.com:443 --tls-version tls1.3
 
-Supported Protocols:
-  SSLv2      NO
-  SSLv3      NO
-  TLSv1.0    YES
-  TLSv1.1    YES
-  TLSv1.2    YES
-  TLSv1.3    YES
+# Skip specific sigalg policy probes (faster scans)
+kemist --target example.com:443 --sigalg-probe-skip ecdsa_only,rsa_pkcs1_only
 
-TLS Fallback SCSV:
-  Supported
-  ✓ Server protects against downgrade attacks
-
-TLS renegotiation:
-  Secure renegotiation (RFC 5746): Supported
-  Client-initiated renegotiation: Disabled
-    ✓ Server rejects client renegotiation
-  TLS compression: Disabled
-    ✓ Server not vulnerable to CRIME attack
-
-Heartbleed (CVE-2014-0160):
-  Not Vulnerable
-    ✓ Server is protected against Heartbleed attacks
-
-Preferred Cipher:
-  TLS13_AES_256_GCM_SHA384                           TLSv1.3     256 bits
-
-Server Key Exchange Group(s):
-
-  Classical Groups:
-    X25519               ✓
-    X448                 ✓
-    secp256r1            ✓
-    secp384r1            ✓
-    secp521r1            ✓
-
-  Post-Quantum Groups:
-    X25519MLKEM768       ✓
-    SecP256r1MLKEM768    ✓
-    SecP384r1MLKEM1024   ✓
-    MLKEM512             ✓
-    MLKEM768             ✓
-    MLKEM1024            ✓
-
-Certificate Information:
-  Subject:             CN=*.google.com
-  Issuer:              C=US, O=Google Trust Services, CN=WR2
-  Valid:               54 days remaining
-  Public Key:          EC (secp256r1) 256 bits
-  SHA256 Fingerprint:  fa0863a0a9c98317da392dbf4043e5451d8bfceafc87a5ce198b6fe573977f0d
-
-Summary
-
-Good:
-  ✓ TLSv1.2 is enabled
-  ✓ TLSv1.3 is enabled
-
-Warnings:
-  ⚠ TLSv1.0 is enabled (deprecated)
-  ⚠ TLSv1.1 is enabled (deprecated)
+# Include raw OCSP response bytes in output (debugging / re-validation)
+kemist --target example.com:443 --format json-pretty --include-ocsp-raw
 ```
 
-## 🏗️ Architecture
+`kemist --help` lists every flag.
 
-TLSferret uses a hybrid approach combining two TLS libraries:
+## Output
 
-- **rustls 0.23**: Modern TLS 1.2/1.3 with aws-lc-rs crypto provider and post-quantum support
-- **native-tls 0.2**: Legacy SSL3/TLS 1.0/1.1 support for comprehensive coverage
+Three formats: `text` (default, human-readable summary), `json` (compact NDJSON — one line per target), `json-pretty` (indented JSON — one file per target when paired with `--output-dir`).
 
-### Project Structure
+JSON output validates against [`schemas/output-v1.json`](schemas/output-v1.json) (JSON Schema draft 2020-12). Field-by-field reference in [docs/OUTPUT_SCHEMA.md](docs/OUTPUT_SCHEMA.md). Integration patterns for building rule engines on top in [docs/INTEGRATION.md](docs/INTEGRATION.md).
+
+Example record shape (abridged):
+```jsonc
+{
+  "schema_version": "1.0.0",
+  "scanner": { "name": "kemist", "version": "0.3.0" },
+  "capabilities": {
+    "rustls_version": "0.23",
+    "openssl_version": "300.5.5",
+    "probed_cipher_suites": [ /* 40 suite names */ ],
+    "probed_kx_groups": [ /* 16 group names */ ]
+  },
+  "scan": { "target": "example.com:443", "started_at": "...", "duration_ms": 8204 },
+  "tls": {
+    "versions_offered": { "tls1_3": { "offered": true, "method": "probe" }, /* ... */ },
+    "negotiated": { "version": "TLSv1.3", "cipher_suite": "TLS13_AES_128_GCM_SHA256", "group": "X25519" },
+    "cipher_suites": { /* per-suite results, 40 entries across tls1_0..tls1_3 */ },
+    "groups": { /* per-group results, 16 entries */ },
+    "downgrade_signaling": { "fallback_scsv_enforced": { "value": true, "method": "probe" } },
+    "signature_algorithm_policy_probe": { /* 4 constrained handshakes */ },
+    "session_resumption": { /* TLS 1.2 + TLS 1.3 */ },
+    "extensions": { /* 15+ byte-level observations */ }
+  },
+  "certificates": { "leaf": { /* parsed X.509 */ }, "chain": [ /* full chain */ ] },
+  "validation": { "chain_valid_to_webpki_roots": { "value": true, "method": "probe" } },
+  "errors": []
+}
+```
+
+## Design contracts
+
+- **Sensor only.** The word `grade`, `verdict`, `severity`, `weak`, `compliant`, `pass`, or `fail` does not appear in any emitted record. Interpretation is downstream.
+- **Tri-state observations.** Every probe distinguishes `true`, `false`, and `null` (with a `reason`) rather than conflating "not offered" with "couldn't probe." See `docs/OUTPUT_SCHEMA.md` for the full method vocabulary.
+- **Infallible `scan()`.** Individual probe failures land in a target's `errors` array; the scan always returns a schema-v1 record.
+- **Stable JSON schema.** `schema_version` is semver over output shape. Consumers pin on the major.
+
+## Architecture
+
+kemist uses two TLS libraries behind a unified `TlsBackend` trait:
+
+- **rustls 0.23 + aws-lc-rs** — modern TLS 1.2/1.3, classical + PQC named groups.
+- **OpenSSL 3.5 LTS (vendored)** — legacy protocol versions (SSLv3/TLS1.0/1.1), legacy cipher suites, FFDHE groups, post-handshake probes (renegotiation, session resumption, CertificateRequest, TLS 1.3 EncryptedExtensions). Gated by the `legacy-probes` feature (default on).
+
+A `BackendRegistry` routes each probed codepoint to the single backend responsible for it via an explicit per-codepoint priority table. SSLv2, Heartbleed, and static-DH/ECDH cipher suites are handled via raw-socket probes that bypass both libraries. See [docs/BACKENDS.md](docs/BACKENDS.md) for how the abstraction works and how to plug in a third backend.
+
+### Project structure
 ```
 src/
-├── main.rs           # CLI interface and application entry point
-├── scanner.rs        # Core scanning orchestration
-├── legacy_scanner.rs # Legacy protocol support (SSL3, TLS 1.0/1.1)
-├── starttls.rs       # STARTTLS protocol implementations
-├── protocol.rs       # TLS protocol definitions and enums
-├── cipher.rs         # Cipher suite analysis and strength grading
-├── certificate.rs    # X.509 certificate parsing and validation
-└── output.rs         # Result formatting (text, JSON, XML)
+├── main.rs               # CLI entry point + output formatting
+├── lib.rs                # Public API re-exports
+├── model/                # Schema types + TLS enums
+├── output/
+│   └── json.rs           # Schema-v1 JSON emitter
+└── scanner/
+    ├── mod.rs            # SslScanner + scan() orchestration
+    ├── runner.rs         # Multi-target concurrency
+    ├── probe.rs          # Characterization handshake + NegotiatedState
+    ├── cert.rs           # X.509 parsing
+    ├── ciphers.rs        # Rustls per-cipher probe loop
+    ├── groups.rs         # Rustls per-group probe loop
+    ├── hello.rs          # Byte-level ServerHello extension observer
+    ├── http.rs           # HSTS / security.txt / preload list
+    ├── sni.rs            # SNI-omitted comparison probe
+    ├── backends/         # TlsBackend abstraction + concrete backends
+    │   ├── mod.rs        # Trait, HandshakeConstraint, HandshakeResult,
+    │   │                 # BackendInventory, BackendRegistry glue
+    │   ├── registry.rs   # Per-codepoint priority routing
+    │   ├── rustls/       # aws-lc-rs backend
+    │   └── openssl/      # Vendored OpenSSL backend + all legacy
+    │                     # probes, observers, and post-handshake actions
+    └── raw/              # Probes that bypass TLS libraries
+        ├── sslv2.rs      # Hand-crafted SSL 2.0 CLIENT-HELLO
+        ├── heartbleed.rs # CVE-2014-0160 via pre-handshake heartbeat
+        └── static_dh.rs  # Static-DH/ECDH cipher probes (dropped in OpenSSL 3.x)
 ```
 
-## 🔧 Development
+## Development
 
-### Building from Source
 ```bash
-# Debug build
-cargo build
-
-# Release build with optimizations
-cargo build --release
-
-# Run tests
-cargo test
-
-# Run with verbose logging
-RUST_LOG=tlsferret=debug cargo run -- example.com
+cargo build                              # debug build
+cargo build --release                    # release
+cargo test                               # all tests
+cargo build --no-default-features --features http-checks   # no-OpenSSL build
+RUST_LOG=kemist=debug cargo run --release -- --target example.com:443
 ```
 
-### Contributing
-Contributions are welcome! Areas for enhancement:
-- Additional STARTTLS protocol support
-- Enhanced cipher suite individual testing
-- More vulnerability detection
-- Performance optimizations
-- Additional output formats
+## License
 
-## 📄 License
-
-This project is licensed under either of:
+Dual-licensed under your choice of:
 - MIT License ([LICENSE-MIT](LICENSE-MIT))
 - Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
 
-at your option.
+## Acknowledgments
 
-## 🙏 Acknowledgments
-
-- Inspired by [rbsec/sslscan](https://github.com/rbsec/sslscan)
-- Built with [rustls](https://github.com/rustls/rustls) and [native-tls](https://github.com/sfackler/rust-native-tls)
-- Powered by [aws-lc-rs](https://github.com/aws/aws-lc-rs) for post-quantum cryptography
+- Forked from [shyuan/tlsferret](https://github.com/shyuan/tlsferret), inspired by [rbsec/sslscan](https://github.com/rbsec/sslscan)
+- Built on [rustls](https://github.com/rustls/rustls) with the [aws-lc-rs](https://github.com/aws/aws-lc-rs) crypto provider for post-quantum support, plus vendored [OpenSSL 3.5 LTS](https://www.openssl.org/) for legacy coverage
+- Heartbleed probe technique adapted from [testssl.sh](https://github.com/testssl/testssl.sh)

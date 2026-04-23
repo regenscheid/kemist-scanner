@@ -44,9 +44,12 @@ pub struct FallbackScsvResult {
     pub reason: String,
 }
 
-/// Run the SCSV enforcement probe against a single target. Uses two
-/// blocking handshakes (one characterization + one probe), each wrapped
-/// in `spawn_blocking`.
+/// Run the SCSV enforcement probe against a single target. Composes
+/// two `OpensslBackend::handshake()` calls — one characterization
+/// (wide version range, no pins) followed by one SCSV-flagged downgrade
+/// probe. Interpretation (`classify_probe_outcome`) stays in this module
+/// because it's policy about what RFC 7507 compliance looks like, not
+/// backend-specific handshake plumbing.
 pub async fn probe(
     target: SocketAddr,
     hostname: &str,
@@ -55,33 +58,60 @@ pub async fn probe(
 ) -> FallbackScsvResult {
     info!("OpenSSL TLS_FALLBACK_SCSV probe");
 
-    // Characterize: what's the server's maximum protocol version?
-    let hostname_owned = hostname.to_string();
-    let server_max = tokio::task::spawn_blocking(move || {
-        characterize_max_version_blocking(
-            target,
-            &hostname_owned,
-            connect_timeout,
-            handshake_timeout,
-        )
-    })
-    .await
-    .unwrap_or(None);
+    use crate::model::protocol::TlsVersion;
+    use crate::scanner::backends::{
+        BackendRegistry, HandshakeConstraint, HandshakeOutcome, ProbeContext, TlsBackend,
+    };
+    let registry = BackendRegistry::new();
+    let ctx = ProbeContext {
+        target,
+        hostname: hostname.to_string(),
+        connect_timeout,
+        handshake_timeout,
+    };
 
-    let server_max = match server_max {
-        Some(v) => v,
-        None => {
+    // Step 1: characterize — let the server pick its max version.
+    let characterize = HandshakeConstraint {
+        version_range: Some((TlsVersion::Tls10, TlsVersion::Tls13)),
+        seclevel_zero: true,
+        ..HandshakeConstraint::default()
+    };
+    let chr = match registry.openssl.handshake(characterize, &ctx).await {
+        Ok(r) => r,
+        Err(u) => {
             return FallbackScsvResult {
                 enforced: None,
-                reason: "characterization_handshake_failed".to_string(),
+                reason: format!("characterization_unsatisfiable:{}", u.reason),
             };
         }
+    };
+    let Some(server_max_tls) = chr.negotiated.as_ref().and_then(|n| n.version) else {
+        return FallbackScsvResult {
+            enforced: None,
+            reason: "characterization_handshake_failed".to_string(),
+        };
+    };
+    use crate::scanner::backends::openssl::{ssl_to_tls_version, tls_to_ssl_version};
+    let Some(server_max) = tls_to_ssl_version(server_max_tls) else {
+        return FallbackScsvResult {
+            enforced: None,
+            reason: format!("characterization_version_out_of_scope:{:?}", server_max_tls),
+        };
     };
 
     let Some(downgrade_target) = one_version_below(server_max) else {
         return FallbackScsvResult {
             enforced: None,
             reason: "no_downgrade_possible".to_string(),
+        };
+    };
+    let Some(downgrade_target_tls) = ssl_to_tls_version(downgrade_target) else {
+        return FallbackScsvResult {
+            enforced: None,
+            reason: format!(
+                "downgrade_target_version_out_of_scope:{:?}",
+                downgrade_target
+            ),
         };
     };
 
@@ -91,24 +121,35 @@ pub async fn probe(
         "ffdhe_scsv probe"
     );
 
-    let hostname_owned2 = hostname.to_string();
-    let probe_outcome = tokio::task::spawn_blocking(move || {
-        probe_scsv_blocking(
-            target,
-            &hostname_owned2,
-            downgrade_target,
-            connect_timeout,
-            handshake_timeout,
-        )
-    })
-    .await
-    .unwrap_or_else(|e| ProbeOutcome::Error(format!("spawn_blocking_panic: {e}")));
+    // Step 2: downgrade probe with SCSV bit set.
+    let scsv_constraint = HandshakeConstraint {
+        version_range: Some((TlsVersion::Tls10, downgrade_target_tls)),
+        send_fallback_scsv: true,
+        seclevel_zero: true,
+        ..HandshakeConstraint::default()
+    };
+    let probe_outcome = match registry.openssl.handshake(scsv_constraint, &ctx).await {
+        Ok(r) => match r.outcome {
+            HandshakeOutcome::Supported => ProbeOutcome::HandshakeAccepted,
+            HandshakeOutcome::NotSupported => match r.alert {
+                Some(cat) => ProbeOutcome::Alert(cat),
+                None => ProbeOutcome::Error("rejected_without_alert_category".to_string()),
+            },
+            HandshakeOutcome::Error(msg) => ProbeOutcome::Error(msg),
+            other => ProbeOutcome::Error(format!("unexpected_scsv_outcome:{:?}", other)),
+        },
+        Err(u) => ProbeOutcome::Error(format!("scsv_unsatisfiable:{}", u.reason)),
+    };
 
     classify_probe_outcome(probe_outcome, server_max, downgrade_target)
 }
 
 /// Raw outcome of the inner downgrade probe, pre-interpretation.
-enum ProbeOutcome {
+/// `pub(crate)` so `backends::openssl` can surface these through
+/// `HandshakeResult` when the orchestrator drives the probe via
+/// `handshake(send_fallback_scsv: true)`.
+#[derive(Debug, Clone)]
+pub(crate) enum ProbeOutcome {
     /// Handshake completed at the downgraded version.
     HandshakeAccepted,
     /// Server returned a specific TLS alert category.
@@ -172,8 +213,10 @@ fn classify_probe_outcome(
 
 /// Quick characterization handshake. Returns the negotiated protocol
 /// version or `None` if the handshake failed for any reason. Not a
-/// full-featured probe — purely a max-version sniff.
-fn characterize_max_version_blocking(
+/// full-featured probe — purely a max-version sniff. `pub(crate)` so
+/// `backends::openssl::handshake()` can wrap it for the characterization
+/// constraint shape.
+pub(crate) fn characterize_max_version_blocking(
     target: SocketAddr,
     hostname: &str,
     connect_timeout: Duration,
@@ -200,7 +243,9 @@ fn characterize_max_version_blocking(
     stream.ssl().version2()
 }
 
-fn probe_scsv_blocking(
+/// Synchronous downgrade probe with `SSL_MODE_SEND_FALLBACK_SCSV`.
+/// `pub(crate)` so `backends::openssl::handshake()` can wrap it.
+pub(crate) fn probe_scsv_blocking(
     target: SocketAddr,
     hostname: &str,
     downgrade_target: SslVersion,

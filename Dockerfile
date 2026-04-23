@@ -34,6 +34,13 @@ RUN mkdir src && echo 'fn main() {}' > src/main.rs && \
 COPY build.rs ./
 COPY src ./src
 COPY schemas ./schemas
+# `data/` carries the vendored Chromium HSTS preload snapshot
+# (consumed by build.rs for the compile-time PHF) and the four
+# trust-store PEM bundles that `src/scanner/trust_stores.rs`
+# inlines via `include_bytes!`. Without this COPY the build
+# panics with "failed to read HSTS preload snapshot at
+# data/hsts_preload_list.json".
+COPY data ./data
 # Force cargo to notice the real main.rs and re-link (touches stale
 # fingerprint from the dummy build).
 RUN touch src/main.rs && cargo build --release --locked

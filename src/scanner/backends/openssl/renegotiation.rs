@@ -29,8 +29,8 @@ use foreign_types::ForeignTypeRef;
 use openssl::ssl::{HandshakeError, Ssl, SslContext, SslMethod, SslVerifyMode, SslVersion};
 use tracing::info;
 
+use super::alerts;
 use crate::model::errors::ScannerError;
-use crate::scanner::openssl::alerts;
 
 extern "C" {
     /// Raw FFI — the `openssl` crate at 0.10.73 does not expose

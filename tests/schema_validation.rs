@@ -1,8 +1,8 @@
-//! Validates that a freshly built ScanResult (with every field populated by the
-//! PR 2 conversion layer) conforms to schemas/output-v1.json.
+//! Validates that a freshly built `ScanResult` conforms to
+//! `schemas/output-v1.json`.
 //!
-//! Later PRs add real probe-derived values; this test only guards the shape
-//! contract, which must never regress even when values change.
+//! Probe-derived values change over time; this test only guards the
+//! shape contract, which must never regress.
 
 use chrono::{TimeZone, Utc};
 use kemist::model::errors::ScannerError;
@@ -54,7 +54,6 @@ fn fixture_results() -> ScanResults {
             compression_supported: Some(false),
         },
         heartbeat_echoes_oversized_payload: Some(false),
-        fallback_scsv_accepted: Some(true),
         negotiated: None,
         alpn_offered: vec![],
         validation: kemist::scanner::probe::ValidationResult::default(),
@@ -62,6 +61,14 @@ fn fixture_results() -> ScanResults {
         group_probes: None,
         sni_behavior: None,
         hello_observed: None,
+        hrr_observed: None,
+        sslv2_observation: None,
+        alpn_matrix: None,
+        #[cfg(all(feature = "http-checks", feature = "legacy-probes"))]
+        ocsp_http_fetch: None,
+        #[cfg(feature = "http-checks")]
+        crl_fetch: None,
+        cert_chain_der: Vec::new(),
         http_observations: None,
         #[cfg(feature = "legacy-probes")]
         openssl_observations: None,
@@ -79,6 +86,7 @@ fn fixture_ctx() -> JsonEmitContext {
         completed_at: Utc.with_ymd_and_hms(2026, 4, 17, 14, 0, 8).unwrap(),
         enabled_features: vec![],
         config_paths: vec![],
+        include_ocsp_raw: false,
     }
 }
 
@@ -185,13 +193,19 @@ fn error_category_strings_are_canonical() {
 #[test]
 fn fully_populated_openssl_observations_match_schema_v1() {
     use kemist::model::protocol::TlsVersion;
+    use kemist::model::scan_result::{
+        ConstrainedProbeResult, Method as ScanMethod, ObservationBool, SessionResumption,
+        SigalgOutcome, SignatureAlgorithmPolicyProbe, Tls12Resumption, Tls13Resumption,
+    };
+    use kemist::scanner::backends::HandshakeOutcome;
     use kemist::scanner::openssl::{
-        ciphers::{LegacyCipherProbeOutput, LegacyCipherResult, LegacyProbeOutcome},
+        ciphers::{LegacyCipherProbeOutput, LegacyCipherResult},
         client_auth::{CaDnEntry, ClientAuthRequest, OidFilter},
         dh_params::{DhClassification, DhSnapshot},
         fallback_scsv::FallbackScsvResult,
-        ffdhe::{FfdheOutcome, FfdheProbeOutput, FfdheProbeResult},
+        kx_groups::{KxGroupProbeOutput, KxGroupProbeResult},
         renegotiation::{RenegotiationObservation, RenegotiationVerdict},
+        tls13_extensions::{DelegatedCredentialFacts, Tls13EncryptedExtensions},
         OpensslObservations,
     };
 
@@ -208,7 +222,7 @@ fn fully_populated_openssl_observations_match_schema_v1() {
         classification: DhClassification::Ffdhe2048,
     };
 
-    // Cipher-probe list covering every LegacyProbeOutcome variant and the
+    // Cipher-probe list covering every cipher-side HandshakeOutcome variant and the
     // DHE + SKE-sig observer slots.
     let cipher_probes = LegacyCipherProbeOutput {
         results: vec![
@@ -217,7 +231,7 @@ fn fully_populated_openssl_observations_match_schema_v1() {
                 openssl_name: "AES128-SHA".to_string(),
                 iana_code: 0x002F,
                 version: TlsVersion::Tls12,
-                outcome: LegacyProbeOutcome::Supported,
+                outcome: HandshakeOutcome::Supported,
                 dh_snapshot: None,
                 ske_sig: None,
             },
@@ -226,7 +240,7 @@ fn fully_populated_openssl_observations_match_schema_v1() {
                 openssl_name: "DHE-RSA-AES128-SHA".to_string(),
                 iana_code: 0x0033,
                 version: TlsVersion::Tls12,
-                outcome: LegacyProbeOutcome::Supported,
+                outcome: HandshakeOutcome::Supported,
                 dh_snapshot: Some(dh.clone()),
                 ske_sig: Some("rsa_pkcs1_sha1".to_string()),
             },
@@ -235,7 +249,7 @@ fn fully_populated_openssl_observations_match_schema_v1() {
                 openssl_name: "NULL-SHA".to_string(),
                 iana_code: 0x0002,
                 version: TlsVersion::Tls12,
-                outcome: LegacyProbeOutcome::NotSupported,
+                outcome: HandshakeOutcome::NotSupported,
                 dh_snapshot: None,
                 ske_sig: None,
             },
@@ -244,34 +258,41 @@ fn fully_populated_openssl_observations_match_schema_v1() {
                 openssl_name: "RC4-SHA".to_string(),
                 iana_code: 0x0005,
                 version: TlsVersion::Tls10,
-                outcome: LegacyProbeOutcome::Error("connection_timeout".to_string()),
+                outcome: HandshakeOutcome::Error("connection_timeout".to_string()),
                 dh_snapshot: None,
                 ske_sig: None,
             },
         ],
     };
 
-    // FFDHE probe: one Supported, one NotSupported, one
-    // IgnoredGroupReturnedCustomPrime to exercise the cross-check reason.
-    let ffdhe_probes = FfdheProbeOutput {
+    // Named-group probe: FFDHE rows exercising Supported / NotSupported /
+    // IgnoredGroupReturnedCustomPrime, plus a non-FFDHE row demonstrating
+    // an OpenSSL override of an aws-lc-rs `not_probed` slot.
+    let kx_group_probes = KxGroupProbeOutput {
         results: vec![
-            FfdheProbeResult {
+            KxGroupProbeResult {
                 group_name: "ffdhe2048".to_string(),
                 iana_code: 0x0100,
-                tls12_outcome: FfdheOutcome::Supported,
-                tls13_outcome: FfdheOutcome::NotSupported,
+                tls12_outcome: HandshakeOutcome::Supported,
+                tls13_outcome: HandshakeOutcome::NotSupported,
             },
-            FfdheProbeResult {
+            KxGroupProbeResult {
                 group_name: "ffdhe3072".to_string(),
                 iana_code: 0x0101,
-                tls12_outcome: FfdheOutcome::IgnoredGroupReturnedCustomPrime,
-                tls13_outcome: FfdheOutcome::NotProbed("provider_limit".to_string()),
+                tls12_outcome: HandshakeOutcome::IgnoredGroupReturnedCustomPrime,
+                tls13_outcome: HandshakeOutcome::NotProbed("provider_limit".to_string()),
             },
-            FfdheProbeResult {
+            KxGroupProbeResult {
                 group_name: "ffdhe4096".to_string(),
                 iana_code: 0x0102,
-                tls12_outcome: FfdheOutcome::Error("tls_alert_protocol_version".to_string()),
-                tls13_outcome: FfdheOutcome::NotSupported,
+                tls12_outcome: HandshakeOutcome::Error("tls_alert_protocol_version".to_string()),
+                tls13_outcome: HandshakeOutcome::NotSupported,
+            },
+            KxGroupProbeResult {
+                group_name: "secp521r1".to_string(),
+                iana_code: 0x0019,
+                tls12_outcome: HandshakeOutcome::NotProbed("tls12_not_applicable".to_string()),
+                tls13_outcome: HandshakeOutcome::NotSupported,
             },
         ],
     };
@@ -307,13 +328,148 @@ fn fully_populated_openssl_observations_match_schema_v1() {
         negotiated_version: Some("tls1_3".to_string()),
     };
 
+    // TLS 1.3 EncryptedExtensions + Certificate observations. The DC
+    // slot exercises the RFC 9345 populated shape.
+    let tls13_ee = Tls13EncryptedExtensions {
+        parsed: true,
+        record_size_limit: Some(16385),
+        compress_certificate_algorithms: vec!["zlib".to_string(), "brotli".to_string()],
+        delegated_credential: Some(DelegatedCredentialFacts {
+            valid_time_seconds: 604_800,
+            expected_cert_verify_algorithm_code: 0x0403,
+            expected_cert_verify_algorithm: "ecdsa_secp256r1_sha256".to_string(),
+        }),
+        error: None,
+    };
+
+    // Session resumption. TLS 1.2 fully populated via the two-connection
+    // probe; TLS 1.3 slots deliberately NotProbed to exercise the
+    // documented "pending follow-up" shape.
+    let session_resumption = SessionResumption {
+        tls1_2: Tls12Resumption {
+            session_ticket_issued: ObservationBool::probe(true),
+            ticket_lifetime_hint_secs: Some(7200),
+            session_id_issued: ObservationBool::probe(true),
+            ticket_rotated_across_connections: ObservationBool::probe(true),
+        },
+        tls1_3: Tls13Resumption {
+            new_session_ticket_count: None,
+            ticket_lifetime_secs: Vec::new(),
+            psk_resumption_accepted: ObservationBool::not_probed(
+                "tls13_resumption_probe_not_implemented",
+            ),
+            early_data_accepted: ObservationBool::not_probed("early_data_probe_not_implemented"),
+        },
+    };
+
+    // Sigalg policy probe. All five constraints populated,
+    // mirroring the cloudflare.com real-scan shape (three complete
+    // with distinct selected sigalgs, rsa_pkcs1_only refused).
+    // ecdsa_only carries a different leaf fingerprint from the
+    // other complete probes to exercise the dual-cert observation.
+    let ecdsa_leaf_fp = "a".repeat(64);
+    let rsa_leaf_fp = "b".repeat(64);
+    let complete = |sigalg: &str, fp: &str| ConstrainedProbeResult {
+        outcome: SigalgOutcome::HandshakeComplete,
+        selected_sigalg: Some(sigalg.to_string()),
+        alert: None,
+        method: ScanMethod::Probe,
+        reason: None,
+        leaf_fingerprint_sha256: Some(fp.to_string()),
+        leaf_subject_dn: Some("CN=example.com, O=Test, C=US".to_string()),
+    };
+    let sigalg_policy = SignatureAlgorithmPolicyProbe {
+        sha256_plus_only: complete("ecdsa_secp256r1_sha256", &ecdsa_leaf_fp),
+        ecdsa_only: complete("ecdsa_secp256r1_sha256", &ecdsa_leaf_fp),
+        rsa_pss_only: complete("rsa_pss_rsae_sha256", &rsa_leaf_fp),
+        rsa_pkcs1_only: ConstrainedProbeResult {
+            outcome: SigalgOutcome::HandshakeFailure,
+            selected_sigalg: None,
+            alert: Some("tls_alert_handshake_failure".to_string()),
+            method: ScanMethod::Probe,
+            reason: Some("tls_alert_handshake_failure".to_string()),
+            leaf_fingerprint_sha256: None,
+            leaf_subject_dn: None,
+        },
+        eddsa_only: ConstrainedProbeResult {
+            outcome: SigalgOutcome::HandshakeFailure,
+            selected_sigalg: None,
+            alert: Some("tls_alert_handshake_failure".to_string()),
+            method: ScanMethod::Probe,
+            reason: Some("tls_alert_handshake_failure".to_string()),
+            leaf_fingerprint_sha256: None,
+            leaf_subject_dn: None,
+        },
+    };
+
+    // Ephemeral key reuse observation — DHE reused, ECDHE not
+    // reused. Mirrors a realistic mixed signal the fixture emits to
+    // exercise both populated branches.
+    let ephemeral_key_reuse = kemist::model::scan_result::EphemeralKeyReuseObservation {
+        dhe_public_reused_across_connections: ObservationBool::probe(true),
+        ecdhe_public_reused_across_connections: ObservationBool::probe(false),
+        dhe_suite_probed: Some("TLS_DHE_RSA_WITH_AES_128_GCM_SHA256".to_string()),
+        ecdhe_suite_probed: Some("TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256".to_string()),
+    };
+
+    // ROBOT probe — five variants with varied outcomes covering each
+    // branch of the classifier: alert, TCP reset, timeout, graceful
+    // close, and unexpected plaintext.
+    let bleichenbacher_oracle_probe = kemist::model::scan_result::BleichenbacherOracleProbe {
+        rsa_kex_suite_probed: Some("TLS_RSA_WITH_AES_128_CBC_SHA".to_string()),
+        method: ScanMethod::Probe,
+        reason: None,
+        per_variant: vec![
+            kemist::model::scan_result::RobotVariantObservation {
+                variant: "correctly_formatted_pkcs1".to_string(),
+                alert_category: Some("tls_alert_bad_record_mac".to_string()),
+                tcp_reset: false,
+                elapsed_ms: 42,
+                other_outcome: None,
+            },
+            kemist::model::scan_result::RobotVariantObservation {
+                variant: "invalid_0x00_02_prefix".to_string(),
+                alert_category: Some("tls_alert_handshake_failure".to_string()),
+                tcp_reset: false,
+                elapsed_ms: 18,
+                other_outcome: None,
+            },
+            kemist::model::scan_result::RobotVariantObservation {
+                variant: "invalid_version_0x00_02_byte_swap".to_string(),
+                alert_category: None,
+                tcp_reset: true,
+                elapsed_ms: 15,
+                other_outcome: None,
+            },
+            kemist::model::scan_result::RobotVariantObservation {
+                variant: "null_separator_missing".to_string(),
+                alert_category: None,
+                tcp_reset: false,
+                elapsed_ms: 5000,
+                other_outcome: Some("timeout".to_string()),
+            },
+            kemist::model::scan_result::RobotVariantObservation {
+                variant: "wrong_tls_version_in_pms".to_string(),
+                alert_category: None,
+                tcp_reset: false,
+                elapsed_ms: 38,
+                other_outcome: Some("graceful_close".to_string()),
+            },
+        ],
+    };
+
     let mut results = fixture_results();
     results.openssl_observations = Some(OpensslObservations {
         cipher_probes: Some(cipher_probes),
-        ffdhe_probes: Some(ffdhe_probes),
+        kx_group_probes: Some(kx_group_probes),
         fallback_scsv: Some(fallback_scsv),
         renegotiation: Some(renegotiation),
         client_auth: Some(client_auth),
+        tls13_extensions: Some(tls13_ee),
+        session_resumption: Some(session_resumption),
+        sigalg_policy: Some(sigalg_policy),
+        ephemeral_key_reuse: Some(ephemeral_key_reuse),
+        bleichenbacher_oracle_probe: Some(bleichenbacher_oracle_probe),
         probe_errors: vec![],
     });
 
@@ -362,7 +518,17 @@ fn fully_populated_openssl_observations_match_schema_v1() {
     let groups = tls.get("groups").unwrap();
     // Three FFDHE probe rows produce three tls1_2 + three tls1_3 entries.
     assert_eq!(groups.get("tls1_2").unwrap().as_object().unwrap().len(), 3);
-    assert_eq!(groups.get("tls1_3").unwrap().as_object().unwrap().len(), 3);
+    assert_eq!(groups.get("tls1_3").unwrap().as_object().unwrap().len(), 4);
+    // Override discipline: the secp521r1 row has no prior aws-lc-rs
+    // observation in this fixture, so the OpenSSL-path observation
+    // lands directly with provider=openssl.
+    let s521 = groups
+        .get("tls1_3")
+        .unwrap()
+        .get("secp521r1")
+        .expect("secp521r1 override lands in tls1_3");
+    assert_eq!(s521.get("supported").unwrap().as_bool(), Some(false));
+    assert_eq!(s521.get("provider").unwrap().as_str(), Some("openssl"));
     assert_eq!(
         tls.get("server_key_exchange_signatures")
             .unwrap()
@@ -386,41 +552,151 @@ fn fully_populated_openssl_observations_match_schema_v1() {
             .as_bool(),
         Some(true)
     );
-    // Deprecated field renders null with the supersession reason.
-    let deprecated = tls
-        .get("downgrade_signaling")
-        .unwrap()
-        .get("fallback_scsv_accepted")
-        .unwrap();
-    assert!(deprecated.get("value").unwrap().is_null());
+    // Every cipher suite entry carries a classification from the
+    // 15-variant enum. Cross-check that non-null strings from the
+    // documented set land on every emitted entry.
+    let valid_classifications: &[&str] = &[
+        "rsa_kex",
+        "dhe_aead",
+        "dhe_cbc",
+        "ecdhe_aead",
+        "ecdhe_cbc",
+        "anon",
+        "export",
+        "static_dh",
+        "static_ecdh",
+        "psk",
+        "dhe_psk",
+        "ecdhe_psk",
+        "rsa_psk",
+        "null_cipher",
+        "other",
+    ];
+    for v in ["tls1_0", "tls1_1", "tls1_2", "tls1_3"] {
+        for row in cs.get(v).unwrap().as_array().unwrap() {
+            let c = row
+                .get("classification")
+                .expect("every CipherSuiteEntry has classification")
+                .as_str()
+                .expect("classification is a string");
+            assert!(
+                valid_classifications.contains(&c),
+                "unknown classification {c:?} in tls.{v}"
+            );
+        }
+    }
+
+    // TLS 1.3 EncryptedExtensions fields land under
+    // tls.extensions.{record_size_limit, compress_certificate_algorithms}.
+    let ext = tls.get("extensions").unwrap();
     assert_eq!(
-        deprecated.get("reason").unwrap().as_str(),
-        Some("superseded_by_fallback_scsv_enforced")
+        ext.get("record_size_limit").and_then(|v| v.as_u64()),
+        Some(16385)
+    );
+    let comp = ext
+        .get("compress_certificate_algorithms")
+        .unwrap()
+        .as_array()
+        .unwrap();
+    assert_eq!(
+        comp.iter().map(|v| v.as_str().unwrap()).collect::<Vec<_>>(),
+        vec!["zlib", "brotli"]
+    );
+
+    // session_resumption TLS 1.2 slots carry real probe values;
+    // TLS 1.3 slots stay NotProbed.
+    let sr = tls.get("session_resumption").unwrap();
+    let sr12 = sr.get("tls1_2").unwrap();
+    assert_eq!(
+        sr12.get("session_ticket_issued")
+            .unwrap()
+            .get("value")
+            .unwrap()
+            .as_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        sr12.get("ticket_lifetime_hint_secs")
+            .and_then(|v| v.as_u64()),
+        Some(7200)
+    );
+    assert_eq!(
+        sr12.get("ticket_rotated_across_connections")
+            .unwrap()
+            .get("value")
+            .unwrap()
+            .as_bool(),
+        Some(true)
+    );
+    let sr13 = sr.get("tls1_3").unwrap();
+    assert_eq!(
+        sr13.get("psk_resumption_accepted")
+            .unwrap()
+            .get("method")
+            .unwrap()
+            .as_str(),
+        Some("not_probed")
+    );
+    assert_eq!(
+        sr13.get("early_data_accepted")
+            .unwrap()
+            .get("method")
+            .unwrap()
+            .as_str(),
+        Some("not_probed")
+    );
+
+    // Four sigalg-policy constraints each land with the
+    // fixture's canonical outcomes.
+    let sap = tls.get("signature_algorithm_policy_probe").unwrap();
+    for name in ["sha256_plus_only", "ecdsa_only", "rsa_pss_only"] {
+        let slot = sap.get(name).unwrap();
+        assert_eq!(
+            slot.get("outcome").unwrap().as_str(),
+            Some("handshake_complete"),
+            "{name} should complete on fixture",
+        );
+        assert!(slot.get("selected_sigalg").unwrap().is_string());
+    }
+    let rsa_pkcs1 = sap.get("rsa_pkcs1_only").unwrap();
+    assert_eq!(
+        rsa_pkcs1.get("outcome").unwrap().as_str(),
+        Some("handshake_failure")
+    );
+    assert_eq!(
+        rsa_pkcs1.get("alert").unwrap().as_str(),
+        Some("tls_alert_handshake_failure")
     );
 }
 
 #[cfg(feature = "legacy-probes")]
 #[test]
 fn ffdhe_cross_check_reason_surfaces_in_output() {
+    use kemist::scanner::backends::HandshakeOutcome;
     use kemist::scanner::openssl::{
-        ffdhe::{FfdheOutcome, FfdheProbeOutput, FfdheProbeResult},
+        kx_groups::{KxGroupProbeOutput, KxGroupProbeResult},
         OpensslObservations,
     };
 
     let mut results = fixture_results();
     results.openssl_observations = Some(OpensslObservations {
         cipher_probes: None,
-        ffdhe_probes: Some(FfdheProbeOutput {
-            results: vec![FfdheProbeResult {
+        kx_group_probes: Some(KxGroupProbeOutput {
+            results: vec![KxGroupProbeResult {
                 group_name: "ffdhe2048".to_string(),
                 iana_code: 0x0100,
-                tls12_outcome: FfdheOutcome::IgnoredGroupReturnedCustomPrime,
-                tls13_outcome: FfdheOutcome::Supported,
+                tls12_outcome: HandshakeOutcome::IgnoredGroupReturnedCustomPrime,
+                tls13_outcome: HandshakeOutcome::Supported,
             }],
         }),
         fallback_scsv: None,
         renegotiation: None,
         client_auth: None,
+        tls13_extensions: None,
+        session_resumption: None,
+        sigalg_policy: None,
+        ephemeral_key_reuse: None,
+        bleichenbacher_oracle_probe: None,
         probe_errors: vec![],
     });
 
@@ -481,4 +757,37 @@ fn legacy_probes_disabled_renders_empty_schema_sections() {
             .as_str(),
         Some("feature_disabled")
     );
+    // Session-resumption + sigalg-policy shape is stable under
+    // http-checks only: both
+    // sections always emit, with `method: not_probed` / reason
+    // `feature_disabled` slots rather than being absent.
+    let sr = tls.get("session_resumption").unwrap();
+    assert_eq!(
+        sr.get("tls1_2")
+            .unwrap()
+            .get("session_ticket_issued")
+            .unwrap()
+            .get("reason")
+            .unwrap()
+            .as_str(),
+        Some("feature_disabled")
+    );
+    let sap = tls.get("signature_algorithm_policy_probe").unwrap();
+    for name in [
+        "sha256_plus_only",
+        "ecdsa_only",
+        "rsa_pss_only",
+        "rsa_pkcs1_only",
+        "eddsa_only",
+    ] {
+        assert_eq!(
+            sap.get(name).unwrap().get("outcome").unwrap().as_str(),
+            Some("not_probed"),
+            "{name} should be not_probed under http-checks only"
+        );
+        assert_eq!(
+            sap.get(name).unwrap().get("reason").unwrap().as_str(),
+            Some("feature_disabled")
+        );
+    }
 }

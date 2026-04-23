@@ -1,8 +1,8 @@
 [package]
 name = "kemist"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
-authors = ["Chris Yuan <chris.yuan@0x0.tw>", "kemist contributors"]
+authors = ["kemist contributors"]
 description = "TLS + PQC observation scanner: records what servers support, emits structured JSON"
 license = "MIT OR Apache-2.0"
 keywords = ["tls", "pqc", "ml-kem", "scanner", "cryptography"]
@@ -10,16 +10,13 @@ categories = ["network-programming", "command-line-utilities"]
 readme = "README.md"
 
 [features]
-default = ["http-checks", "legacy-probes", "native-legacy"]
+default = ["http-checks", "legacy-probes"]
 http-checks = ["dep:reqwest"]
 # OpenSSL-backed legacy/misconfiguration probes (RSA-kex, weak ciphers, DH
-# parameters, FFDHE, TLS_FALLBACK_SCSV, renegotiation, CertificateRequest).
+# parameters, FFDHE, TLS_FALLBACK_SCSV, renegotiation, CertificateRequest,
+# plus SSLv3/TLS1.0/TLS1.1 protocol-version probes).
 # Vendors OpenSSL 3.5 LTS — no system libssl required at build or runtime.
 legacy-probes = ["dep:openssl", "dep:openssl-sys", "dep:openssl-src", "dep:foreign-types"]
-# native-tls-backed SSLv3/TLS1.0/TLS1.1 protocol-version probes. Fallback
-# backend when legacy-probes is off. Off-by-default scanner builds
-# (--no-default-features --features http-checks) lose legacy coverage entirely.
-native-legacy = ["dep:native-tls", "dep:tokio-native-tls"]
 
 [dependencies]
 # TLS implementation
@@ -28,12 +25,11 @@ rustls-native-certs = "0.8"
 webpki-roots = "0.26"
 rustls-pki-types = "1"
 
-# Legacy SSL/TLS protocol probes. Two backend options, selected by cargo feature:
-#   - legacy-probes (preferred): vendored OpenSSL 3.5 LTS via the openssl* crates.
-#   - native-legacy (fallback): platform native-tls for SSLv3/TLS1.0/1.1 only.
-# Both ship in `default`; users opt out via --no-default-features.
-native-tls = { version = "0.2", optional = true }
-tokio-native-tls = { version = "0.3", optional = true }
+# Legacy SSL/TLS protocol probes via vendored OpenSSL 3.5 LTS. Ships in
+# `default`; `--no-default-features` builds lose SSLv3/TLS1.0/1.1 and
+# weak-cipher coverage but keep the modern rustls probes intact. SSLv2
+# is handled separately via a raw-socket ClientHello in
+# `src/scanner/raw/sslv2.rs` (OpenSSL 3.x dropped SSLv2 entirely).
 openssl = { version = "0.10", features = ["vendored"], optional = true }
 openssl-sys = { version = "0.9", optional = true }
 # Pinned exact to OpenSSL 3.5.5 LTS (supported through 2030-04-08). Exact pin
@@ -48,13 +44,17 @@ openssl-sys = { version = "0.9", optional = true }
 #   SSLv3 protocol-version probe fails at context build. The legacy
 #   provider alone enables SSLv3 primitives but not the SSLv3
 #   record-layer / protocol code itself.
-openssl-src = { version = "=300.5.5", features = ["weak-crypto", "ssl3"], optional = true }
+openssl-src = { version = "=300.5.5", features = ["weak-crypto", "ssl3", "camellia", "seed"], optional = true }
 foreign-types = { version = "0.3", optional = true }
 
 # Async runtime and networking
 tokio = { version = "1", features = ["full"] }
 tokio-rustls = "0.26"
 futures = "0.3"
+# Used on the `TlsBackend` trait — async fn in trait objects isn't
+# object-safe in stable Rust yet, so async-trait boxes the returned
+# futures. Pulled in transitively by the tokio/rustls dep tree anyway.
+async-trait = "0.1"
 
 # CLI and output
 clap = { version = "4", features = ["derive", "color", "cargo"] }
@@ -84,6 +84,13 @@ chrono = { version = "0.4", features = ["serde"] }
 # Low-level TLS message handling
 bytes = "1"
 hex = "0.4"
+# Strict base64 decoder for CRL PEM bodies. Already transitively
+# present via reqwest/zip; promoting to a direct dep swaps the
+# hand-rolled `decode_base64_lenient` in scanner/crl_fetch.rs for a
+# well-tested implementation that enforces RFC 4648 quantum +
+# padding rules — matters because CRL URLs come from certificate
+# contents kemist doesn't control.
+base64 = "0.22"
 
 # Cryptographic operations
 sha2 = "0.10"  # For certificate fingerprints
@@ -93,7 +100,39 @@ sha-1 = "0.10"  # For SHA-1 fingerprints
 # Uses webpki-roots (Mozilla CA bundle) via rustls — matches the TLS
 # validation path in src/scanner/probe.rs so the HTTP probe sees the
 # same trust set.
-reqwest = { version = "0.12", optional = true, default-features = false, features = ["rustls-tls-webpki-roots", "charset", "http2"] }
+reqwest = { version = "0.12", optional = true, default-features = false, features = ["rustls-tls-webpki-roots", "charset", "http2", "stream"] }
+
+# Compile-time perfect-hash table — used for the HSTS preload list
+# lookup. The preload snapshot is parsed at build time into a static
+# `phf::Map<&'static str, bool>` via `phf_codegen`, giving O(1)
+# lookups without loading 90K entries into a HashMap at startup.
+phf = { version = "0.11", features = ["macros"] }
+
+# Lenient JSON parser used at runtime when loading a
+# `--hsts-preload-list-path` override — same file format as the
+# vendored Chromium snapshot, which carries JavaScript-style
+# line comments. Build-time consumption uses the build-dep copy;
+# this runtime copy is only for the override path.
+json5 = "0.4"
+
+# Cross-platform app cache / config directory resolution. Powers
+# the bundle-refresh subsystem: `kemist --update-trust-stores`
+# writes refreshed PEMs + a manifest into the platform's per-user
+# cache directory (~/.cache/kemist/ on Linux, ~/Library/Caches/kemist/
+# on macOS, %LOCALAPPDATA%\kemist\ on Windows); the scanner reads
+# cache-first at startup and falls back to the compile-time
+# bundles when the cache is empty or stale.
+directories = "5"
+
+# ZIP extractor — only used by the bundle-updater to unpack the
+# DoD PKI-PKE archive from dl.dod.cyber.mil (PKCS#7 certificates
+# inside a ZIP). Small dep; off the hot path (update-time only).
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+# CSV parser for the CCADB metadata + PEM-by-decade exports
+# consumed by the Microsoft bundle updater. Used only at update
+# time, not on scan path.
+csv = "1"
 
 [build-dependencies]
 chrono = { version = "0.4", features = ["serde"] }
@@ -103,7 +142,15 @@ chrono = { version = "0.4", features = ["serde"] }
 # openssl-src ignores our `weak-crypto`/`ssl3` features and OpenSSL is
 # compiled with `no-weak-ssl-ciphers` / `no-ssl3`, which strips RC4 /
 # single-DES / 3DES / SSLv3 from the cipher-list tables.
-openssl-src = { version = "=300.5.5", features = ["weak-crypto", "ssl3"], optional = true }
+openssl-src = { version = "=300.5.5", features = ["weak-crypto", "ssl3", "camellia", "seed"], optional = true }
+
+# Build-time preload-list processing: parse Chromium's
+# `transport_security_state_static.json` (which carries JavaScript-style
+# `//` comments) and emit a `phf::Map` in OUT_DIR. `json5` handles the
+# comments + trailing commas; `phf_codegen` writes the map.
+serde = { version = "1", features = ["derive"] }
+json5 = "0.4"
+phf_codegen = "0.11"
 
 [dev-dependencies]
 tokio-test = "0.4"

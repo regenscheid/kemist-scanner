@@ -186,7 +186,7 @@ fn render_groups(r: &ScanResult) {
             print_group(name, obs);
         }
     }
-    // TLS 1.2 — FFDHE only. This is where the D4/D2 cross-check
+    // TLS 1.2 — FFDHE only. This is where the FFDHE cross-check
     // finding (`server_ignored_group_offer_returned_custom_prime`)
     // surfaces, handled inside print_group.
     if !g.tls1_2.is_empty() {
@@ -219,18 +219,18 @@ fn render_certificates(r: &ScanResult) {
     if let Some(cn) = &leaf.issuer_cn {
         kv("issuer_cn", cn);
     }
-    let sig_line = if leaf.is_pqc_signature {
-        format!(
-            "{} ({})  {}",
+    let sig_line = match &leaf.pqc_signature_family {
+        Some(family) => format!(
+            "{} ({})  {} ({})",
             leaf.signature_algorithm_name,
             leaf.signature_algorithm_oid,
-            "PQC".cyan().bold()
-        )
-    } else {
-        format!(
+            "PQC".cyan().bold(),
+            family
+        ),
+        None => format!(
             "{} ({})",
             leaf.signature_algorithm_name, leaf.signature_algorithm_oid
-        )
+        ),
     };
     kv("signature", &sig_line);
     let pk = &leaf.public_key;
@@ -250,6 +250,71 @@ fn render_certificates(r: &ScanResult) {
     );
     kv("chain_length", &r.certificates.chain_length.to_string());
     kv("embedded_scts", &leaf.embedded_scts.to_string());
+    render_cert_extensions(&leaf.extensions);
+}
+
+fn render_cert_extensions(ext: &crate::model::cert_extensions::CertExtensions) {
+    if let Some(bc) = &ext.basic_constraints {
+        let line = match bc.path_len_constraint {
+            Some(n) => format!("ca={} path_len={}", bc.ca, n),
+            None => format!("ca={}", bc.ca),
+        };
+        kv("basic_constraints", &line);
+    }
+    if let Some(ku) = &ext.key_usage {
+        if !ku.bits.is_empty() {
+            kv("key_usage", &ku.bits.join(", "));
+        }
+    }
+    if let Some(eku) = &ext.extended_key_usage {
+        if !eku.oids.is_empty() {
+            kv("extended_key_usage", &eku.oids.join(", "));
+        }
+    }
+    if let Some(ski) = &ext.subject_key_identifier {
+        kv("subject_key_identifier", ski);
+    }
+    if let Some(aki) = &ext.authority_key_identifier {
+        kv("authority_key_identifier", aki);
+    }
+    if let Some(aia) = &ext.authority_information_access {
+        if !aia.ocsp.is_empty() {
+            kv("aia_ocsp", &aia.ocsp.join(", "));
+        }
+        if !aia.ca_issuers.is_empty() {
+            kv("aia_ca_issuers", &aia.ca_issuers.join(", "));
+        }
+    }
+    if let Some(crl) = &ext.crl_distribution_points {
+        if !crl.urls.is_empty() {
+            kv("crl_distribution_points", &crl.urls.join(", "));
+        }
+    }
+    if let Some(nc) = &ext.name_constraints {
+        if !nc.permitted_subtrees.is_empty() {
+            kv(
+                "name_constraints_permitted",
+                &nc.permitted_subtrees.join(", "),
+            );
+        }
+        if !nc.excluded_subtrees.is_empty() {
+            kv(
+                "name_constraints_excluded",
+                &nc.excluded_subtrees.join(", "),
+            );
+        }
+    }
+    if let Some(cp) = &ext.certificate_policies {
+        if !cp.oids.is_empty() {
+            kv("certificate_policies", &cp.oids.join(", "));
+        }
+    }
+    if let Some(ms) = ext.must_staple {
+        kv("must_staple", &ms.to_string());
+    }
+    if !ext.scts.is_empty() {
+        kv("scts", &format!("{} entries", ext.scts.len()));
+    }
 }
 
 fn render_validation(r: &ScanResult) {
@@ -274,12 +339,42 @@ fn render_extensions(r: &ScanResult) {
     // ocsp_stapling is a struct, not Observation<bool> — render inline.
     let ocsp = &ext.ocsp_stapling;
     match (ocsp.stapled, &ocsp.method) {
-        (Some(true), _) => println!(
-            "  {:<22} {} ({} bytes)",
-            "ocsp_stapling:",
-            "true".green(),
-            ocsp.response_length
-        ),
+        (Some(true), _) => {
+            let delivery = ocsp.delivery_path.as_deref().unwrap_or("?");
+            println!(
+                "  {:<22} {} ({} bytes, {})",
+                "ocsp_stapling:",
+                "true".green(),
+                ocsp.response_length,
+                delivery
+            );
+            if let Some(c) = &ocsp.content {
+                let status = c.cert_status.as_deref().unwrap_or("?");
+                let status_colored = match status {
+                    "good" => "good".green().to_string(),
+                    "revoked" => "revoked".red().bold().to_string(),
+                    "unknown" => "unknown".yellow().to_string(),
+                    other => other.to_string(),
+                };
+                println!(
+                    "  {:<22} {} / cert_status={}",
+                    "", c.response_status, status_colored
+                );
+                if let (Some(this), Some(next)) = (&c.this_update, &c.next_update) {
+                    println!(
+                        "  {:<22} thisUpdate={} nextUpdate={}",
+                        "",
+                        this.format("%Y-%m-%d %H:%M"),
+                        next.format("%Y-%m-%d %H:%M")
+                    );
+                }
+                if let Some(reason) = &c.revocation_reason {
+                    println!("  {:<22} revocation_reason={}", "", reason.red());
+                }
+            } else if let Some(reason) = &ocsp.reason {
+                println!("  {:<22} ({})", "", reason.yellow());
+            }
+        }
         (Some(false), _) => println!("  {:<22} {}", "ocsp_stapling:", "false".dimmed()),
         (None, m) => println!(
             "  {:<22} {} [{}]",
@@ -304,6 +399,34 @@ fn render_extensions(r: &ScanResult) {
             ),
         );
     }
+    print_obs_bool("truncated_hmac", &ext.truncated_hmac);
+    print_obs_bool("npn", &ext.npn);
+    if !ext.supported_point_formats_echoed.is_empty() {
+        kv(
+            "supported_point_formats_echoed",
+            &ext.supported_point_formats_echoed.join(", "),
+        );
+    }
+    if let Some(v) = &ext.max_fragment_length {
+        kv("max_fragment_length", v);
+    }
+    if let Some(v) = ext.record_size_limit {
+        kv("record_size_limit", &v.to_string());
+    }
+    if !ext.compress_certificate_algorithms.is_empty() {
+        kv(
+            "compress_certificate",
+            &ext.compress_certificate_algorithms.join(", "),
+        );
+    }
+    if let Some(s) = &r.tls.downgrade_signaling.tls13_downgrade_sentinel {
+        let colored = match s.as_str() {
+            "tls12" => "tls12".yellow().to_string(),
+            "lte_tls11" => "lte_tls11".red().to_string(),
+            _ => s.dimmed().to_string(),
+        };
+        println!("  {:<22} {}", "tls13_downgrade_sentinel:", colored);
+    }
 }
 
 /// Render the OpenSSL-backed probe sections that don't fold into
@@ -324,7 +447,19 @@ fn render_legacy_probes(r: &ScanResult) {
             .renegotiation_behavior
             .client_initiated_verdict
             .is_some()
-        || has_scsv_signal;
+        || has_scsv_signal
+        || matches!(
+            tls.session_resumption.tls1_2.session_ticket_issued.method,
+            Method::Probe | Method::ConnectionState
+        )
+        || [
+            &tls.signature_algorithm_policy_probe.sha256_plus_only,
+            &tls.signature_algorithm_policy_probe.ecdsa_only,
+            &tls.signature_algorithm_policy_probe.rsa_pss_only,
+            &tls.signature_algorithm_policy_probe.rsa_pkcs1_only,
+        ]
+        .iter()
+        .any(|r| matches!(r.method, Method::Probe));
     if !anything {
         return;
     }
@@ -334,6 +469,73 @@ fn render_legacy_probes(r: &ScanResult) {
     render_downgrade_signaling(scsv);
     render_renegotiation_behavior(&tls.renegotiation_behavior);
     render_client_auth_request(tls.client_auth_request.as_ref());
+    render_session_resumption(&tls.session_resumption);
+    render_sigalg_policy(&tls.signature_algorithm_policy_probe);
+}
+
+fn render_sigalg_policy(p: &crate::model::scan_result::SignatureAlgorithmPolicyProbe) {
+    use crate::model::scan_result::SigalgOutcome;
+    let has_signal = [
+        &p.sha256_plus_only,
+        &p.ecdsa_only,
+        &p.rsa_pss_only,
+        &p.rsa_pkcs1_only,
+    ]
+    .iter()
+    .any(|r| matches!(r.method, Method::Probe));
+    if !has_signal {
+        return;
+    }
+    section("Signature-algorithm policy probe");
+    for (label, r) in [
+        ("sha256_plus_only", &p.sha256_plus_only),
+        ("ecdsa_only", &p.ecdsa_only),
+        ("rsa_pss_only", &p.rsa_pss_only),
+        ("rsa_pkcs1_only", &p.rsa_pkcs1_only),
+    ] {
+        let outcome_str = match r.outcome {
+            SigalgOutcome::HandshakeComplete => "complete".green().to_string(),
+            SigalgOutcome::HandshakeFailure => "handshake_failure".yellow().to_string(),
+            SigalgOutcome::ConnectionClosed => "connection_closed".yellow().to_string(),
+            SigalgOutcome::OtherAlert => "other_alert".yellow().to_string(),
+            SigalgOutcome::NotProbed => "not_probed".dimmed().to_string(),
+        };
+        let suffix = match (&r.selected_sigalg, &r.alert) {
+            (Some(s), _) => format!(" → {s}"),
+            (None, Some(a)) => format!(" ({a})"),
+            (None, None) => match &r.reason {
+                Some(reason) => format!(" ({reason})"),
+                None => String::new(),
+            },
+        };
+        println!("  {:<22} {}{}", format!("{label}:"), outcome_str, suffix);
+    }
+}
+
+fn render_session_resumption(sr: &crate::model::scan_result::SessionResumption) {
+    // Only render when at least one slot has a probed observation —
+    // keeps the text output compact when the probe is feature-
+    // disabled or the handshake never completed.
+    let tls12_has_signal = matches!(
+        sr.tls1_2.session_ticket_issued.method,
+        Method::Probe | Method::ConnectionState
+    );
+    if !tls12_has_signal {
+        return;
+    }
+    section("Session resumption");
+    print_obs_bool(
+        "tls1_2.session_ticket_issued",
+        &sr.tls1_2.session_ticket_issued,
+    );
+    if let Some(secs) = sr.tls1_2.ticket_lifetime_hint_secs {
+        kv("tls1_2.ticket_lifetime_hint_secs", &secs.to_string());
+    }
+    print_obs_bool("tls1_2.session_id_issued", &sr.tls1_2.session_id_issued);
+    print_obs_bool(
+        "tls1_2.ticket_rotated_across_connections",
+        &sr.tls1_2.ticket_rotated_across_connections,
+    );
 }
 
 fn render_dh_parameters(entries: &[DhParametersObservation]) {
@@ -694,7 +896,7 @@ fn print_group(name: &str, obs: &GroupObservation) {
     // (populated for OpenSSL FFDHE entries), else look up from the
     // aws-lc-rs probe table for modern groups.
     let code = obs.iana_code.clone().unwrap_or_else(|| {
-        crate::scanner::groups::iana_code_for(name)
+        crate::scanner::backends::rustls::groups::iana_code_for(name)
             .map(|c| format!("0x{c:04X}"))
             .unwrap_or_else(|| "0x????".to_string())
     });
@@ -739,7 +941,6 @@ mod tests {
     fn pqc_group_detection() {
         assert!(is_pqc_group("X25519MLKEM768"));
         assert!(is_pqc_group("mlkem1024"));
-        assert!(is_pqc_group("X25519Kyber768Draft00"));
         assert!(!is_pqc_group("X25519"));
         assert!(!is_pqc_group("secp256r1"));
     }

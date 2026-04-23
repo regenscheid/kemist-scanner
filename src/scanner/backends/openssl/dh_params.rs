@@ -25,11 +25,22 @@ use openssl::pkey::Id;
 use openssl::ssl::SslRef;
 use sha2::{Digest, Sha256};
 
-/// RFC 7919 named FFDHE group, or `Custom` for unknown primes.
+/// Named DH group, or `Custom` for unknown primes.
 ///
 /// Serialized shape matches the schema's `tls.dh_parameters[].classification`
-/// enum: `ffdhe2048`, `ffdhe3072`, `ffdhe4096`, `ffdhe6144`, `ffdhe8192`,
-/// `custom`.
+/// enum. Three families covered:
+///
+/// - **RFC 7919 FFDHE** (`ffdhe2048`-`ffdhe8192`) — the modern named-group
+///   scheme TLS 1.2/1.3 `supported_groups` advertises.
+/// - **RFC 2409 / RFC 3526 MODP** (`modp1024`-`modp3072`) — the older IKE
+///   "Oakley" groups. Some web TLS deployments (older nginx configs,
+///   custom OpenSSL builds) still serve these as custom-DH primes.
+///   `modp1024` in particular matches the 1024-bit prime Logjam
+///   targeted as widely-reused precomputation fodder.
+/// - `custom` — prime doesn't match any named group we know about.
+///   The `prime_bits` field still carries the size, so rule engines
+///   can flag weak-by-size primes; this variant means "size aside,
+///   we don't recognize the prime itself."
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DhClassification {
     Ffdhe2048,
@@ -37,6 +48,17 @@ pub enum DhClassification {
     Ffdhe4096,
     Ffdhe6144,
     Ffdhe8192,
+    /// RFC 2409 §6.2 "Second Oakley Default Group" (1024-bit). The
+    /// Logjam paper's headline target — widely reused as a default
+    /// across Apache/IKE deployments, so precomputation against it
+    /// is economically worthwhile.
+    Modp1024,
+    /// RFC 3526 §2 "Group 5" (1536-bit).
+    Modp1536,
+    /// RFC 3526 §3 "Group 14" (2048-bit).
+    Modp2048,
+    /// RFC 3526 §4 "Group 15" (3072-bit).
+    Modp3072,
     Custom,
 }
 
@@ -48,6 +70,10 @@ impl DhClassification {
             Self::Ffdhe4096 => "ffdhe4096",
             Self::Ffdhe6144 => "ffdhe6144",
             Self::Ffdhe8192 => "ffdhe8192",
+            Self::Modp1024 => "modp1024",
+            Self::Modp1536 => "modp1536",
+            Self::Modp2048 => "modp2048",
+            Self::Modp3072 => "modp3072",
             Self::Custom => "custom",
         }
     }
@@ -116,21 +142,116 @@ pub fn snapshot(ssl: &SslRef) -> Result<Option<DhSnapshot>, ErrorStack> {
     }))
 }
 
-/// Match against the RFC 7919 FFDHE table, else `Custom`.
+/// Match a prime's SHA-256 against every named-group hash we know,
+/// else `Custom`. FFDHE constants are inline (RFC 7919 §A.1-5); MODP
+/// constants are derived lazily from their canonical hex at first
+/// call via the table in [`modp_hashes`] — avoids hand-computing and
+/// maintaining SHA-256 constants for large primes.
 fn classify_by_hash(hash: &[u8; 32]) -> DhClassification {
+    // FFDHE first (compile-time constants, fastest path).
     if hash == &FFDHE2048_SHA256 {
-        DhClassification::Ffdhe2048
-    } else if hash == &FFDHE3072_SHA256 {
-        DhClassification::Ffdhe3072
-    } else if hash == &FFDHE4096_SHA256 {
-        DhClassification::Ffdhe4096
-    } else if hash == &FFDHE6144_SHA256 {
-        DhClassification::Ffdhe6144
-    } else if hash == &FFDHE8192_SHA256 {
-        DhClassification::Ffdhe8192
-    } else {
-        DhClassification::Custom
+        return DhClassification::Ffdhe2048;
     }
+    if hash == &FFDHE3072_SHA256 {
+        return DhClassification::Ffdhe3072;
+    }
+    if hash == &FFDHE4096_SHA256 {
+        return DhClassification::Ffdhe4096;
+    }
+    if hash == &FFDHE6144_SHA256 {
+        return DhClassification::Ffdhe6144;
+    }
+    if hash == &FFDHE8192_SHA256 {
+        return DhClassification::Ffdhe8192;
+    }
+    // MODP groups — computed once on first call.
+    for (expected, classification) in modp_hashes() {
+        if hash == expected {
+            return *classification;
+        }
+    }
+    DhClassification::Custom
+}
+
+/// RFC 2409 §6.2 MODP Group 2 (1024-bit). Hex digits only; whitespace
+/// filtered at hash-computation time.
+const MODP1024_HEX: &str = "\
+    FFFFFFFF FFFFFFFF C90FDAA2 2168C234 C4C6628B 80DC1CD1 \
+    29024E08 8A67CC74 020BBEA6 3B139B22 514A0879 8E3404DD \
+    EF9519B3 CD3A431B 302B0A6D F25F1437 4FE1356D 6D51C245 \
+    E485B576 625E7EC6 F44C42E9 A637ED6B 0BFF5CB6 F406B7ED \
+    EE386BFB 5A899FA5 AE9F2411 7C4B1FE6 49286651 ECE65381 \
+    FFFFFFFF FFFFFFFF";
+
+/// RFC 3526 §2 MODP Group 5 (1536-bit).
+const MODP1536_HEX: &str = "\
+    FFFFFFFF FFFFFFFF C90FDAA2 2168C234 C4C6628B 80DC1CD1 \
+    29024E08 8A67CC74 020BBEA6 3B139B22 514A0879 8E3404DD \
+    EF9519B3 CD3A431B 302B0A6D F25F1437 4FE1356D 6D51C245 \
+    E485B576 625E7EC6 F44C42E9 A637ED6B 0BFF5CB6 F406B7ED \
+    EE386BFB 5A899FA5 AE9F2411 7C4B1FE6 49286651 ECE45B3D \
+    C2007CB8 A163BF05 98DA4836 1C55D39A 69163FA8 FD24CF5F \
+    83655D23 DCA3AD96 1C62F356 208552BB 9ED52907 7096966D \
+    670C354E 4ABC9804 F1746C08 CA237327 FFFFFFFF FFFFFFFF";
+
+/// RFC 3526 §3 MODP Group 14 (2048-bit).
+const MODP2048_HEX: &str = "\
+    FFFFFFFF FFFFFFFF C90FDAA2 2168C234 C4C6628B 80DC1CD1 \
+    29024E08 8A67CC74 020BBEA6 3B139B22 514A0879 8E3404DD \
+    EF9519B3 CD3A431B 302B0A6D F25F1437 4FE1356D 6D51C245 \
+    E485B576 625E7EC6 F44C42E9 A637ED6B 0BFF5CB6 F406B7ED \
+    EE386BFB 5A899FA5 AE9F2411 7C4B1FE6 49286651 ECE45B3D \
+    C2007CB8 A163BF05 98DA4836 1C55D39A 69163FA8 FD24CF5F \
+    83655D23 DCA3AD96 1C62F356 208552BB 9ED52907 7096966D \
+    670C354E 4ABC9804 F1746C08 CA18217C 32905E46 2E36CE3B \
+    E39E772C 180E8603 9B2783A2 EC07A28F B5C55DF0 6F4C52C9 \
+    DE2BCBF6 95581718 3995497C EA956AE5 15D22618 98FA0510 \
+    15728E5A 8AACAA68 FFFFFFFF FFFFFFFF";
+
+/// RFC 3526 §4 MODP Group 15 (3072-bit).
+const MODP3072_HEX: &str = "\
+    FFFFFFFF FFFFFFFF C90FDAA2 2168C234 C4C6628B 80DC1CD1 \
+    29024E08 8A67CC74 020BBEA6 3B139B22 514A0879 8E3404DD \
+    EF9519B3 CD3A431B 302B0A6D F25F1437 4FE1356D 6D51C245 \
+    E485B576 625E7EC6 F44C42E9 A637ED6B 0BFF5CB6 F406B7ED \
+    EE386BFB 5A899FA5 AE9F2411 7C4B1FE6 49286651 ECE45B3D \
+    C2007CB8 A163BF05 98DA4836 1C55D39A 69163FA8 FD24CF5F \
+    83655D23 DCA3AD96 1C62F356 208552BB 9ED52907 7096966D \
+    670C354E 4ABC9804 F1746C08 CA18217C 32905E46 2E36CE3B \
+    E39E772C 180E8603 9B2783A2 EC07A28F B5C55DF0 6F4C52C9 \
+    DE2BCBF6 95581718 3995497C EA956AE5 15D22618 98FA0510 \
+    15728E5A 8AAAC42D AD33170D 04507A33 A85521AB DF1CBA64 \
+    ECFB8504 58DBEF0A 8AEA7157 5D060C7D B3970F85 A6E1E4C7 \
+    ABF5AE8C DB0933D7 1E8C94E0 4A25619D CEE3D226 1AD2EE6B \
+    F12FFA06 D98A0864 D8760273 3EC86A64 521F2B18 177B200C \
+    BBE11757 7A615D6C 770988C0 BAD946E2 08E24FA0 74E5AB31 \
+    43DB5BFC E0FD108E 4B82D120 A93AD2CA FFFFFFFF FFFFFFFF";
+
+/// Lazy-initialized table of MODP prime SHA-256 hashes. First call
+/// strips whitespace from each HEX constant, decodes, hashes, and
+/// pairs with the corresponding enum variant. Subsequent calls return
+/// the cached vec.
+fn modp_hashes() -> &'static [([u8; 32], DhClassification)] {
+    static CACHE: std::sync::OnceLock<Vec<([u8; 32], DhClassification)>> =
+        std::sync::OnceLock::new();
+    CACHE.get_or_init(|| {
+        [
+            (MODP1024_HEX, DhClassification::Modp1024),
+            (MODP1536_HEX, DhClassification::Modp1536),
+            (MODP2048_HEX, DhClassification::Modp2048),
+            (MODP3072_HEX, DhClassification::Modp3072),
+        ]
+        .iter()
+        .map(|(hex_str, classification)| {
+            let cleaned: String = hex_str.chars().filter(|c| c.is_ascii_hexdigit()).collect();
+            let bytes = hex::decode(&cleaned).expect("hardcoded MODP hex must decode");
+            let mut hasher = Sha256::new();
+            hasher.update(&bytes);
+            let hash: [u8; 32] = hasher.finalize().into();
+            (hash, *classification)
+        })
+        .collect()
+    })
 }
 
 // RFC 7919 §A.1 ffdhe2048 prime — SHA-256 of big-endian prime bytes.
@@ -187,6 +308,47 @@ C58EF1837D1683B2C6F34A26C1B2EFFA886B423861285C97FFFFFFFFFFFFFFFF";
             hash, FFDHE2048_SHA256,
             "FFDHE2048_SHA256 drifted from RFC 7919 §A.1 prime"
         );
+    }
+
+    #[test]
+    fn modp_hex_constants_decode_to_expected_bit_sizes() {
+        let cases = [
+            (MODP1024_HEX, 128),
+            (MODP1536_HEX, 192),
+            (MODP2048_HEX, 256),
+            (MODP3072_HEX, 384),
+        ];
+        for (hex_str, expected_bytes) in cases {
+            let cleaned: String = hex_str.chars().filter(|c| c.is_ascii_hexdigit()).collect();
+            let decoded = hex::decode(&cleaned).expect("MODP hex must decode");
+            assert_eq!(
+                decoded.len(),
+                expected_bytes,
+                "MODP hex length mismatch (expected {} bytes = {} bits)",
+                expected_bytes,
+                expected_bytes * 8
+            );
+        }
+    }
+
+    #[test]
+    fn classify_recognizes_modp_groups() {
+        // Recompute the hashes through the lazy loader, then round-trip
+        // each back into classify_by_hash.
+        for (expected_hash, classification) in modp_hashes() {
+            assert_eq!(
+                classify_by_hash(expected_hash),
+                *classification,
+                "MODP lookup miss for {:?}",
+                classification
+            );
+        }
+    }
+
+    #[test]
+    fn classify_unknown_prime_falls_back_to_custom() {
+        let random = [0xab; 32];
+        assert_eq!(classify_by_hash(&random), DhClassification::Custom);
     }
 
     #[test]

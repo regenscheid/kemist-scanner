@@ -6,6 +6,169 @@ numbers follow [semver](https://semver.org/).
 
 ## [Unreleased]
 
+(no changes yet)
+
+## [0.3.0] — 2026-04-23
+
+### Added — Observation expansion workstream
+
+Extends the raw-observation surface so downstream rule engines
+(NIST SP 800-52, Mozilla profiles, custom policies) have more
+inputs without the scanner rendering verdicts itself. All additions
+are additive; `schema_version` remains `"1.0.0"`. See
+[docs/OUTPUT_SCHEMA.md](docs/OUTPUT_SCHEMA.md) for field-by-field
+semantics and [docs/CHECKS.md](docs/CHECKS.md) for per-probe
+mechanics.
+
+- `tls.certificates.chain[].extensions` — parsed X.509 v3 extensions
+  per cert: Basic Constraints (`ca`, `path_len_constraint`), Key
+  Usage bits (canonical RFC 5280 names), Extended Key Usage OIDs,
+  Authority/Subject Key Identifier, Authority Information Access
+  (OCSP + CA Issuers URLs), CRL Distribution Points URLs, Name
+  Constraints (permitted/excluded subtrees), Certificate Policies
+  OIDs, RFC 7633 Must-Staple flag, per-SCT detail (log_id,
+  timestamp, signature). Always-on.
+- `tls.certificates.chain[].wire_position` — 0-indexed position in
+  the wire-order chain the server delivered (`0` = leaf). Duplicates
+  preserved; parse failures appear as gaps in the sequence. Lets
+  downstream rule engines observe chain ordering directly rather
+  than inferring it from array index semantics.
+- `tls.extensions.truncated_hmac`, `.npn`,
+  `.supported_point_formats_echoed`, `.max_fragment_length` — new
+  ServerHello observations via the always-on byte-level TLS 1.2
+  probe.
+- `tls.downgrade_signaling.tls13_downgrade_sentinel` — RFC 8446
+  §4.1.3 trailing-8-bytes ServerRandom sentinel (`tls12` /
+  `lte_tls11` / `none`).
+- `tls.extensions.ocsp_stapling.content` — parsed OCSP response per
+  RFC 6960 §4.2: `response_status`, `signature_algorithm_oid`,
+  responder ID (byName or byKey), `produced_at`,
+  `single_responses_count`, and first-response fields
+  (`cert_status`, `revocation_time`, `revocation_reason`,
+  `this_update`, `next_update`, `cert_id`). Always-on pure parser
+  (`model/ocsp_response.rs`).
+- `tls.extensions.ocsp_stapling.delivery_path` (`tls1_2` / `tls1_3`)
+  and `raw_hex` (gated by new `--include-ocsp-raw` CLI flag).
+- `tls.extensions.record_size_limit`,
+  `tls.extensions.compress_certificate_algorithms` — TLS 1.3
+  EncryptedExtensions observation via OpenSSL msg-callback.
+  **Known limitation:** typically absent because OpenSSL 3.5
+  reserves these ext codes for internal handlers, blocking a
+  matching client offer; openssl-sys 0.9.109 doesn't expose the
+  native setters. Follow-up workstream to close.
+- `tls.cipher_suites.<ver>[].classification` — kx+privacy family
+  label per suite. 15-variant enum (`rsa_kex`, `dhe_aead`,
+  `dhe_cbc`, `ecdhe_aead`, `ecdhe_cbc`, `anon`, `export`,
+  `static_dh`, `static_ecdh`, `psk`, `dhe_psk`, `ecdhe_psk`,
+  `rsa_psk`, `null_cipher`, `other`). Privacy-dominant concerns
+  (`null_cipher`, `anon`, `export`) take precedence over kx prefix.
+  TLS 1.3 suites map to `ecdhe_aead`. Exhaustive test coverage.
+- Cipher-suite inventory expansion (legacy-probes): +18 TLS 1.2
+  probes — PSK family (4), Camellia (4), SEED (2), ARIA (4),
+  static DH / static ECDH (4).
+- `tls.session_resumption` — new top-level section. TLS 1.2 today:
+  `session_ticket_issued`, `ticket_lifetime_hint_secs`,
+  `session_id_issued`, `ticket_rotated_across_connections`
+  (two-connection probe). TLS 1.3 slots stubbed with
+  `method: not_probed` pending follow-up.
+- `tls.signature_algorithm_policy_probe` — four constrained
+  handshakes via `SSL_CTX_set1_sigalgs_list` (`sha256_plus_only`,
+  `ecdsa_only`, `rsa_pss_only`, `rsa_pkcs1_only`). Each records
+  outcome, selected sigalg on completion, alert category on
+  refusal. New `--sigalg-probe-skip=<csv>` CLI flag opts out
+  individual constraints.
+- `tls.signature_algorithm_policy_probe.*.leaf_fingerprint_sha256`
+  + `.leaf_subject_dn` — captured after every successful
+  constrained handshake so downstream rule engines can detect
+  dual-cert deployments (e.g. RSA + ECDSA leaves on the same
+  endpoint). Two distinct fingerprints across the five probes is
+  the downstream-comparable signal; the scanner only records.
+- `tls.extensions.delegated_credentials` — RFC 9345 observation.
+  Two-path pipeline: the byte-level hello probe offers ext 0x0022
+  in its TLS 1.2 ClientHello and records whether the server echoes
+  an empty ext 0x0022 in ServerHello (presence only); the OpenSSL
+  TLS 1.3 msg-callback walks the leaf CertificateEntry's
+  extensions for ext 0x0022 and parses the `DelegatedCredential`
+  header fields (`valid_time_seconds`,
+  `expected_cert_verify_algorithm`). Unified shape with
+  `delivery_path` identifying which path populated the record. No
+  DC signature verification, no wall-clock comparison on
+  `valid_time` — observation only.
+- `tls.extensions.ephemeral_key_reuse` — Raccoon-class observation
+  (CVE-2020-1968). For each of DHE and ECDHE the scanner picks a
+  server-supported suite from the earlier cipher probe and runs
+  two fresh TLS 1.2 handshakes with session caching disabled,
+  comparing the server's ephemeral public value (`Y` / ECDH
+  point) byte-for-byte across the pair. Records
+  `dhe_public_reused_across_connections`,
+  `ecdhe_public_reused_across_connections`, and the pinned suite
+  names. No side-channel attempt; ephemeral reuse is the
+  prerequisite signal, not the exploit.
+- `tls.extensions.bleichenbacher_oracle_probe` — ROBOT /
+  Bleichenbacher differential probe. Gated on `TLS_RSA_*`
+  observed supported. Drives five raw-socket TLS 1.2 handshakes
+  pinned to `TLS_RSA_WITH_AES_128_CBC_SHA`, one per malformed
+  PKCS#1 v1.5 `ClientKeyExchange` variant
+  (`correctly_formatted_pkcs1`, `invalid_0x00_02_prefix`,
+  `invalid_version_0x00_02_byte_swap`, `null_separator_missing`,
+  `wrong_tls_version_in_pms`), then sends
+  `CKE + ChangeCipherSpec + Finished` where the Finished is
+  crypto-correct under the variant's *intended* PMS:
+  TLS 1.2 PRF (P_SHA256) master-secret derivation, key expansion
+  (client write MAC + AES-128 keys), SHA-256 transcript hash over
+  ClientHello+ServerHello+Certificate+ServerHelloDone+CKE,
+  HMAC-SHA1 MAC-then-encrypt with explicit per-record IV and
+  TLS CBC padding. For variant 1 (correct padding) our keys
+  match the server's and Finished verifies; for variants 2–5
+  the server's key derivation diverges from ours, so the
+  Finished MAC check surfaces the alert differential. Records
+  per-variant `alert_category` / `tcp_reset` / `elapsed_ms` /
+  `other_outcome`. No `vulnerable` boolean — the five-entry
+  comparison table is the observation.
+
+### Added — CLI
+
+- `--include-ocsp-raw` — emit raw OCSP bytes as hex under
+  `tls.extensions.ocsp_stapling.raw_hex`. Off by default.
+- `--sigalg-probe-skip=<csv>` — skip individual sigalg-policy
+  probes. Recognized: `sha256_plus_only`, `ecdsa_only`,
+  `rsa_pss_only`, `rsa_pkcs1_only`. Unknown entries ignored.
+
+### Changed
+
+- OpenSSL named-group probe now covers `X448`, `secp521r1`, `MLKEM512`,
+  `MLKEM1024`, and `secp384r1MLKEM1024` in addition to FFDHE. Five
+  aws-lc-rs `not_probed` slots flip to real `supported: true | false`
+  observations. Probe module renamed `openssl::ffdhe` →
+  `openssl::kx_groups`; `OpensslObservations.ffdhe_probes` →
+  `kx_group_probes`. Output-schema shape unchanged.
+- Removed `X25519Kyber768Draft00` from the probe inventory —
+  pre-standard Cloudflare codepoint obsoleted by `X25519MLKEM768`;
+  field no longer appears in `tls.groups.tls1_3`.
+- **Removed** `tls.downgrade_signaling.fallback_scsv_accepted` — the
+  deprecated-in-0.2.0 heuristic field is gone from the schema. Its
+  replacement `fallback_scsv_enforced` has been the authoritative
+  observation since 0.2.0; consumers should read that instead.
+- `cipher_suites.<ver>[].classification` is now a **required** field
+  on every `cipherSuiteEntry`. The classifier is total (no gaps),
+  so this lands as required with exhaustive test coverage.
+- `tls.extensions.ocsp_stapling` is now a richer object; existing
+  `stapled` / `method` / `response_length` / `reason` shape stays.
+- `impl Default for ObservationBool` returns the `{value: None,
+  method: "not_probed"}` shape. Internal ergonomic change; no
+  user-visible output difference.
+
+### Known limitations (deferred to follow-up workstreams)
+
+- TLS 1.3 EncryptedExtensions — `record_size_limit` and
+  `compress_certificate_algorithms` observable only when servers
+  advertise unsolicited (rare). Client-offer injection blocked by
+  the openssl-sys binding gap noted above.
+- TLS 1.3 session resumption + 0-RTT — structure stubbed,
+  `method: not_probed`. Will need post-handshake NST read dance +
+  `SSL_set_session` resumption + `SSL_write_early_data` for
+  `early_data_accepted`.
+
 ## [0.2.0] — 2026-04-19
 
 ### Added — Legacy TLS & misconfiguration probe subsystem
@@ -194,12 +357,11 @@ downstream projects.
   Single-cipher `CryptoProvider` per probe. Real `supported: true/false`
   signals from the wire. Server-ordering detection via two handshakes
   with reversed suite orderings.
-- Per-kx-group probing for 12 target groups: classical (X25519/X448/
+- Per-kx-group probing for 11 target groups: classical (X25519/X448/
   secp256r1-521) + PQC hybrids (X25519MLKEM768/secp256r1MLKEM768/
-  secp384r1MLKEM1024) + standalone ML-KEM (512/768/1024) + the
-  pre-standard X25519Kyber768Draft00. Groups aws-lc-rs doesn't ship
-  emit `not_probed` with a specific reason — never `supported: false`
-  without a real probe.
+  secp384r1MLKEM1024) + standalone ML-KEM (512/768/1024). Groups
+  aws-lc-rs doesn't ship emit `not_probed` with a specific reason —
+  never `supported: false` without a real probe.
 - Characterization handshake captures rustls connection state:
   negotiated version, cipher suite, kx group, signature scheme (from
   verifier callback), ALPN, OCSP stapling bytes.
@@ -287,9 +449,9 @@ downstream projects.
   array rather than `supported: false`. Cross-reference against a
   fuller cipher registry for weak-cipher policies.
 - aws-lc-rs kx group coverage: 6 groups. Standalone ML-KEM-512/1024,
-  X448, secp521r1, secp384r1MLKEM1024, X25519Kyber768Draft00 emit
-  `not_probed`. Three future extension paths documented in
-  [docs/PQC.md](docs/PQC.md).
+  X448, secp521r1, secp384r1MLKEM1024 emit `not_probed` from the
+  aws-lc-rs path; the OpenSSL named-group probe fills those slots.
+  See [docs/PQC.md](docs/PQC.md).
 - HSTS preload list is a 12-entry stub. Full Chromium
   `transport_security_state_static.json` snapshot deferred.
 - PQC signature verification not performed — OID match only. Chain

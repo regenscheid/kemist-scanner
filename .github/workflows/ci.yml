@@ -73,18 +73,18 @@ jobs:
       run: cargo build --release --verbose
 
   feature_matrix:
-    # Proves the legacy-probe feature boundary is honestly opt-out. Each
-    # variant exercises a different subset of the dep graph; if any of
-    # the three fails to compile, the feature gating drifted.
+    # Proves the legacy-probe feature boundary is honestly opt-out.
+    # `minimal` drops the OpenSSL subsystem entirely; the new `tls.*`
+    # sections render as empty / feature_disabled but the schema shape
+    # stays stable. A previous `no-legacy-probes` variant referenced a
+    # `native-legacy` feature that was removed in commit 7c21fe9; kept
+    # removing it here so the matrix matches the actual Cargo features.
     name: Feature matrix
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         include:
-          - variant: no-legacy-probes
-            # native-tls fallback for SSLv3/TLS1.0/1.1; openssl omitted.
-            args: "--no-default-features --features http-checks,native-legacy"
           - variant: minimal
             # No legacy backend at all; the new tls.* sections render as
             # empty/feature_disabled but the schema shape stays stable.
@@ -141,13 +141,20 @@ jobs:
     - name: Check binary size
       run: |
         SIZE=$(stat -c%s target/release/kemist)
-        # 16 MiB. Current release binary is ~12.4 MiB on Linux after the
-        # full OpenSSL 3.5.5 LTS subsystem landed (weak-crypto + ssl3 +
-        # legacy provider + D1-D8 probe modules). Headroom absorbs
-        # platform variance and small future additions; raise this
-        # deliberately if a new probe honestly needs the space, don't
-        # silently accept creep.
-        MAX=$((16 * 1024 * 1024))
+        # 24 MiB. Release binary sizes observed across platforms:
+        #   Linux x86_64: ~12.4 MiB after OpenSSL 3.5.5 LTS landed.
+        #   Linux arm64 / macOS arm64: ~14-15 MiB (per-arch codegen
+        #   differences; aws-lc-sys + vendored OpenSSL inflate more
+        #   on arm).
+        # The observation expansion workstream (sigalg leaf capture,
+        # RFC 9345 DC, ephemeral reuse probe, ROBOT differential
+        # probe + TLS 1.2 PRF/MAC helpers) adds ~1-2 MiB. Gate is
+        # set with ~40% headroom over the largest observed variant
+        # so ARM runners don't flap and one more probe workstream
+        # fits without a gate bump. Raise this deliberately if a
+        # new probe honestly needs the space, don't silently accept
+        # creep.
+        MAX=$((24 * 1024 * 1024))
         echo "kemist release binary: ${SIZE} bytes (limit ${MAX})"
         if [ "${SIZE}" -gt "${MAX}" ]; then
           echo "::error::release binary exceeds ${MAX} bytes (got ${SIZE})"

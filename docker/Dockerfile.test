@@ -16,9 +16,12 @@ RUN apt-get update && apt-get install -y \
     zlib1g-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Build vulnerable OpenSSL 1.0.1f (Heartbleed)
+# Build vulnerable OpenSSL 1.0.1f (Heartbleed). Sourced from the
+# GitHub release mirror — the historical www.openssl.org/source/old/
+# redirect now points to a dead GitHub path (`openssl-1.0.1f`
+# lowercase tag) while the actual release lives under `OpenSSL_1_0_1f`.
 RUN cd /tmp && \
-    wget https://www.openssl.org/source/old/1.0.1/openssl-1.0.1f.tar.gz && \
+    wget -L https://github.com/openssl/openssl/releases/download/OpenSSL_1_0_1f/openssl-1.0.1f.tar.gz && \
     tar -xzf openssl-1.0.1f.tar.gz && \
     cd openssl-1.0.1f && \
     ./config --prefix=/opt/openssl-1.0.1f \
@@ -31,9 +34,10 @@ RUN cd /tmp && \
     make && make install_sw && \
     cd / && rm -rf /tmp/openssl-1.0.1f*
 
-# Build OpenSSL 1.0.2 (various vulnerabilities)
+# Build OpenSSL 1.0.2 (various vulnerabilities). Same rationale as
+# 1.0.1f: pull from the GitHub release mirror.
 RUN cd /tmp && \
-    wget https://www.openssl.org/source/old/1.0.2/openssl-1.0.2.tar.gz && \
+    wget -L https://github.com/openssl/openssl/releases/download/OpenSSL_1_0_2/openssl-1.0.2.tar.gz && \
     tar -xzf openssl-1.0.2.tar.gz && \
     cd openssl-1.0.2 && \
     ./config --prefix=/opt/openssl-1.0.2 \

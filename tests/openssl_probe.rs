@@ -29,10 +29,11 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use kemist::model::protocol::TlsVersion;
+use kemist::scanner::backends::HandshakeOutcome;
 use kemist::scanner::openssl::{
-    ciphers::{probe_legacy_suites, LegacyProbeOutcome},
+    ciphers::probe_legacy_suites,
     fallback_scsv,
-    ffdhe::{probe_ffdhe_groups, FfdheOutcome},
+    kx_groups::probe_kx_groups,
     protocol_versions,
     renegotiation::{self, RenegotiationVerdict},
 };
@@ -74,26 +75,39 @@ async fn legacy_cipher_probe_observes_weak_suites_on_fixture() {
     let any_supported = out
         .results
         .iter()
-        .any(|r| matches!(r.outcome, LegacyProbeOutcome::Supported));
+        .any(|r| matches!(r.outcome, HandshakeOutcome::Supported));
     assert!(
         any_supported,
         "fixture didn't accept any legacy suite (nginx config drift?)"
     );
 
-    // Every probe should be either Supported, NotSupported, or Error —
-    // never silently missing.
+    // Every probe should be either Supported, NotSupported, Error, or
+    // NotProbed — never silently missing. `IgnoredGroupReturnedCustomPrime`
+    // is group-probe-only and should never appear here. Cipher probes
+    // emit `NotProbed("openssl_3x_cipher_not_available:*")` for suites
+    // OpenSSL 3.x refuses to activate at context build time (static-DH /
+    // static-ECDH, occasionally RC4 / 3DES on distros that ship openssl
+    // with those disabled) — a legitimate backend-capability signal,
+    // not a missing observation.
     for r in &out.results {
         match &r.outcome {
-            LegacyProbeOutcome::Supported
-            | LegacyProbeOutcome::NotSupported
-            | LegacyProbeOutcome::Error(_) => {}
+            HandshakeOutcome::Supported
+            | HandshakeOutcome::NotSupported
+            | HandshakeOutcome::Error(_)
+            | HandshakeOutcome::NotProbed(_) => {}
+            HandshakeOutcome::IgnoredGroupReturnedCustomPrime => {
+                panic!(
+                    "cipher probe produced unexpected outcome variant for {}",
+                    r.name
+                );
+            }
         }
     }
 
     // DHE-RSA probe should populate a DH snapshot with the fixture's
     // deliberately weak 1024-bit custom prime.
     let dhe = out.results.iter().find(|r| {
-        r.openssl_name.starts_with("DHE-RSA") && matches!(r.outcome, LegacyProbeOutcome::Supported)
+        r.openssl_name.starts_with("DHE-RSA") && matches!(r.outcome, HandshakeOutcome::Supported)
     });
     if let Some(r) = dhe {
         let snap = r
@@ -111,30 +125,36 @@ async fn legacy_cipher_probe_observes_weak_suites_on_fixture() {
 
 #[tokio::test]
 #[ignore]
-async fn ffdhe_probe_records_per_version_outcomes_on_fixture() {
+async fn kx_group_probe_records_per_version_outcomes_on_fixture() {
     let (addr, hostname) = fixture();
-    let out = probe_ffdhe_groups(addr, &hostname, timeout(), timeout(), Duration::ZERO).await;
+    let out = probe_kx_groups(addr, &hostname, timeout(), timeout(), Duration::ZERO).await;
 
-    // All five RFC 7919 codepoints are in the table.
-    assert_eq!(out.results.len(), 5);
+    // Inventory: five FFDHE + five TLS 1.3 non-FFDHE groups aws-lc-rs
+    // doesn't ship (X448, secp521r1, MLKEM512/1024, secp384r1MLKEM1024)
+    // + three brainpool curves + three deprecated named curves
+    // OpenSSL 3.x refuses at handshake-build time (secp192r1, secp224r1,
+    // secp256k1). The last six are tripwires: they shrink if a future
+    // openssl-src dropped them, expand if new curves land in the probe
+    // list.
+    assert_eq!(out.results.len(), 16);
 
     // Every TLS 1.2 / TLS 1.3 cell is populated with some outcome.
     for r in &out.results {
         assert!(matches!(
             r.tls12_outcome,
-            FfdheOutcome::Supported
-                | FfdheOutcome::NotSupported
-                | FfdheOutcome::IgnoredGroupReturnedCustomPrime
-                | FfdheOutcome::Error(_)
-                | FfdheOutcome::NotProbed(_)
+            HandshakeOutcome::Supported
+                | HandshakeOutcome::NotSupported
+                | HandshakeOutcome::IgnoredGroupReturnedCustomPrime
+                | HandshakeOutcome::Error(_)
+                | HandshakeOutcome::NotProbed(_)
         ));
         assert!(matches!(
             r.tls13_outcome,
-            FfdheOutcome::Supported
-                | FfdheOutcome::NotSupported
-                | FfdheOutcome::IgnoredGroupReturnedCustomPrime
-                | FfdheOutcome::Error(_)
-                | FfdheOutcome::NotProbed(_)
+            HandshakeOutcome::Supported
+                | HandshakeOutcome::NotSupported
+                | HandshakeOutcome::IgnoredGroupReturnedCustomPrime
+                | HandshakeOutcome::Error(_)
+                | HandshakeOutcome::NotProbed(_)
         ));
     }
 }

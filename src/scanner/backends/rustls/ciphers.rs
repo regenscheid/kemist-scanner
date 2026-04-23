@@ -16,7 +16,7 @@
 //! method: not_probed, reason: provider_no_suite_support` elsewhere in
 //! the pipeline (see output/json.rs). Downstream rule engines looking
 //! for weak-cipher acceptance must examine both `true` and `not_probed`
-//! sets together with `capabilities.provider_cipher_suites`.
+//! sets together with `capabilities.probed_cipher_suites`.
 //!
 //! ## Server ordering detection
 //! Two additional handshakes with the full provider suite list — default
@@ -40,6 +40,7 @@ use tracing::debug;
 
 use crate::model::errors::ScannerError;
 use crate::model::protocol::TlsVersion;
+use crate::scanner::backends::{is_wire_rejection, HandshakeOutcome};
 
 /// One per-cipher probe result.
 #[derive(Debug, Clone)]
@@ -50,17 +51,7 @@ pub struct CipherProbeResult {
     /// IANA codepoint (e.g. `0x1302`).
     pub iana_code: u16,
     pub version: TlsVersion,
-    pub outcome: ProbeOutcome,
-}
-
-#[derive(Debug, Clone)]
-pub enum ProbeOutcome {
-    /// Handshake succeeded with this suite alone in the provider list.
-    Supported,
-    /// Server rejected the single-suite offer (handshake alert or post-ClientHello reset).
-    NotSupported,
-    /// Probe itself failed (TCP timeout, DNS, unexpected error).
-    Error(String),
+    pub outcome: HandshakeOutcome,
 }
 
 /// Output of the full cipher-probe pass for one target: per-suite results
@@ -84,6 +75,22 @@ pub async fn probe_cipher_suites(
     let all_suites: Vec<SupportedCipherSuite> = aws_lc_rs::ALL_CIPHER_SUITES.to_vec();
     let mut results = Vec::with_capacity(all_suites.len());
 
+    // Registry-driven per-suite probing. The registry routes each
+    // cipher codepoint to the backend that claims it; for this rustls
+    // path all `ALL_CIPHER_SUITES` codepoints route to `aws_lc_rs`,
+    // so `route_cipher` always returns Some(rustls). The loop iterates
+    // `ALL_CIPHER_SUITES` directly (rather than
+    // `registry.merged_cipher_codepoints()`) so it can derive the
+    // spec-version and Debug-format name from each
+    // `SupportedCipherSuite` object without a separate lookup.
+    let registry = crate::scanner::backends::BackendRegistry::new();
+    let ctx = crate::scanner::backends::ProbeContext {
+        target,
+        hostname: hostname.to_string(),
+        connect_timeout,
+        handshake_timeout,
+    };
+
     for suite in &all_suites {
         let Some(version) = to_model_version(suite.version()) else {
             debug!("skipping suite {:?} with unknown version", suite.suite());
@@ -92,8 +99,21 @@ pub async fn probe_cipher_suites(
         let name = format!("{:?}", suite.suite());
         let iana_code: u16 = suite.suite().into();
 
-        let outcome =
-            probe_single_suite(target, hostname, *suite, connect_timeout, handshake_timeout).await;
+        let outcome = match registry.route_cipher(iana_code) {
+            Some(backend) => {
+                let constraint =
+                    crate::scanner::backends::HandshakeConstraint::single_cipher(iana_code);
+                match backend.handshake(constraint, &ctx).await {
+                    Ok(r) => r.outcome,
+                    Err(u) => {
+                        HandshakeOutcome::Error(format!("unsatisfiable_constraint:{}", u.reason))
+                    }
+                }
+            }
+            None => {
+                HandshakeOutcome::Error(format!("no_backend_routes_cipher:0x{:04X}", iana_code))
+            }
+        };
 
         results.push(CipherProbeResult {
             name,
@@ -131,13 +151,13 @@ fn to_model_version(v: &'static rustls::SupportedProtocolVersion) -> Option<TlsV
     }
 }
 
-async fn probe_single_suite(
+pub(crate) async fn probe_single_suite(
     target: SocketAddr,
     hostname: &str,
     suite: SupportedCipherSuite,
     connect_timeout: Duration,
     handshake_timeout: Duration,
-) -> ProbeOutcome {
+) -> HandshakeOutcome {
     let mut provider = aws_lc_rs::default_provider();
     provider.cipher_suites = vec![suite];
 
@@ -150,50 +170,44 @@ async fn probe_single_suite(
             .dangerous()
             .with_custom_certificate_verifier(Arc::new(PermissiveVerifier))
             .with_no_client_auth(),
-        Err(e) => return ProbeOutcome::Error(format!("config builder: {e}")),
+        Err(e) => return HandshakeOutcome::Error(format!("config builder: {e}")),
     };
 
     let connector = TlsConnector::from(Arc::new(config));
 
     let tcp = match timeout(connect_timeout, TcpStream::connect(&target)).await {
-        Err(_) => return ProbeOutcome::Error("tcp_connect_timeout".to_string()),
+        Err(_) => return HandshakeOutcome::Error("tcp_connect_timeout".to_string()),
         Ok(Err(e)) => {
             // TCP-level failure — can't classify as "cipher not supported".
             let err = ScannerError::from_io("tcp_connect", e);
-            return ProbeOutcome::Error(err.category);
+            return HandshakeOutcome::Error(err.category);
         }
         Ok(Ok(s)) => s,
     };
 
     let domain = match ServerName::try_from(hostname.to_string()) {
         Ok(d) => d,
-        Err(_) => return ProbeOutcome::Error(format!("invalid_sni:{hostname}")),
+        Err(_) => return HandshakeOutcome::Error(format!("invalid_sni:{hostname}")),
     };
 
     match timeout(handshake_timeout, connector.connect(domain, tcp)).await {
-        Err(_) => ProbeOutcome::Error("handshake_timeout".to_string()),
-        Ok(Ok(_)) => ProbeOutcome::Supported,
+        Err(_) => HandshakeOutcome::Error("handshake_timeout".to_string()),
+        Ok(Ok(_)) => HandshakeOutcome::Supported,
         Ok(Err(e)) => classify_probe_error(e),
     }
 }
 
 /// Distinguish "server evaluated our offer and rejected it" (real signal)
-/// from "something else went wrong" (probe error).
-fn classify_probe_error(e: std::io::Error) -> ProbeOutcome {
+/// from "something else went wrong" (probe error). The Error-string
+/// format preserves both category and context on this (rustls) path;
+/// the OpenSSL-path classifier emits category only. Schema v1 depends
+/// on that asymmetry — see `is_wire_rejection`.
+fn classify_probe_error(e: std::io::Error) -> HandshakeOutcome {
     let scanner_err = ScannerError::from_io("handshake", e);
-    // Handshake alerts and post-handshake-start connection resets are the
-    // server telling us they won't use our single-suite offer.
-    let is_rejection = scanner_err.category.starts_with("tls_alert_")
-        || scanner_err.category == "connection_refused";
-    if is_rejection {
-        ProbeOutcome::NotSupported
+    if is_wire_rejection(&scanner_err) {
+        HandshakeOutcome::NotSupported
     } else {
-        // Keep both parts — the category is a stable wire-safe bucket,
-        // the context carries the underlying io::Error message. Without
-        // this, `internal_scanner_error` is a black hole; with it, a
-        // reader can see e.g. "internal_scanner_error: handshake:
-        // received corrupt message" and diagnose.
-        ProbeOutcome::Error(format!("{}: {}", scanner_err.category, scanner_err.context))
+        HandshakeOutcome::Error(format!("{}: {}", scanner_err.category, scanner_err.context))
     }
 }
 

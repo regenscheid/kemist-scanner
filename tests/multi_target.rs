@@ -1,4 +1,4 @@
-//! Integration tests for PR 4 public API.
+//! Integration tests for the public `Scanner` API.
 //!
 //! - Public `Scanner::scan` / `scan_many` are the stable surface.
 //! - Per-target DNS failure produces a schema-valid record with a populated

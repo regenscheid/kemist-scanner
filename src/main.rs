@@ -99,6 +99,81 @@ struct Args {
     #[arg(long, value_name = "URL")]
     user_agent_info_url: Option<String>,
 
+    /// Emit the raw DER bytes of every stapled OCSP response as
+    /// lower-case hex under `tls.extensions.ocsp_stapling.raw_hex`.
+    /// Off by default — the parsed `content` sub-object usually
+    /// carries everything a rule engine needs, and raw bytes bloat
+    /// output size. Turn on when debugging or when downstream needs
+    /// to re-validate signatures.
+    #[arg(long)]
+    include_ocsp_raw: bool,
+
+    /// Comma-separated list of signature-algorithm policy probes to
+    /// skip. By default all four run (sha256_plus_only, ecdsa_only,
+    /// rsa_pss_only, rsa_pkcs1_only). Useful for fast smoke scans or
+    /// when a target gets unhappy with a specific constraint offer.
+    /// Unknown entries are ignored.
+    #[arg(long, value_name = "CSV", value_delimiter = ',')]
+    sigalg_probe_skip: Vec<String>,
+
+    /// Override the compile-time HSTS preload list with a runtime
+    /// snapshot loaded from `<PATH>`. Accepts the Chromium
+    /// `transport_security_state_static.json` format (JavaScript-style
+    /// `//` comments tolerated). Output carries
+    /// `http.preload_list_source: "runtime_override:<path>"` when the
+    /// flag is in effect. Without the flag, kemist uses the bundled
+    /// snapshot (see data/README.md for provenance).
+    #[arg(long, value_name = "PATH")]
+    hsts_preload_list_path: Option<std::path::PathBuf>,
+
+    /// Enable active revocation fetches — CRL downloads (S2) and
+    /// OCSP-over-HTTP fallback (S3). Default off; when unset, the
+    /// scanner still captures stapled OCSP in-band during the TLS
+    /// handshake but does not issue any additional revocation
+    /// traffic. Fetches are rate-limited per scan via per-URL 10-second
+    /// timeouts and body-size caps (5 MB CRL, 256 KB OCSP response).
+    #[arg(long)]
+    enable_revocation_fetch: bool,
+
+    /// Override a compiled-in trust store with a PEM bundle loaded
+    /// at startup. Format: `NAME:PATH`. Accepted names:
+    /// `webpki-roots`, `microsoft`, `apple`, `us-fpki-common`,
+    /// `us-dod`. Repeatable — pass once per store you want to
+    /// override. The output's `certificates.validation.trust_store_sources.<name>`
+    /// breadcrumb surfaces `runtime_override:<path>` when active.
+    #[arg(long, value_name = "NAME:PATH")]
+    trust_store: Vec<String>,
+
+    /// Add a new named trust store beyond the compiled-in set.
+    /// Format: `NAME:PATH`. Name must be lowercase ASCII letters,
+    /// digits, and hyphens, and must not collide with a compiled-in
+    /// store. Validation against this store surfaces at
+    /// `certificates.validation.chain_valid_to_custom_roots.<name>`.
+    /// Use for corporate PKI bundles, PIV-I roots, industry-
+    /// specific trust programs, etc. Repeatable.
+    #[arg(long, value_name = "NAME:PATH")]
+    extra_trust_store: Vec<String>,
+
+    /// Refresh every compiled-in trust store from its upstream
+    /// source and write to the platform cache directory
+    /// (`~/.cache/kemist/trust_stores/` on Linux, `~/Library/Caches/
+    /// kemist/trust_stores/` on macOS). Scan operation does not run
+    /// when this flag is set — the process fetches bundles, writes
+    /// `manifest.json`, and exits. Requires `http-checks` +
+    /// `legacy-probes` features (both default on).
+    #[cfg(all(feature = "http-checks", feature = "legacy-probes"))]
+    #[arg(long)]
+    update_trust_stores: bool,
+
+    /// Refresh the HSTS preload list from the Chromium snapshot
+    /// and write to the platform cache directory. Process exits
+    /// after the fetch. Requires `http-checks` +
+    /// `legacy-probes` features (shared with `--update-trust-stores`
+    /// since both share the fetch infrastructure).
+    #[cfg(all(feature = "http-checks", feature = "legacy-probes"))]
+    #[arg(long)]
+    update_hsts_preload: bool,
+
     /// Increase logging verbosity (-v info, -vv debug, -vvv trace).
     #[arg(short, long, action = clap::ArgAction::Count)]
     verbose: u8,
@@ -109,6 +184,33 @@ enum OutputFormat {
     Text,
     Json,
     JsonPretty,
+}
+
+/// Parse a list of `NAME:PATH` CLI values into an ordered map.
+/// Duplicate names produce a fatal error — ambiguity about which
+/// override wins would be a surprising silent behavior.
+fn parse_name_path_flags(
+    flag: &str,
+    raw: &[String],
+) -> anyhow::Result<std::collections::BTreeMap<String, std::path::PathBuf>> {
+    let mut out = std::collections::BTreeMap::new();
+    for entry in raw {
+        let (name, path) = entry.split_once(':').ok_or_else(|| {
+            anyhow::anyhow!("{flag}: expected NAME:PATH, got `{entry}` (no colon separator)")
+        })?;
+        let name = name.trim();
+        let path = path.trim();
+        if name.is_empty() || path.is_empty() {
+            anyhow::bail!("{flag}: empty name or path in `{entry}`");
+        }
+        if out
+            .insert(name.to_string(), std::path::PathBuf::from(path))
+            .is_some()
+        {
+            anyhow::bail!("{flag}: duplicate entry for `{name}`");
+        }
+    }
+    Ok(out)
 }
 
 fn parse_tls_version(s: &str) -> std::result::Result<kemist::model::protocol::TlsVersion, String> {
@@ -149,6 +251,57 @@ async fn run() -> Result<()> {
         .install_default()
         .expect("failed to install rustls crypto provider");
 
+    // Refresh subcommands run to completion then exit — no scan
+    // runs in the same invocation. Each prints a per-bundle report
+    // and exits non-zero if any fetch failed.
+    #[cfg(all(feature = "http-checks", feature = "legacy-probes"))]
+    if args.update_trust_stores {
+        let reports = kemist::scanner::bundle_updater::update_all_trust_stores().await;
+        let all_ok = kemist::scanner::bundle_updater::print_reports("trust-stores", &reports);
+        std::process::exit(if all_ok { 0 } else { 1 });
+    }
+    #[cfg(all(feature = "http-checks", feature = "legacy-probes"))]
+    if args.update_hsts_preload {
+        let report = kemist::scanner::bundle_updater::update_hsts_preload().await;
+        let all_ok = kemist::scanner::bundle_updater::print_reports(
+            "hsts-preload",
+            std::slice::from_ref(&report),
+        );
+        std::process::exit(if all_ok { 0 } else { 1 });
+    }
+
+    // Runtime HSTS-preload override. Priority:
+    //   1. --hsts-preload-list-path (explicit user intent wins)
+    //   2. $cache/hsts_preload_list.json if manifest-verified
+    //   3. Compile-time PHF (default fallback inside http.rs)
+    // Load failure is a fatal user error — operators
+    // who supply the flag expect the override to take effect; silent
+    // fall-through to the compile-time list would hide bugs.
+    if let Some(path) = &args.hsts_preload_list_path {
+        let path_str = path.to_string_lossy().into_owned();
+        match kemist::scanner::http::load_preload_override_from_path(&path_str) {
+            Ok(ov) => kemist::scanner::http::install_preload_override(ov),
+            Err(e) => anyhow::bail!("failed to load HSTS preload override from {path_str}: {e}"),
+        }
+    } else {
+        // No explicit override — try the cache. This is a no-op
+        // when the cache is empty or the manifest is unverifiable.
+        kemist::scanner::http::install_preload_from_cache_if_fresh();
+    }
+
+    // Multi-trust-store registry. Parse CLI flags into name->path
+    // maps, then build the registry (compiled bundles + overrides
+    // + extras). Must happen before any scan since probe-time
+    // validation reads the registry.
+    let ts_overrides = parse_name_path_flags("--trust-store", &args.trust_store)?;
+    let ts_extras = parse_name_path_flags("--extra-trust-store", &args.extra_trust_store)?;
+    let registry =
+        match kemist::scanner::trust_stores::build_default_registry(&ts_overrides, &ts_extras) {
+            Ok(r) => r,
+            Err(e) => anyhow::bail!("trust-store setup failed: {e}"),
+        };
+    kemist::scanner::trust_stores::install_registry(registry);
+
     // Collect targets from all three input sources.
     let targets = collect_targets(&args)?;
     if targets.is_empty() {
@@ -182,6 +335,9 @@ async fn run() -> Result<()> {
         config_paths: vec![],
         enable_http_checks: args.enable_http_checks,
         user_agent_info_url,
+        include_ocsp_raw: args.include_ocsp_raw,
+        sigalg_probe_skip: args.sigalg_probe_skip.clone(),
+        enable_revocation_fetch: args.enable_revocation_fetch,
     });
 
     let results = scanner.scan_many(targets).await;
@@ -204,8 +360,7 @@ fn install_logging(verbose: u8) {
 }
 
 fn enabled_cargo_features() -> Vec<String> {
-    // No cargo features defined on kemist today. PR 13 will replace this
-    // with a build-time feature inspection macro.
+    // Placeholder for build-time feature inspection.
     Vec::new()
 }
 

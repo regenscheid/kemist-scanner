@@ -114,9 +114,9 @@ impl ScannerError {
 
     /// Classify a `std::io::Error` into a ScannerError category. Inspects
     /// `ErrorKind` first, then falls back to string heuristics for TLS
-    /// alerts surfaced through tokio_rustls. PR 5 will replace string
-    /// matching with direct rustls connection-state inspection where
-    /// available.
+    /// alerts surfaced through tokio_rustls. Future work: replace the
+    /// string matching with direct rustls connection-state inspection
+    /// where available, to drop the fragile `msg.contains(...)` parsing.
     pub fn from_io(op: &str, e: std::io::Error) -> Self {
         use std::io::ErrorKind;
         let ctx = format!("{op}: {e}");

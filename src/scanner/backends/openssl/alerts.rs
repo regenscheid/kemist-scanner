@@ -1,6 +1,6 @@
 //! Shared OpenSSL error → `ScannerError` classifier.
 //!
-//! Parallels [`crate::scanner::ciphers::classify_probe_error`] on the rustls
+//! Parallels [`crate::scanner::backends::rustls::ciphers::classify_probe_error`] on the rustls
 //! side — maps `openssl::ssl::Error` into the same `tls_alert_<snake_name>`
 //! categories that rule engines already key on. Load-bearing invariant:
 //! downstream consumers should not need to know which backend produced a

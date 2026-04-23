@@ -34,9 +34,9 @@
         "enabled_features",
         "rustls_version",
         "aws_lc_rs_version",
-        "native_tls_version",
-        "provider_cipher_suites",
-        "provider_kx_groups",
+        "openssl_version",
+        "probed_cipher_suites",
+        "probed_kx_groups",
         "config_paths",
         "probe_limitations"
       ],
@@ -44,9 +44,9 @@
         "enabled_features": { "type": "array", "items": { "type": "string" } },
         "rustls_version": { "type": "string" },
         "aws_lc_rs_version": { "type": "string" },
-        "native_tls_version": { "type": "string" },
-        "provider_cipher_suites": { "type": "array", "items": { "type": "string" } },
-        "provider_kx_groups": { "type": "array", "items": { "type": "string" } },
+        "openssl_version": { "type": "string" },
+        "probed_cipher_suites": { "type": "array", "items": { "type": "string" } },
+        "probed_kx_groups": { "type": "array", "items": { "type": "string" } },
         "config_paths": { "type": "array", "items": { "type": "string" } },
         "probe_limitations": { "type": "array", "items": { "type": "string" } }
       },
@@ -78,7 +78,11 @@
         "sni_behavior",
         "dh_parameters",
         "server_key_exchange_signatures",
-        "renegotiation_behavior"
+        "renegotiation_behavior",
+        "session_resumption",
+        "signature_algorithm_policy_probe",
+        "channel_binding",
+        "alpn_probe"
       ],
       "properties": {
         "versions_offered": {
@@ -108,8 +112,14 @@
         },
         "cipher_suites": {
           "type": "object",
-          "required": ["tls1_0", "tls1_1", "tls1_2", "tls1_3", "server_enforces_order"],
+          "required": ["ssl3", "tls1_0", "tls1_1", "tls1_2", "tls1_3", "server_enforces_order"],
           "properties": {
+            "ssl2": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/cipherSuiteEntry" },
+              "description": "SSLv2 SERVER-HELLO cipher_specs echoed back by the server. Empty on modern servers (expected)."
+            },
+            "ssl3": { "type": "array", "items": { "$ref": "#/$defs/cipherSuiteEntry" } },
             "tls1_0": { "type": "array", "items": { "$ref": "#/$defs/cipherSuiteEntry" } },
             "tls1_1": { "type": "array", "items": { "$ref": "#/$defs/cipherSuiteEntry" } },
             "tls1_2": { "type": "array", "items": { "$ref": "#/$defs/cipherSuiteEntry" } },
@@ -144,7 +154,15 @@
             "encrypt_then_mac",
             "heartbeat_present",
             "heartbeat_echoes_oversized_payload",
-            "compression_offered"
+            "compression_offered",
+            "truncated_hmac",
+            "npn",
+            "supported_point_formats_echoed",
+            "grease_echoed",
+            "hello_retry_request",
+            "delegated_credentials",
+            "ephemeral_key_reuse",
+            "bleichenbacher_oracle_probe"
           ],
           "properties": {
             "ems": { "$ref": "#/$defs/observationBool" },
@@ -156,7 +174,17 @@
                 "stapled": { "type": ["boolean", "null"] },
                 "method": { "$ref": "#/$defs/method" },
                 "reason": { "type": "string" },
-                "response_length": { "type": "integer", "minimum": 0 }
+                "response_length": { "type": "integer", "minimum": 0 },
+                "content": { "$ref": "#/$defs/ocspResponseContent" },
+                "delivery_path": {
+                  "type": "string",
+                  "enum": ["tls1_2", "tls1_3"],
+                  "description": "TLS layer the staple arrived over — CertificateStatus (tls1_2) or status_request in EncryptedExtensions (tls1_3)."
+                },
+                "raw_hex": {
+                  "type": "string",
+                  "description": "Raw DER bytes of the OCSP response, lower-case hex. Gated by `--include-ocsp-raw`."
+                }
               },
               "additionalProperties": false
             },
@@ -173,16 +201,130 @@
             "encrypt_then_mac": { "$ref": "#/$defs/observationBool" },
             "heartbeat_present": { "$ref": "#/$defs/observationBool" },
             "heartbeat_echoes_oversized_payload": { "$ref": "#/$defs/observationBool" },
-            "compression_offered": { "type": "array", "items": { "type": "string" } }
+            "compression_offered": { "type": "array", "items": { "type": "string" } },
+            "truncated_hmac": { "$ref": "#/$defs/observationBool" },
+            "npn": { "$ref": "#/$defs/observationBool" },
+            "supported_point_formats_echoed": {
+              "type": "array",
+              "items": { "type": "string" }
+            },
+            "max_fragment_length": {
+              "type": "string",
+              "description": "RFC 6066 §4 — server-echoed max_fragment_length code. `2^9`..`2^12` for values 1-4; `0xNN` for unknown bytes."
+            },
+            "record_size_limit": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 65535,
+              "description": "RFC 8449 — observed in TLS 1.3 EncryptedExtensions. Populated when the OpenSSL-backed EE probe (feature `legacy-probes`) completed a TLS 1.3 handshake and the server advertised the extension."
+            },
+            "compress_certificate_algorithms": {
+              "type": "array",
+              "items": { "type": "string" },
+              "description": "RFC 8879 — server-advertised certificate compression algorithms. Populated via the OpenSSL EncryptedExtensions probe."
+            },
+            "grease_echoed": { "$ref": "#/$defs/observationBool" },
+            "hello_retry_request": { "$ref": "#/$defs/observationBool" },
+            "delegated_credentials": {
+              "type": "object",
+              "required": ["value"],
+              "properties": {
+                "value": { "$ref": "#/$defs/observationBool" },
+                "valid_time_seconds": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 4294967295,
+                  "description": "RFC 9345 §4.1 — seconds from leaf cert `notBefore` at which the DC expires. Present only on the TLS 1.3 CertificateEntry path."
+                },
+                "expected_cert_verify_algorithm": {
+                  "type": "string",
+                  "description": "Canonical IANA SignatureScheme name for the DC's signature (`ecdsa_secp256r1_sha256`, etc.), or `0xNNNN` for unknown codepoints. Present only on the TLS 1.3 CertificateEntry path."
+                },
+                "delivery_path": {
+                  "type": "string",
+                  "enum": ["tls1_3_certificate_entry", "tls1_2_server_hello"],
+                  "description": "Observation path that produced this record."
+                }
+              },
+              "additionalProperties": false,
+              "description": "RFC 9345 delegated-credentials observation. TLS 1.2 path emits presence-only via ServerHello ext 0x0022; TLS 1.3 path parses the leaf CertificateEntry extensions. The scanner records observable fields; it does not verify the DC signature or compare `valid_time` against the wall clock."
+            },
+            "ephemeral_key_reuse": {
+              "type": "object",
+              "required": [
+                "dhe_public_reused_across_connections",
+                "ecdhe_public_reused_across_connections"
+              ],
+              "properties": {
+                "dhe_public_reused_across_connections": { "$ref": "#/$defs/observationBool" },
+                "ecdhe_public_reused_across_connections": { "$ref": "#/$defs/observationBool" },
+                "dhe_suite_probed": {
+                  "type": "string",
+                  "description": "IANA name of the DHE suite pinned for the two reuse-detection handshakes. Absent when no DHE suite was observed supported."
+                },
+                "ecdhe_suite_probed": {
+                  "type": "string",
+                  "description": "IANA name of the ECDHE suite pinned for the two reuse-detection handshakes. Absent when no ECDHE suite was observed supported."
+                }
+              },
+              "additionalProperties": false,
+              "description": "Ephemeral DH/ECDH public-value reuse observation (Raccoon signal, CVE-2020-1968). For each family the scanner runs two sequential TLS 1.2 handshakes against a supported suite and compares the server's ephemeral public value byte-for-byte. `true` = the server reused its ephemeral key across fresh handshakes; `false` = distinct keys; `not_probed` when no suite in the family was observed supported. Scanner records, downstream rule engines interpret."
+            },
+            "bleichenbacher_oracle_probe": {
+              "type": "object",
+              "required": ["method", "per_variant"],
+              "properties": {
+                "rsa_kex_suite_probed": {
+                  "type": "string",
+                  "description": "IANA name of the RSA-kex suite the probe pinned (`TLS_RSA_WITH_AES_128_CBC_SHA` today)."
+                },
+                "method": { "$ref": "#/$defs/method" },
+                "reason": { "type": "string" },
+                "per_variant": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "required": ["variant", "tcp_reset", "elapsed_ms"],
+                    "properties": {
+                      "variant": {
+                        "type": "string",
+                        "enum": [
+                          "correctly_formatted_pkcs1",
+                          "invalid_0x00_02_prefix",
+                          "invalid_version_0x00_02_byte_swap",
+                          "null_separator_missing",
+                          "wrong_tls_version_in_pms"
+                        ]
+                      },
+                      "alert_category": { "type": "string" },
+                      "tcp_reset": { "type": "boolean" },
+                      "elapsed_ms": { "type": "integer", "minimum": 0 },
+                      "other_outcome": {
+                        "type": "string",
+                        "description": "Non-alert, non-RST outcome: `timeout`, `graceful_close`, `unexpected_plaintext:<detail>`, `setup_error:<detail>`."
+                      }
+                    },
+                    "additionalProperties": false
+                  },
+                  "description": "Exactly five entries in a stable variant order when `method` is `probe`; empty when `not_probed`."
+                }
+              },
+              "additionalProperties": false,
+              "description": "Bleichenbacher / ROBOT differential probe. For each of five malformed PKCS#1 v1.5 `ClientKeyExchange` variants the scanner runs a fresh TLS 1.2 handshake against an RSA-kex suite, sends the malformed CKE + ChangeCipherSpec + a Finished placeholder, and records the server's response (alert category / TCP RST / timeout / graceful close). Scanner records the per-variant table; downstream rule engines compare. No `vulnerable` boolean is emitted."
+            }
           },
           "additionalProperties": false
         },
         "downgrade_signaling": {
           "type": "object",
-          "required": ["fallback_scsv_accepted", "fallback_scsv_enforced"],
+          "required": ["fallback_scsv_enforced"],
           "properties": {
-            "fallback_scsv_accepted": { "$ref": "#/$defs/observationBool" },
-            "fallback_scsv_enforced": { "$ref": "#/$defs/observationBool" }
+            "fallback_scsv_enforced": { "$ref": "#/$defs/observationBool" },
+            "tls13_downgrade_sentinel": {
+              "type": "string",
+              "description": "RFC 8446 §4.1.3 sentinel observed in the last 8 bytes of ServerRandom. Optional — absent when the hello probe never produced a ServerHello.",
+              "enum": ["tls12", "lte_tls11", "none"]
+            }
           },
           "additionalProperties": false
         },
@@ -220,6 +362,8 @@
           },
           "additionalProperties": false
         },
+        "session_resumption": { "$ref": "#/$defs/sessionResumption" },
+        "signature_algorithm_policy_probe": { "$ref": "#/$defs/sigalgPolicyProbe" },
         "client_auth_request": {
           "type": ["object", "null"],
           "required": ["requested", "method"],
@@ -260,6 +404,34 @@
             "reason": { "type": "string" }
           },
           "additionalProperties": false
+        },
+        "channel_binding": {
+          "type": "object",
+          "required": ["tls_exporter", "tls_server_end_point"],
+          "properties": {
+            "tls_exporter": { "$ref": "#/$defs/channelBindingValue" },
+            "tls_server_end_point": { "$ref": "#/$defs/channelBindingValue" }
+          },
+          "additionalProperties": false,
+          "description": "RFC 9266 tls-exporter (TLS 1.3 only) and RFC 5929 §4 tls-server-end-point (SHA-256 of leaf cert DER)."
+        },
+        "alpn_probe": {
+          "type": "array",
+          "description": "Per-ALPN-protocol probe matrix. One entry per probed token (h2, http/1.1, http/1.0). Complements `negotiated.alpn` — records which ALPNs the server accepts when offered alone, not just what it prefers when several are offered.",
+          "items": {
+            "type": "object",
+            "required": ["protocol", "supported", "method"],
+            "properties": {
+              "protocol": { "type": "string" },
+              "supported": { "type": ["boolean", "null"] },
+              "method": { "$ref": "#/$defs/method" },
+              "reason": {
+                "type": "string",
+                "description": "Populated on `supported: false` or `method: error`. Canonical values: `no_application_protocol_alert` (RFC 7301 rejection), `server_returned_mismatched_alpn:<name>` (server picked a different ALPN than offered), `server_did_not_select_any_alpn`, `tls_alert_<name>` (unrelated alert), transport-level categories."
+              }
+            },
+            "additionalProperties": false
+          }
         }
       },
       "additionalProperties": false
@@ -276,11 +448,56 @@
     },
     "validation": {
       "type": "object",
-      "required": ["chain_valid_to_webpki_roots", "name_matches_sni"],
+      "required": [
+        "chain_valid_to_webpki_roots",
+        "chain_valid_to_microsoft_roots",
+        "chain_valid_to_apple_roots",
+        "chain_valid_to_us_fpki_common_roots",
+        "chain_valid_to_us_dod_roots",
+        "name_matches_sni"
+      ],
       "properties": {
         "chain_valid_to_webpki_roots": { "$ref": "#/$defs/observationBool" },
+        "chain_valid_to_microsoft_roots": { "$ref": "#/$defs/observationBool" },
+        "chain_valid_to_apple_roots": { "$ref": "#/$defs/observationBool" },
+        "chain_valid_to_us_fpki_common_roots": { "$ref": "#/$defs/observationBool" },
+        "chain_valid_to_us_dod_roots": { "$ref": "#/$defs/observationBool" },
+        "chain_valid_to_custom_roots": {
+          "type": "object",
+          "description": "--extra-trust-store entries keyed by user-supplied name. Each value is a three-state observationBool under the same semantics as the compiled-in stores.",
+          "additionalProperties": { "$ref": "#/$defs/observationBool" }
+        },
         "name_matches_sni": { "$ref": "#/$defs/observationBool" },
-        "validation_error": { "type": ["string", "null"] }
+        "validation_error": { "type": ["string", "null"] },
+        "per_store_validation_errors": {
+          "type": "object",
+          "description": "Per-store error strings — populated only for stores whose chain-validation attempt failed. Keys are canonical store names.",
+          "additionalProperties": { "type": "string" }
+        },
+        "trust_store_sources": {
+          "type": "object",
+          "description": "Provenance per trust store: `compiled_in` (build-time bundle), `cache_refreshed:<path>` (loaded from the cache written by `kemist --update-trust-stores`), or `runtime_override:<path>` (loaded from a user-supplied `--trust-store NAME:PATH`). One entry per store attempted.",
+          "additionalProperties": {
+            "type": "string",
+            "pattern": "^(compiled_in|cache_refreshed:.+|runtime_override:.+)$"
+          }
+        },
+        "trust_store_bundle_metadata": {
+          "type": "object",
+          "description": "Per-store manifest metadata for cache-refreshed bundles. Populated only for stores whose breadcrumb is `cache_refreshed:...`; compile-time and runtime-override loads omit their entry. Lets rule engines pin observations to a specific snapshot.",
+          "additionalProperties": {
+            "type": "object",
+            "required": ["source", "fetched_at", "sha256", "entry_count"],
+            "properties": {
+              "source": { "type": "string" },
+              "fetched_at": { "type": "string", "format": "date-time" },
+              "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+              "entry_count": { "type": "integer", "minimum": 0 },
+              "upstream_version": { "type": "string" }
+            },
+            "additionalProperties": false
+          }
+        }
       },
       "additionalProperties": false
     },
@@ -291,7 +508,85 @@
         "enabled": { "type": "boolean" },
         "hsts": { "type": "object" },
         "preload_list_status": { "type": "string" },
-        "security_txt": { "type": "object" }
+        "preload_list_source": {
+          "type": "string",
+          "description": "Provenance of the HSTS preload snapshot used for this observation. `compiled_in` = the build-time Chromium snapshot bundled in the binary. `runtime_override:<path>` = an override file supplied via `--hsts-preload-list-path`. Consumers comparing results across runs must check this — the `preload_list_status` value is only comparable under the same source snapshot.",
+          "pattern": "^(compiled_in|runtime_override:.+)$"
+        },
+        "security_txt": {
+          "type": "object",
+          "properties": {
+            "present": { "type": "boolean" },
+            "url": { "type": "string" },
+            "content_type": { "type": "string" },
+            "body": { "type": "string" },
+            "parsed": {
+              "type": "object",
+              "description": "Structured RFC 9116 decomposition. Each directive's values are collected in order of appearance.",
+              "properties": {
+                "contact": { "type": "array", "items": { "type": "string" } },
+                "expires": { "type": "string" },
+                "encryption": { "type": "array", "items": { "type": "string" } },
+                "preferred_languages": { "type": "array", "items": { "type": "string" } },
+                "canonical": { "type": "array", "items": { "type": "string" } },
+                "policy": { "type": "array", "items": { "type": "string" } },
+                "hiring": { "type": "array", "items": { "type": "string" } },
+                "acknowledgments": { "type": "array", "items": { "type": "string" } },
+                "pgp_signed": { "type": "boolean" }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        "security_headers": {
+          "type": "object",
+          "description": "HTTP response headers beyond HSTS — CSP, frame-options, referrer-policy, permissions-policy, cross-origin family, Set-Cookie flags. Raw values preserved; cookie values intentionally omitted (potential session-token leak).",
+          "properties": {
+            "content_security_policy": { "type": "string" },
+            "content_security_policy_report_only": { "type": "string" },
+            "x_frame_options": { "type": "string" },
+            "x_content_type_options": { "type": "string" },
+            "referrer_policy": { "type": "string" },
+            "permissions_policy": { "type": "string" },
+            "cross_origin_opener_policy": { "type": "string" },
+            "cross_origin_embedder_policy": { "type": "string" },
+            "cross_origin_resource_policy": { "type": "string" },
+            "reporting_endpoints": { "type": "string" },
+            "set_cookies": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["name", "secure", "http_only"],
+                "properties": {
+                  "name": { "type": "string" },
+                  "secure": { "type": "boolean" },
+                  "http_only": { "type": "boolean" },
+                  "same_site": {
+                    "type": "string",
+                    "description": "Canonical values: `Strict`, `Lax`, `None`. Other strings preserved as-sent."
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        "redirect_chain": {
+          "type": "array",
+          "description": "Observed redirect chain for GET /, up to 10 hops. Terminal entry has a non-3xx status and no location.",
+          "items": {
+            "type": "object",
+            "required": ["url", "status"],
+            "properties": {
+              "url": { "type": "string" },
+              "status": { "type": "integer", "minimum": 0, "maximum": 599 },
+              "location": { "type": "string" }
+            },
+            "additionalProperties": false
+          }
+        }
       },
       "additionalProperties": false
     },
@@ -337,6 +632,30 @@
         }
       ]
     },
+    "channelBindingValue": {
+      "type": "object",
+      "required": ["method"],
+      "properties": {
+        "value": {
+          "type": "string",
+          "pattern": "^[0-9a-f]+$",
+          "description": "Lower-case hex encoding of the channel-binding bytes."
+        },
+        "method": { "$ref": "#/$defs/method" },
+        "reason": { "type": "string" }
+      },
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": { "properties": { "method": { "const": "probe" } } },
+          "then": { "required": ["value"] }
+        },
+        {
+          "if": { "properties": { "method": { "enum": ["not_probed", "not_applicable", "error"] } } },
+          "then": { "required": ["reason"] }
+        }
+      ]
+    },
     "versionOffered": {
       "type": "object",
       "required": ["offered", "method"],
@@ -361,15 +680,40 @@
     },
     "cipherSuiteEntry": {
       "type": "object",
-      "required": ["name", "iana_code", "supported", "method"],
+      "required": ["name", "iana_code", "supported", "method", "classification"],
       "properties": {
         "name": { "type": "string" },
-        "iana_code": { "type": "string", "pattern": "^0x[0-9A-Fa-f]{4}$" },
+        "iana_code": {
+          "type": "string",
+          "pattern": "^0x([0-9A-Fa-f]{4}|[0-9A-Fa-f]{6})$",
+          "description": "IANA cipher-suite codepoint. TLS 1.0+ uses 2-byte codes (`0xNNNN`); SSLv2 cipher_specs are 3-byte (`0xNNNNNN`)."
+        },
         "supported": { "type": ["boolean", "null"] },
         "method": { "$ref": "#/$defs/method" },
         "reason": { "type": "string" },
         "openssl_name": { "type": "string" },
-        "provider": { "type": "string", "enum": ["aws_lc_rs", "openssl"] }
+        "provider": { "type": "string", "enum": ["aws_lc_rs", "openssl", "raw_socket"] },
+        "classification": {
+          "type": "string",
+          "description": "Kx + privacy family per src/model/cipher_classification.rs. Values are stable within schema v1.x; new values may be added.",
+          "enum": [
+            "rsa_kex",
+            "dhe_aead",
+            "dhe_cbc",
+            "ecdhe_aead",
+            "ecdhe_cbc",
+            "anon",
+            "export",
+            "static_dh",
+            "static_ecdh",
+            "psk",
+            "dhe_psk",
+            "ecdhe_psk",
+            "rsa_psk",
+            "null_cipher",
+            "other"
+          ]
+        }
       },
       "additionalProperties": false,
       "allOf": [
@@ -424,11 +768,12 @@
         "validity_days",
         "signature_algorithm_oid",
         "signature_algorithm_name",
-        "is_pqc_signature",
+        "signature_algorithm_structured",
         "public_key",
         "embedded_scts",
         "fingerprint_sha256",
-        "fingerprint_sha1"
+        "fingerprint_sha1",
+        "wire_position"
       ],
       "properties": {
         "subject_cn": { "type": "string" },
@@ -442,20 +787,308 @@
         "validity_days": { "type": "integer" },
         "signature_algorithm_oid": { "type": "string" },
         "signature_algorithm_name": { "type": "string" },
-        "is_pqc_signature": { "type": "boolean" },
+        "signature_algorithm_structured": {
+          "type": "object",
+          "required": ["algorithm"],
+          "properties": {
+            "hash": { "type": "string" },
+            "algorithm": { "type": "string" },
+            "parameters": { "type": "string" }
+          },
+          "additionalProperties": false,
+          "description": "Structured decomposition of the signature-algorithm identifier. `hash` is the canonical hash family (`sha256`, etc.) or absent for schemes that hash internally. `algorithm` is the family (`rsa`, `rsa_pss`, `ecdsa`, `ed25519`, `ml_dsa_65`, `slh_dsa_sha2_128s`, ...)."
+        },
+        "pqc_signature_family": {
+          "type": "string",
+          "enum": ["ml_dsa", "slh_dsa", "composite"],
+          "description": "Present when the signature OID is PQC. Replaces the earlier `is_pqc_signature: bool` — a boolean `has_pqc = pqc_signature_family !== undefined` recovers the old semantics."
+        },
         "public_key": {
           "type": "object",
           "required": ["algorithm", "size_bits"],
           "properties": {
             "algorithm": { "type": "string" },
             "size_bits": { "type": "integer", "minimum": 0 },
-            "curve": { "type": "string" }
+            "curve": { "type": "string" },
+            "curve_oid": { "type": "string" },
+            "rsa_exponent": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "RSA public exponent. Present only for RSA keys; values observed in practice are 3, 17, or 65537."
+            }
           },
           "additionalProperties": false
         },
         "embedded_scts": { "type": "integer", "minimum": 0 },
         "fingerprint_sha256": { "type": "string" },
-        "fingerprint_sha1": { "type": "string" }
+        "fingerprint_sha1": { "type": "string" },
+        "wire_position": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Position of this cert in the wire-order chain delivered by the server. `0` is the leaf; subsequent integers are intermediates in the order the server sent them. Duplicates are preserved (each copy carries its own position); parse failures appear as gaps in the sequence across `Certificates.chain`. Downstream rule engines observe chain ordering through this field directly."
+        },
+        "extensions": { "$ref": "#/$defs/certExtensions" },
+        "revocation": {
+          "type": "object",
+          "description": "Out-of-band revocation observations scoped to this cert. Populated only for the leaf and only when `--enable-revocation-fetch` is set. Distinct from `tls.extensions.ocsp_stapling`, which captures the server's in-band stapling behavior at the TLS layer (delivered regardless of cert scope).",
+          "properties": {
+            "ocsp_http_fallback": {
+              "type": "array",
+              "description": "OCSP-over-HTTP fetch results — one entry per AIA OCSP URL queried.",
+              "items": {
+                "type": "object",
+                "required": ["url", "response_length"],
+                "properties": {
+                  "url": { "type": "string" },
+                  "http_status": { "type": "integer", "minimum": 100, "maximum": 599 },
+                  "response_length": { "type": "integer", "minimum": 0 },
+                  "content": { "$ref": "#/$defs/ocspResponseContent" },
+                  "error": { "type": "string" }
+                },
+                "additionalProperties": false
+              }
+            },
+            "crl_fetch": {
+              "type": "array",
+              "description": "CRL fetch + revocation-check results — one entry per CRLDistributionPoints URL. `leaf_revoked: true/false/null` distinguishes definite revocation / definite not-revoked / inconclusive.",
+              "items": {
+                "type": "object",
+                "required": ["url"],
+                "properties": {
+                  "url": { "type": "string" },
+                  "http_status": { "type": "integer", "minimum": 100, "maximum": 599 },
+                  "this_update": { "type": "string" },
+                  "next_update": { "type": "string" },
+                  "crl_issuer": { "type": "string" },
+                  "revoked_cert_count": { "type": "integer", "minimum": 0 },
+                  "leaf_revoked": { "type": ["boolean", "null"] },
+                  "revocation_time": { "type": "string" },
+                  "revocation_reason": { "type": "string" },
+                  "error": { "type": "string" }
+                },
+                "additionalProperties": false
+              }
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "certExtensions": {
+      "type": "object",
+      "description": "X.509 v3 extension observations per RFC 5280 + RFC 7633 + RFC 6962. Every sub-field optional; absent means the extension was not present on the cert (or kemist could not parse it).",
+      "properties": {
+        "basic_constraints": {
+          "type": "object",
+          "required": ["ca"],
+          "properties": {
+            "ca": { "type": "boolean" },
+            "path_len_constraint": { "type": "integer", "minimum": 0 }
+          },
+          "additionalProperties": false
+        },
+        "key_usage": {
+          "type": "object",
+          "required": ["bits"],
+          "properties": {
+            "bits": {
+              "type": "array",
+              "items": { "type": "string" }
+            }
+          },
+          "additionalProperties": false
+        },
+        "extended_key_usage": {
+          "type": "object",
+          "required": ["oids"],
+          "properties": {
+            "oids": {
+              "type": "array",
+              "items": { "type": "string" }
+            }
+          },
+          "additionalProperties": false
+        },
+        "authority_key_identifier": { "type": "string" },
+        "subject_key_identifier":   { "type": "string" },
+        "authority_information_access": {
+          "type": "object",
+          "required": ["ocsp", "ca_issuers"],
+          "properties": {
+            "ocsp":       { "type": "array", "items": { "type": "string" } },
+            "ca_issuers": { "type": "array", "items": { "type": "string" } }
+          },
+          "additionalProperties": false
+        },
+        "crl_distribution_points": {
+          "type": "object",
+          "required": ["urls"],
+          "properties": {
+            "urls": { "type": "array", "items": { "type": "string" } }
+          },
+          "additionalProperties": false
+        },
+        "name_constraints": {
+          "type": "object",
+          "required": ["permitted_subtrees", "excluded_subtrees"],
+          "properties": {
+            "permitted_subtrees": { "type": "array", "items": { "type": "string" } },
+            "excluded_subtrees":  { "type": "array", "items": { "type": "string" } }
+          },
+          "additionalProperties": false
+        },
+        "certificate_policies": {
+          "type": "object",
+          "required": ["oids"],
+          "properties": {
+            "oids": { "type": "array", "items": { "type": "string" } }
+          },
+          "additionalProperties": false
+        },
+        "must_staple": { "type": "boolean" },
+        "scts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "log_id",
+              "timestamp",
+              "signature_hash_algorithm",
+              "signature_algorithm",
+              "signature_hex"
+            ],
+            "properties": {
+              "log_id":                   { "type": "string" },
+              "timestamp":                { "type": "string", "format": "date-time" },
+              "signature_hash_algorithm": { "type": "string" },
+              "signature_algorithm":      { "type": "string" },
+              "signature_hex":            { "type": "string" }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "ocspResponseContent": {
+      "type": "object",
+      "description": "Parsed BasicOCSPResponse per RFC 6960 §4.2. Every field optional except `response_status`; parser is best-effort and tolerant of partial data.",
+      "required": ["response_status", "single_responses_count"],
+      "properties": {
+        "response_status": {
+          "type": "string",
+          "description": "RFC 6960 OCSPResponseStatus: successful, malformedRequest, internalError, tryLater, sigRequired, unauthorized, or unknown_<n>."
+        },
+        "signature_algorithm_oid": { "type": "string" },
+        "responder_id_by_name":    { "type": "string" },
+        "responder_id_by_key":     { "type": "string" },
+        "produced_at":             { "type": "string", "format": "date-time" },
+        "single_responses_count":  { "type": "integer", "minimum": 0 },
+        "cert_status": {
+          "type": "string",
+          "enum": ["good", "revoked", "unknown"]
+        },
+        "revocation_time":   { "type": "string", "format": "date-time" },
+        "revocation_reason": { "type": "string" },
+        "this_update":       { "type": "string", "format": "date-time" },
+        "next_update":       { "type": "string", "format": "date-time" },
+        "cert_id": {
+          "type": "object",
+          "required": [
+            "hash_algorithm_oid",
+            "issuer_name_hash_hex",
+            "issuer_key_hash_hex",
+            "serial_number_hex"
+          ],
+          "properties": {
+            "hash_algorithm_oid":  { "type": "string" },
+            "issuer_name_hash_hex":{ "type": "string" },
+            "issuer_key_hash_hex": { "type": "string" },
+            "serial_number_hex":   { "type": "string" }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "sigalgPolicyProbe": {
+      "type": "object",
+      "description": "Phase G — per-constraint outcomes from restricted signature_algorithms handshakes. Every slot always present; `method: not_probed` + reason when skipped or feature-disabled.",
+      "required": ["sha256_plus_only", "ecdsa_only", "rsa_pss_only", "rsa_pkcs1_only", "eddsa_only"],
+      "properties": {
+        "sha256_plus_only": { "$ref": "#/$defs/constrainedProbeResult" },
+        "ecdsa_only":       { "$ref": "#/$defs/constrainedProbeResult" },
+        "rsa_pss_only":     { "$ref": "#/$defs/constrainedProbeResult" },
+        "rsa_pkcs1_only":   { "$ref": "#/$defs/constrainedProbeResult" },
+        "eddsa_only":       { "$ref": "#/$defs/constrainedProbeResult" }
+      },
+      "additionalProperties": false
+    },
+    "constrainedProbeResult": {
+      "type": "object",
+      "required": ["outcome", "method"],
+      "properties": {
+        "outcome": {
+          "type": "string",
+          "enum": [
+            "handshake_complete",
+            "handshake_failure",
+            "connection_closed",
+            "other_alert",
+            "not_probed"
+          ]
+        },
+        "selected_sigalg": { "type": "string" },
+        "alert":           { "type": "string" },
+        "method":          { "$ref": "#/$defs/method" },
+        "reason":          { "type": "string" },
+        "leaf_fingerprint_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "description": "Lowercase hex SHA-256 of the DER of the leaf cert the server returned under this constraint. Populated only when the handshake completed. Two distinct values across the sigalg probe set signal a dual-cert deployment (e.g. RSA + ECDSA leaves)."
+        },
+        "leaf_subject_dn": {
+          "type": "string",
+          "description": "Subject DN of the leaf cert returned under this constraint. Same formatting as `certificates.leaf.subject_dn`. Convenience for log correlation; the authoritative identifier is `leaf_fingerprint_sha256`."
+        }
+      },
+      "additionalProperties": false
+    },
+    "sessionResumption": {
+      "type": "object",
+      "description": "Session resumption observations. TLS 1.2 ticket + rotation populated via a two-connection OpenSSL probe; TLS 1.3 PSK resumption and 0-RTT are stubbed as NotProbed pending a follow-up workstream.",
+      "required": ["tls1_2", "tls1_3"],
+      "properties": {
+        "tls1_2": {
+          "type": "object",
+          "required": [
+            "session_ticket_issued",
+            "session_id_issued",
+            "ticket_rotated_across_connections"
+          ],
+          "properties": {
+            "session_ticket_issued":             { "$ref": "#/$defs/observationBool" },
+            "ticket_lifetime_hint_secs":         { "type": "integer", "minimum": 0 },
+            "session_id_issued":                 { "$ref": "#/$defs/observationBool" },
+            "ticket_rotated_across_connections": { "$ref": "#/$defs/observationBool" }
+          },
+          "additionalProperties": false
+        },
+        "tls1_3": {
+          "type": "object",
+          "required": ["psk_resumption_accepted", "early_data_accepted"],
+          "properties": {
+            "new_session_ticket_count": { "type": "integer", "minimum": 0 },
+            "ticket_lifetime_secs": {
+              "type": "array",
+              "items": { "type": "integer", "minimum": 0 }
+            },
+            "psk_resumption_accepted": { "$ref": "#/$defs/observationBool" },
+            "early_data_accepted":     { "$ref": "#/$defs/observationBool" }
+          },
+          "additionalProperties": false
+        }
       },
       "additionalProperties": false
     }

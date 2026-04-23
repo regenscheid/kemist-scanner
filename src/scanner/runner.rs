@@ -2,8 +2,8 @@
 //!
 //! `Scanner` wraps the internal probe orchestrator with DNS resolution,
 //! timing, retry logic, and schema-v1 conversion. It is the stable surface
-//! downstream consumers depend on — probe internals will churn as PR 5+
-//! land, but `Scanner::scan(Target) -> ScanResult` and
+//! downstream consumers depend on — probe internals will churn over time,
+//! but `Scanner::scan(Target) -> ScanResult` and
 //! `Scanner::scan_many(Vec<Target>) -> Vec<ScanResult>` do not.
 
 use std::net::{IpAddr, SocketAddr};
@@ -30,8 +30,9 @@ pub struct ScannerConfig {
     /// Maximum concurrent targets. Probes to a single target are always
     /// sequential — this limits parallelism across distinct targets.
     pub concurrency: usize,
-    /// Minimum delay between probes to the same target. Reserved for PR 5+
-    /// wiring; today the scanner's internal probes run back-to-back.
+    /// Minimum delay between probes to the same target. Honored between
+    /// probes inside the OpenSSL subsystem; rustls-path probes currently
+    /// run back-to-back.
     pub per_target_delay: Duration,
     /// TCP connect timeout (per attempt, per target).
     pub connect_timeout: Duration,
@@ -62,6 +63,24 @@ pub struct ScannerConfig {
     /// `kemist/<ver> (+<url>)`. Let server operators trace requests
     /// back to a kemist scan.
     pub user_agent_info_url: String,
+    /// Emit `tls.extensions.ocsp_stapling.raw_hex` (hex of the raw
+    /// OCSP response bytes) alongside the parsed `content`. Off by
+    /// default — rule engines rarely need the raw bytes, and
+    /// including them inflates per-scan JSON size noticeably.
+    pub include_ocsp_raw: bool,
+    /// Canonical names of signature-algorithm policy probes the
+    /// operator explicitly skipped (`--sigalg-probe-skip=...`).
+    /// Recognized: `"sha256_plus_only"`, `"ecdsa_only"`,
+    /// `"rsa_pss_only"`, `"rsa_pkcs1_only"`. Unknown entries are
+    /// ignored.
+    pub sigalg_probe_skip: Vec<String>,
+    /// Fire active revocation fetches — CRL downloads and
+    /// OCSP-over-HTTP fallback. Default `false`; when `true`, the
+    /// scanner issues HTTP GETs to `crl_distribution_points.urls`
+    /// and HTTP POSTs to `authority_information_access.ocsp`.
+    /// Even when this flag is on, individual fetches respect
+    /// per-URL timeouts (10s) and body-size caps.
+    pub enable_revocation_fetch: bool,
 }
 
 impl Default for ScannerConfig {
@@ -80,6 +99,9 @@ impl Default for ScannerConfig {
             config_paths: Vec::new(),
             enable_http_checks: false,
             user_agent_info_url: "https://www.kemist-tls.net".to_string(),
+            include_ocsp_raw: false,
+            sigalg_probe_skip: Vec::new(),
+            enable_revocation_fetch: false,
         }
     }
 }
@@ -130,6 +152,7 @@ impl Scanner {
             completed_at,
             enabled_features: self.config.enabled_features.clone(),
             config_paths: self.config.config_paths.clone(),
+            include_ocsp_raw: self.config.include_ocsp_raw,
         };
         build_scan_result(&probe_results, &ctx)
     }
@@ -212,6 +235,8 @@ impl Scanner {
                     per_target_delay: self.config.per_target_delay,
                     enable_http_checks: self.config.enable_http_checks,
                     user_agent_info_url: self.config.user_agent_info_url.clone(),
+                    sigalg_probe_skip: self.config.sigalg_probe_skip.clone(),
+                    enable_revocation_fetch: self.config.enable_revocation_fetch,
                 };
 
                 info!(
@@ -290,6 +315,7 @@ impl Scanner {
             completed_at,
             enabled_features: self.config.enabled_features.clone(),
             config_paths: self.config.config_paths.clone(),
+            include_ocsp_raw: self.config.include_ocsp_raw,
         };
         build_scan_result(&probe_results, &ctx)
     }
@@ -308,7 +334,6 @@ fn empty_scan_results(target: &Target, addr: SocketAddr) -> crate::scanner::Scan
             compression_supported: None,
         },
         heartbeat_echoes_oversized_payload: None,
-        fallback_scsv_accepted: None,
         negotiated: None,
         alpn_offered: vec![],
         validation: crate::scanner::probe::ValidationResult::default(),
@@ -316,6 +341,14 @@ fn empty_scan_results(target: &Target, addr: SocketAddr) -> crate::scanner::Scan
         group_probes: None,
         sni_behavior: None,
         hello_observed: None,
+        hrr_observed: None,
+        sslv2_observation: None,
+        alpn_matrix: None,
+        #[cfg(all(feature = "http-checks", feature = "legacy-probes"))]
+        ocsp_http_fetch: None,
+        #[cfg(feature = "http-checks")]
+        crl_fetch: None,
+        cert_chain_der: Vec::new(),
         http_observations: None,
         #[cfg(feature = "legacy-probes")]
         openssl_observations: None,

@@ -1,0 +1,602 @@
+//! OpenSSL-backed per-group key-exchange probing.
+//!
+//! Drives `SSL_CTX_set1_groups_list` against a vendored OpenSSL 3.5.5
+//! LTS so kemist can probe named groups aws-lc-rs does not ship
+//! (`X448`, `secp521r1`, standalone ML-KEM 512/1024,
+//! `secp384r1MLKEM1024`) plus the five RFC 7919 FFDHE codepoints
+//! aws-lc-rs has no implementation for at all.
+//!
+//! Two axes per group:
+//! - TLS 1.2 — advertise the codepoint in `supported_groups` + a
+//!   DHE-only cipher list, so the server can only succeed by using
+//!   the requested group. Only meaningful for FFDHE; ECDH / ML-KEM
+//!   rows record `NotProbed("tls12_not_applicable")`.
+//! - TLS 1.3 — advertise the codepoint in both `supported_groups` and
+//!   `key_share`, protocol pinned to TLS 1.3.
+//!
+//! FFDHE rows cross-check against [`super::dh_params`]: after a
+//! successful TLS 1.2 handshake, the observed prime's SHA-256 must
+//! match the advertised codepoint. Servers that complete a DHE
+//! handshake with a *custom* prime ignored `supported_groups` — a
+//! misconfiguration finding surfaced via the
+//! [`HandshakeOutcome::IgnoredGroupReturnedCustomPrime`] variant. ECDH
+//! and ML-KEM rows skip this cross-check (their key exchange
+//! produces no modular prime).
+
+use std::net::SocketAddr;
+use std::time::Duration;
+
+use openssl::ssl::{HandshakeError, Ssl, SslContext, SslMethod, SslVerifyMode, SslVersion};
+use tracing::{debug, info};
+
+use crate::model::errors::ScannerError;
+use crate::scanner::backends::{is_wire_rejection, HandshakeOutcome};
+use crate::scanner::openssl::alerts;
+use crate::scanner::openssl::dh_params::{self, DhClassification};
+
+/// Per-group probe result across TLS 1.2 and TLS 1.3.
+#[derive(Debug, Clone)]
+pub struct KxGroupProbeResult {
+    pub group_name: String,
+    pub iana_code: u16,
+    pub tls12_outcome: HandshakeOutcome,
+    pub tls13_outcome: HandshakeOutcome,
+}
+
+/// Aggregate output of the named-group probe pass.
+#[derive(Debug, Clone, Default)]
+pub struct KxGroupProbeOutput {
+    pub results: Vec<KxGroupProbeResult>,
+}
+
+/// Static target-list row.
+struct KxGroupTarget {
+    /// Name passed to `SSL_CTX_set1_groups_list`. Must be accepted by
+    /// OpenSSL 3.5.
+    openssl_name: &'static str,
+    /// Spec-canonical name emitted into the schema. For most rows this
+    /// equals `openssl_name`; for `secp521r1` we prefer the IANA name
+    /// over OpenSSL's `"P-521"` alias.
+    display_name: &'static str,
+    /// IANA codepoint for the `iana_code` output field.
+    iana_code: u16,
+    /// True only for FFDHE rows (the only groups that ride on TLS 1.2
+    /// DHE cipher suites). ECDH and ML-KEM probes run TLS 1.3 only.
+    tls12_applicable: bool,
+    /// `Some(classification)` only for FFDHE rows — drives the
+    /// post-handshake DH-prime cross-check. `None` skips the check.
+    ffdhe_cross_check: Option<DhClassification>,
+}
+
+const TARGETS: &[KxGroupTarget] = &[
+    // RFC 7919 FFDHE — aws-lc-rs ships no implementation.
+    KxGroupTarget {
+        openssl_name: "ffdhe2048",
+        display_name: "ffdhe2048",
+        iana_code: 0x0100,
+        tls12_applicable: true,
+        ffdhe_cross_check: Some(DhClassification::Ffdhe2048),
+    },
+    KxGroupTarget {
+        openssl_name: "ffdhe3072",
+        display_name: "ffdhe3072",
+        iana_code: 0x0101,
+        tls12_applicable: true,
+        ffdhe_cross_check: Some(DhClassification::Ffdhe3072),
+    },
+    KxGroupTarget {
+        openssl_name: "ffdhe4096",
+        display_name: "ffdhe4096",
+        iana_code: 0x0102,
+        tls12_applicable: true,
+        ffdhe_cross_check: Some(DhClassification::Ffdhe4096),
+    },
+    KxGroupTarget {
+        openssl_name: "ffdhe6144",
+        display_name: "ffdhe6144",
+        iana_code: 0x0103,
+        tls12_applicable: true,
+        ffdhe_cross_check: Some(DhClassification::Ffdhe6144),
+    },
+    KxGroupTarget {
+        openssl_name: "ffdhe8192",
+        display_name: "ffdhe8192",
+        iana_code: 0x0104,
+        tls12_applicable: true,
+        ffdhe_cross_check: Some(DhClassification::Ffdhe8192),
+    },
+    // Groups OpenSSL 3.5 ships but aws-lc-rs does not.
+    // `tls12_applicable: true` here drives an additional ECDHE-pinned
+    // handshake at TLS 1.2 — the codepoint is valid across versions
+    // per RFC 4492 + RFC 8446, so servers with TLS-1.2-only ECDHE
+    // support surface visibly.
+    KxGroupTarget {
+        openssl_name: "X448",
+        display_name: "X448",
+        iana_code: 0x001E,
+        tls12_applicable: true,
+        ffdhe_cross_check: None,
+    },
+    KxGroupTarget {
+        openssl_name: "P-521",
+        display_name: "secp521r1",
+        iana_code: 0x0019,
+        tls12_applicable: true,
+        ffdhe_cross_check: None,
+    },
+    KxGroupTarget {
+        openssl_name: "MLKEM512",
+        display_name: "MLKEM512",
+        iana_code: 0x0200,
+        tls12_applicable: false,
+        ffdhe_cross_check: None,
+    },
+    KxGroupTarget {
+        openssl_name: "MLKEM1024",
+        display_name: "MLKEM1024",
+        iana_code: 0x0202,
+        tls12_applicable: false,
+        ffdhe_cross_check: None,
+    },
+    KxGroupTarget {
+        openssl_name: "SecP384r1MLKEM1024",
+        display_name: "secp384r1MLKEM1024",
+        iana_code: 0x11ED,
+        tls12_applicable: false,
+        ffdhe_cross_check: None,
+    },
+    // Brainpool curves (RFC 5639 / RFC 7027 / RFC 8734). Offered for
+    // eIDAS / German regulatory profiles that prefer non-NIST curves.
+    // OpenSSL 3.2+ uses the `-tls13` suffix for the TLS-1.3-specific
+    // variants per RFC 8734; OpenSSL's `set_groups_list` accepts both
+    // forms and normalizes internally — probing via the base name
+    // also covers the tls13 codepoint as long as the server supports
+    // the curve at all.
+    KxGroupTarget {
+        openssl_name: "brainpoolP256r1tls13",
+        display_name: "brainpoolP256r1",
+        iana_code: 0x001F,
+        tls12_applicable: false,
+        ffdhe_cross_check: None,
+    },
+    KxGroupTarget {
+        openssl_name: "brainpoolP384r1tls13",
+        display_name: "brainpoolP384r1",
+        iana_code: 0x0020,
+        tls12_applicable: false,
+        ffdhe_cross_check: None,
+    },
+    KxGroupTarget {
+        openssl_name: "brainpoolP512r1tls13",
+        display_name: "brainpoolP512r1",
+        iana_code: 0x0021,
+        tls12_applicable: false,
+        ffdhe_cross_check: None,
+    },
+    // Deprecated NIST curves. 800-52r2 §3.3.1.2 forbids <224-bit
+    // curves; probing these explicitly tells rule engines whether
+    // the server actually rejects them vs "we didn't look." The
+    // vendored OpenSSL 3.5 build accepts the names via
+    // `set_groups_list` but emits `SSL_R_NO_SUITABLE_GROUPS` at
+    // handshake-build time — the probe then reports `NotProbed` with
+    // reason `openssl_3x_group_not_available`, a concrete backend-
+    // capability signal (not a server observation).
+    KxGroupTarget {
+        openssl_name: "P-224",
+        display_name: "secp224r1",
+        iana_code: 0x0015,
+        tls12_applicable: false,
+        ffdhe_cross_check: None,
+    },
+    KxGroupTarget {
+        openssl_name: "P-192",
+        display_name: "secp192r1",
+        iana_code: 0x0013,
+        tls12_applicable: false,
+        ffdhe_cross_check: None,
+    },
+    // Koblitz curve — not a NIST curve, supported by OpenSSL's EC
+    // library but not as a TLS named group in 3.x. Same NotProbed
+    // path as the deprecated NIST curves; listed so the inventory
+    // surfaces the codepoint for downstream rule engines.
+    KxGroupTarget {
+        openssl_name: "secp256k1",
+        display_name: "secp256k1",
+        iana_code: 0x0016,
+        tls12_applicable: false,
+        ffdhe_cross_check: None,
+    },
+];
+
+/// Emit this backend's group inventory as `(iana_code, display_name)`
+/// rows. Used by `scanner::backends::openssl_inventory` so the single
+/// source of truth for "what named groups does the OpenSSL backend
+/// probe" is this `TARGETS` table rather than a parallel list.
+pub fn inventory_entries() -> Vec<(u16, &'static str)> {
+    TARGETS
+        .iter()
+        .map(|t| (t.iana_code, t.display_name))
+        .collect()
+}
+
+/// Probe a single group identified by `(iana_code, version)`. Looks up
+/// the matching `TARGETS` row and drives one handshake attempt on a
+/// `spawn_blocking` thread. Returns a `NotProbed` outcome for
+/// `(FFDHE, non-TLS1.2)` or `(ECDH/ML-KEM, TLS1.2)` combinations that
+/// the target table marks inapplicable.
+pub(crate) async fn probe_single_group_by_code(
+    target: SocketAddr,
+    hostname: &str,
+    iana_code: u16,
+    version: crate::model::protocol::TlsVersion,
+    connect_timeout: Duration,
+    handshake_timeout: Duration,
+) -> HandshakeOutcome {
+    use crate::model::protocol::TlsVersion;
+    let Some(row) = TARGETS.iter().find(|t| t.iana_code == iana_code) else {
+        return HandshakeOutcome::NotProbed(format!(
+            "openssl_unknown_group_target:0x{:04X}",
+            iana_code
+        ));
+    };
+    match version {
+        TlsVersion::Tls12 => {
+            if !row.tls12_applicable {
+                return HandshakeOutcome::NotProbed("tls12_not_applicable".to_string());
+            }
+            run_attempt(
+                target,
+                hostname,
+                row,
+                SslVersion::TLS1_2,
+                connect_timeout,
+                handshake_timeout,
+            )
+            .await
+        }
+        TlsVersion::Tls13 => {
+            run_attempt(
+                target,
+                hostname,
+                row,
+                SslVersion::TLS1_3,
+                connect_timeout,
+                handshake_timeout,
+            )
+            .await
+        }
+        other => HandshakeOutcome::NotProbed(format!(
+            "openssl_group_probe_version_out_of_scope:{:?}",
+            other
+        )),
+    }
+}
+
+/// Probe every target group at TLS 1.2 (FFDHE only) and TLS 1.3. Each
+/// attempt runs in `spawn_blocking` so the blocking OpenSSL handshake
+/// cooperates with the tokio runtime. Honors `per_probe_delay` between
+/// attempts.
+pub async fn probe_kx_groups(
+    target: SocketAddr,
+    hostname: &str,
+    connect_timeout: Duration,
+    handshake_timeout: Duration,
+    per_probe_delay: Duration,
+) -> KxGroupProbeOutput {
+    let total_attempts: usize = TARGETS
+        .iter()
+        .map(|t| if t.tls12_applicable { 2 } else { 1 })
+        .sum();
+    info!(
+        "OpenSSL named-group probe: {} groups, {} total attempts",
+        TARGETS.len(),
+        total_attempts
+    );
+
+    let mut results = Vec::with_capacity(TARGETS.len());
+    let mut attempt_idx: usize = 0;
+
+    // Registry-driven dispatch. OpenSSL claims every group codepoint
+    // in `TARGETS`, so routing through the registry is a no-op here —
+    // going through `handshake()` keeps all group-probe dispatch on
+    // one path regardless of which backend runs it.
+    let registry = crate::scanner::backends::BackendRegistry::new();
+    let ctx = crate::scanner::backends::ProbeContext {
+        target,
+        hostname: hostname.to_string(),
+        connect_timeout,
+        handshake_timeout,
+    };
+
+    for t in TARGETS {
+        let tls12_outcome = if t.tls12_applicable {
+            let c = crate::scanner::backends::HandshakeConstraint::single_group_at(
+                t.iana_code,
+                crate::model::protocol::TlsVersion::Tls12,
+            );
+            let o = match registry.route_group(t.iana_code) {
+                Some(backend) => match backend.handshake(c, &ctx).await {
+                    Ok(r) => r.outcome,
+                    Err(u) => {
+                        HandshakeOutcome::Error(format!("unsatisfiable_constraint:{}", u.reason))
+                    }
+                },
+                None => HandshakeOutcome::Error(format!(
+                    "no_backend_routes_group:0x{:04X}",
+                    t.iana_code
+                )),
+            };
+            attempt_idx += 1;
+            if attempt_idx < total_attempts && !per_probe_delay.is_zero() {
+                tokio::time::sleep(per_probe_delay).await;
+            }
+            o
+        } else {
+            HandshakeOutcome::NotProbed("tls12_not_applicable".to_string())
+        };
+
+        let tls13_outcome = {
+            let c = crate::scanner::backends::HandshakeConstraint::single_group_at(
+                t.iana_code,
+                crate::model::protocol::TlsVersion::Tls13,
+            );
+            match registry.route_group(t.iana_code) {
+                Some(backend) => match backend.handshake(c, &ctx).await {
+                    Ok(r) => r.outcome,
+                    Err(u) => {
+                        HandshakeOutcome::Error(format!("unsatisfiable_constraint:{}", u.reason))
+                    }
+                },
+                None => HandshakeOutcome::Error(format!(
+                    "no_backend_routes_group:0x{:04X}",
+                    t.iana_code
+                )),
+            }
+        };
+        attempt_idx += 1;
+        if attempt_idx < total_attempts && !per_probe_delay.is_zero() {
+            tokio::time::sleep(per_probe_delay).await;
+        }
+
+        debug!(
+            group = t.display_name,
+            tls12 = ?tls12_outcome,
+            tls13 = ?tls13_outcome,
+            "kx group probe result"
+        );
+
+        results.push(KxGroupProbeResult {
+            group_name: t.display_name.to_string(),
+            iana_code: t.iana_code,
+            tls12_outcome,
+            tls13_outcome,
+        });
+    }
+
+    KxGroupProbeOutput { results }
+}
+
+async fn run_attempt(
+    target: SocketAddr,
+    hostname: &str,
+    t: &'static KxGroupTarget,
+    version: SslVersion,
+    connect_timeout: Duration,
+    handshake_timeout: Duration,
+) -> HandshakeOutcome {
+    let hostname_owned = hostname.to_string();
+    tokio::task::spawn_blocking(move || {
+        probe_blocking(
+            target,
+            &hostname_owned,
+            t,
+            version,
+            connect_timeout,
+            handshake_timeout,
+        )
+    })
+    .await
+    .unwrap_or_else(|join_err| HandshakeOutcome::Error(format!("spawn_blocking_panic: {join_err}")))
+}
+
+fn probe_blocking(
+    target: SocketAddr,
+    hostname: &str,
+    t: &KxGroupTarget,
+    version: SslVersion,
+    connect_timeout: Duration,
+    handshake_timeout: Duration,
+) -> HandshakeOutcome {
+    let tcp = match std::net::TcpStream::connect_timeout(&target, connect_timeout) {
+        Ok(s) => s,
+        Err(e) => {
+            let se = ScannerError::from_io("kx group tcp connect", e);
+            return classify_scanner_error(se);
+        }
+    };
+    let _ = tcp.set_read_timeout(Some(handshake_timeout));
+    let _ = tcp.set_write_timeout(Some(handshake_timeout));
+
+    let ctx = match build_context(version, t.openssl_name, t.ffdhe_cross_check.is_some()) {
+        Ok(c) => c,
+        Err(stack) => {
+            return HandshakeOutcome::Error(format!("openssl_ctx_build: {stack}"));
+        }
+    };
+
+    let mut ssl = match Ssl::new(&ctx) {
+        Ok(s) => s,
+        Err(stack) => return HandshakeOutcome::Error(format!("openssl_ssl_new: {stack}")),
+    };
+    let _ = ssl.set_hostname(hostname);
+
+    match ssl.connect(tcp) {
+        Ok(stream) => match t.ffdhe_cross_check {
+            Some(expected) => match dh_params::snapshot(stream.ssl()) {
+                Ok(Some(snap)) if snap.classification == expected => HandshakeOutcome::Supported,
+                Ok(Some(_)) => HandshakeOutcome::IgnoredGroupReturnedCustomPrime,
+                Ok(None) => {
+                    HandshakeOutcome::Error("handshake_success_but_no_dh_tmp_key".to_string())
+                }
+                Err(stack) => HandshakeOutcome::Error(format!("dh_snapshot_error: {stack}")),
+            },
+            None => HandshakeOutcome::Supported,
+        },
+        Err(HandshakeError::Failure(mid)) => {
+            // Client-side "no suitable groups" (SSL_R_NO_SUITABLE_GROUPS,
+            // reason_code 295) means OpenSSL's TLS layer accepted the
+            // name via `set_groups_list` but rejected it at handshake
+            // build time — the vendored OpenSSL 3.x build doesn't
+            // expose this curve as a usable TLS named group. Applies to
+            // secp192r1, secp224r1, secp256k1 on OpenSSL 3.5. Surface
+            // as `NotProbed` with a deterministic reason rather than
+            // `error:internal_scanner_error`, since no wire traffic
+            // happened and the outcome reflects our backend's
+            // capabilities, not the server's.
+            if openssl_rejected_group_client_side(mid.error()) {
+                return HandshakeOutcome::NotProbed(format!(
+                    "openssl_3x_group_not_available:{}",
+                    t.display_name
+                ));
+            }
+            let se = alerts::classify_openssl_error("kx group handshake", mid.error());
+            classify_scanner_error(se)
+        }
+        Err(HandshakeError::SetupFailure(stack)) => {
+            HandshakeOutcome::Error(format!("openssl_setup: {stack}"))
+        }
+        Err(HandshakeError::WouldBlock(_)) => {
+            HandshakeOutcome::Error("openssl_would_block".to_string())
+        }
+    }
+}
+
+/// True when the error stack carries OpenSSL's
+/// `SSL_R_NO_SUITABLE_GROUPS` (reason_code 295, reason string `"no
+/// suitable groups"`). Emitted client-side before any bytes hit the
+/// wire when the TLS layer can't assemble a usable group list — i.e.
+/// the group was registered via `set_groups_list` but isn't actually
+/// compiled in as a TLS named group in this OpenSSL build.
+fn openssl_rejected_group_client_side(err: &openssl::ssl::Error) -> bool {
+    let Some(stack) = err.ssl_error() else {
+        return false;
+    };
+    stack.errors().iter().any(|e| {
+        e.reason_code() == 295
+            || e.reason()
+                .map(|r| r.eq_ignore_ascii_case("no suitable groups"))
+                .unwrap_or(false)
+    })
+}
+
+fn build_context(
+    version: SslVersion,
+    group_name: &str,
+    is_ffdhe: bool,
+) -> Result<SslContext, openssl::error::ErrorStack> {
+    let mut builder = SslContext::builder(SslMethod::tls_client())?;
+    builder.set_min_proto_version(Some(version))?;
+    builder.set_max_proto_version(Some(version))?;
+    builder.set_security_level(0);
+    builder.set_verify(SslVerifyMode::NONE);
+    builder.set_groups_list(group_name)?;
+    // At TLS 1.2, the cipher suite determines which group-bearing
+    // handshake branch runs — DHE for FFDHE primes, ECDHE for named
+    // curves. Pinning the cipher list to the matching family is what
+    // makes the single-group `set_groups_list` offer load-bearing:
+    // without it the server could fall back to a different kx entirely
+    // and our group advertisement becomes a null signal.
+    if version == SslVersion::TLS1_2 {
+        let cipher_list = if is_ffdhe {
+            "DHE:@SECLEVEL=0"
+        } else {
+            "ECDHE:@SECLEVEL=0"
+        };
+        builder.set_cipher_list(cipher_list)?;
+    }
+    Ok(builder.build())
+}
+
+fn classify_scanner_error(e: ScannerError) -> HandshakeOutcome {
+    if is_wire_rejection(&e) {
+        HandshakeOutcome::NotSupported
+    } else {
+        HandshakeOutcome::Error(e.category)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn target_table_contains_all_ffdhe_codepoints() {
+        let ffdhe: Vec<u16> = TARGETS
+            .iter()
+            .filter(|t| t.ffdhe_cross_check.is_some())
+            .map(|t| t.iana_code)
+            .collect();
+        assert_eq!(ffdhe, vec![0x0100, 0x0101, 0x0102, 0x0103, 0x0104]);
+    }
+
+    #[test]
+    fn ffdhe_targets_classification_matches_display_name() {
+        for t in TARGETS {
+            if let Some(cls) = t.ffdhe_cross_check {
+                assert_eq!(t.display_name, cls.as_schema_str());
+            }
+        }
+    }
+
+    #[test]
+    fn target_display_names_are_distinct() {
+        use std::collections::HashSet;
+        let set: HashSet<&'static str> = TARGETS.iter().map(|t| t.display_name).collect();
+        assert_eq!(set.len(), TARGETS.len());
+    }
+
+    #[test]
+    fn mlkem_and_hybrid_targets_are_tls13_only() {
+        // ML-KEM standalone and PQC hybrid codepoints are defined only
+        // at TLS 1.3 (the hybrid structure encodes both classical and
+        // PQC shares in `key_share`, which doesn't exist in TLS 1.2).
+        // Classical ECDHE curves CAN ride TLS 1.2 — they're allowed.
+        for t in TARGETS {
+            let is_mlkem_or_hybrid = matches!(
+                t.iana_code,
+                0x0200 | 0x0201 | 0x0202 | 0x11EB | 0x11EC | 0x11ED
+            );
+            if is_mlkem_or_hybrid {
+                assert!(
+                    !t.tls12_applicable,
+                    "{} (0x{:04X}) is TLS 1.3 only — must not be TLS 1.2 applicable",
+                    t.display_name, t.iana_code
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn classify_scanner_error_promotes_alerts_to_not_supported() {
+        let alert = ScannerError::tls_alert("handshake_failure", "ctx");
+        assert!(matches!(
+            classify_scanner_error(alert),
+            HandshakeOutcome::NotSupported
+        ));
+
+        let refused = ScannerError::connection_refused("ctx");
+        assert!(matches!(
+            classify_scanner_error(refused),
+            HandshakeOutcome::NotSupported
+        ));
+    }
+
+    #[test]
+    fn classify_scanner_error_preserves_other_categories_as_error() {
+        let timeout = ScannerError::connection_timeout("ctx");
+        match classify_scanner_error(timeout) {
+            HandshakeOutcome::Error(cat) => assert_eq!(cat, "connection_timeout"),
+            other => panic!("expected Error, got {other:?}"),
+        }
+    }
+}
