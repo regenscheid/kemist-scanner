@@ -147,7 +147,7 @@ pub async fn probe_kx_groups(
         connect_timeout,
         handshake_timeout,
     };
-    let rustls_cipher_codes: std::collections::HashSet<u16> = registry
+    let rustls_group_codes: std::collections::HashSet<u16> = registry
         .rustls
         .inventory()
         .group_codepoints
@@ -170,7 +170,7 @@ pub async fn probe_kx_groups(
         }
 
         for version in versions {
-            let outcome = if rustls_cipher_codes.contains(iana_code) {
+            let outcome = if rustls_group_codes.contains(iana_code) {
                 let constraint = crate::scanner::backends::HandshakeConstraint::single_group_at(
                     *iana_code, version,
                 );

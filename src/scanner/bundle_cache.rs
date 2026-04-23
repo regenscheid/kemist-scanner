@@ -37,8 +37,13 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 /// Current manifest format version. Bump when the on-disk layout
-/// changes incompatibly. Scanner reads old versions tolerantly
-/// (see [`Manifest::load`]).
+/// changes incompatibly. Any cached manifest whose `version` field
+/// doesn't match this constant — older or newer — is treated as
+/// absent by [`Manifest::load`]: the scanner falls back to the
+/// compile-time bundles until the operator re-runs an
+/// `--update-*` command to regenerate the cache. If a future
+/// incompatible bump needs tolerant cross-version parsing, add it
+/// here.
 pub const MANIFEST_VERSION: u32 = 1;
 
 /// Root kemist cache directory, platform-appropriate. `None` when
@@ -131,9 +136,12 @@ impl Manifest {
         };
         match serde_json::from_slice::<Manifest>(&bytes) {
             Ok(mut m) => {
-                // Future-proof: unknown higher versions are downgraded
-                // to defaults so we don't misinterpret a forward-compat
-                // field. Current version hasn't needed this yet.
+                // Strict version match. A newer manifest might carry
+                // fields we'd misinterpret; an older one might lack
+                // fields we now require. Either way, treat as absent
+                // — the scanner falls back to compile-time bundles
+                // until the operator re-runs an `--update-*` command
+                // to regenerate the cache under the current version.
                 if m.version != MANIFEST_VERSION {
                     m = Self::default();
                 }

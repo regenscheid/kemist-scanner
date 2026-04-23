@@ -42,7 +42,16 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine as _;
+use futures::StreamExt;
 use tracing::debug;
+
+/// Upper bound on CRL body size the scanner will buffer. 5 MiB is
+/// already larger than every legitimate CA CRL we've observed; anything
+/// bigger is either an accidentally huge deprecated-intermediate
+/// snapshot or a hostile URL trying to exhaust scanner memory.
+const CRL_BODY_SIZE_CAP: usize = 5 * 1024 * 1024;
 
 /// Per-URL fetch + revocation-check result.
 #[derive(Debug, Clone)]
@@ -184,21 +193,41 @@ async fn fetch_and_check(
         return result;
     }
 
-    // 5 MB body cap. Some CAs publish enormous CRLs (deprecated
-    // intermediates with huge revocation histories); blindly
-    // loading into memory would be a OOM hazard on a scanner
-    // running across many targets.
-    let body = match resp.bytes().await {
-        Ok(b) if b.len() > 5 * 1024 * 1024 => {
-            result.error = Some(format!("body_exceeds_size_cap:{}", b.len()));
+    // Body cap. Some CAs publish enormous CRLs (deprecated
+    // intermediates with huge revocation histories); blindly loading
+    // into memory would be an OOM hazard on a scanner running across
+    // many targets. Reject up front on `Content-Length` over the cap,
+    // then stream via `bytes_stream` and tear down as soon as the
+    // running byte budget is exceeded — so the buffered allocation
+    // never exceeds the cap even when the server lies about length
+    // or omits it entirely.
+    if let Some(len) = resp.content_length() {
+        if len > CRL_BODY_SIZE_CAP as u64 {
+            result.error = Some(format!("body_exceeds_size_cap:{len}"));
             return result;
         }
-        Ok(b) => b.to_vec(),
-        Err(e) => {
-            result.error = Some(format!("body_read:{e}"));
-            return result;
+    }
+    let mut stream = resp.bytes_stream();
+    let mut body = Vec::with_capacity(16 * 1024);
+    loop {
+        match stream.next().await {
+            Some(Ok(chunk)) => {
+                if body.len() + chunk.len() > CRL_BODY_SIZE_CAP {
+                    result.error = Some(format!(
+                        "body_exceeds_size_cap:{}",
+                        body.len() + chunk.len()
+                    ));
+                    return result;
+                }
+                body.extend_from_slice(&chunk);
+            }
+            Some(Err(e)) => {
+                result.error = Some(format!("body_read:{e}"));
+                return result;
+            }
+            None => break,
         }
-    };
+    }
 
     // Detect PEM armor. Some CAs serve `application/pkix-crl` with
     // DER bytes; others serve `application/x-pem-file` with
@@ -220,15 +249,15 @@ async fn fetch_and_check(
         }
     };
 
-    result.this_update = Some(format_asn1_time(&crl.last_update));
-    result.next_update = crl.next_update.as_ref().map(format_asn1_time);
+    result.this_update = format_asn1_time(&crl.last_update);
+    result.next_update = crl.next_update.as_ref().and_then(format_asn1_time);
     result.crl_issuer = Some(crl.issuer.to_string());
     result.revoked_cert_count = Some(crl.revoked_entries.len());
 
     for entry in &crl.revoked_entries {
         if entry.serial_bytes == leaf_serial {
             result.leaf_revoked = Some(true);
-            result.revocation_time = Some(format_asn1_time(&entry.revocation_date));
+            result.revocation_time = format_asn1_time(&entry.revocation_date);
             result.revocation_reason = entry.reason.clone();
             debug!(url = %url, "leaf serial found in CRL — revoked");
             return result;
@@ -308,60 +337,30 @@ fn decode_pem_if_armored(input: &[u8]) -> Result<Vec<u8>, String> {
     else {
         return Err("malformed pem: no END marker".to_string());
     };
-    // base64 decoder — we have a dep via x509-parser's transitive
-    // chain. Use a minimal local decoder to avoid pulling a new
-    // top-level dep just for this.
-    decode_base64_lenient(before_end)
+    // PEM bodies are line-wrapped; strip whitespace so the strict
+    // `base64` engine below sees a canonical 4-char-quantum stream.
+    // Using the `base64` crate rather than a hand-rolled decoder
+    // because CRL URLs come from certificate contents kemist doesn't
+    // control: a hostile responder could otherwise feed malformed
+    // quanta / mis-placed `=` padding that a tolerant decoder would
+    // silently coerce into bogus DER bytes, leading to misleading
+    // `parse_failed` errors or worse, accidentally parseable content.
+    let stripped: String = before_end.chars().filter(|c| !c.is_whitespace()).collect();
+    BASE64
+        .decode(stripped.as_bytes())
+        .map_err(|e| format!("base64 decode: {e}"))
 }
 
-/// Minimal base64 decoder tolerant of whitespace + newlines. Returns
-/// Err on invalid characters or malformed padding.
-fn decode_base64_lenient(input: &str) -> Result<Vec<u8>, String> {
-    const TABLE: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut lookup = [255u8; 256];
-    for (i, &c) in TABLE.iter().enumerate() {
-        lookup[c as usize] = i as u8;
-    }
-
-    let mut buf = Vec::with_capacity(input.len() * 3 / 4);
-    let mut group: u32 = 0;
-    let mut bits_in_group: u32 = 0;
-    let mut pad_seen = 0usize;
-
-    for &byte in input.as_bytes() {
-        if byte == b'=' {
-            pad_seen += 1;
-            continue;
-        }
-        if (byte as char).is_ascii_whitespace() {
-            continue;
-        }
-        if pad_seen > 0 {
-            return Err("base64: data after padding".to_string());
-        }
-        let v = lookup[byte as usize];
-        if v == 255 {
-            return Err(format!("base64: invalid char {}", byte as char));
-        }
-        group = (group << 6) | v as u32;
-        bits_in_group += 6;
-        if bits_in_group >= 8 {
-            bits_in_group -= 8;
-            buf.push((group >> bits_in_group) as u8);
-            group &= (1u32 << bits_in_group) - 1;
-        }
-    }
-    Ok(buf)
-}
-
-fn format_asn1_time(t: &x509_parser::time::ASN1Time) -> String {
-    // ISO 8601 via chrono. x509-parser's ASN1Time exposes `timestamp()`
-    // as i64 epoch seconds; chrono handles the format. `Z` suffix
-    // matches the rest of the codebase's datetime output.
-    match chrono::DateTime::<chrono::Utc>::from_timestamp(t.timestamp(), 0) {
-        Some(dt) => dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-        None => "invalid_time".to_string(),
-    }
+/// Render an `ASN1Time` as an ISO 8601 string, or `None` when the
+/// timestamp can't be represented (out-of-range epoch seconds).
+/// Returning `None` rather than a sentinel string keeps the
+/// `Option<String>` fields downstream honest — a sentinel in a
+/// `Some(_)` slot would contradict the doc-stated "ISO 8601"
+/// invariant and quietly mislead rule engines that treat presence
+/// as "successfully parsed."
+fn format_asn1_time(t: &x509_parser::time::ASN1Time) -> Option<String> {
+    let dt = chrono::DateTime::<chrono::Utc>::from_timestamp(t.timestamp(), 0)?;
+    Some(dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
 }
 
 #[cfg(test)]
@@ -385,24 +384,43 @@ mod tests {
             -----END X509 CRL-----\n\
         ";
         let decoded = decode_pem_if_armored(body).unwrap();
-        // Base64 "MAIBAA==" decodes to 3 bytes: 0x30 0x02 0x01 0x00.
+        // Base64 "MAIBAA==" decodes to 4 bytes: 0x30 0x02 0x01 0x00.
         assert_eq!(decoded, &[0x30, 0x02, 0x01, 0x00]);
     }
 
     #[test]
-    fn base64_decoder_handles_whitespace_and_padding() {
-        let out = decode_base64_lenient("  MAIB\nAA==\n").unwrap();
-        assert_eq!(out, &[0x30, 0x02, 0x01, 0x00]);
-
-        // Standard test vectors.
-        assert_eq!(decode_base64_lenient("TWFu").unwrap(), b"Man");
-        assert_eq!(decode_base64_lenient("TWE=").unwrap(), b"Ma");
-        assert_eq!(decode_base64_lenient("TQ==").unwrap(), b"M");
+    fn decode_pem_handles_multi_line_base64_bodies() {
+        // Two-line body with whitespace stripping — exercises the
+        // wrap handling inside `decode_pem_if_armored`.
+        let body = b"\
+            -----BEGIN X509 CRL-----\n\
+            MAIB\n\
+            AA==\n\
+            -----END X509 CRL-----\n\
+        ";
+        let decoded = decode_pem_if_armored(body).unwrap();
+        assert_eq!(decoded, &[0x30, 0x02, 0x01, 0x00]);
     }
 
     #[test]
-    fn base64_decoder_rejects_invalid_chars() {
-        assert!(decode_base64_lenient("###").is_err());
+    fn decode_pem_rejects_malformed_base64() {
+        // Under the strict `base64` engine, a body with out-of-quantum
+        // input or invalid characters fails the decode — previous
+        // hand-rolled decoder silently produced truncated bytes.
+        let bad_chars = b"\
+            -----BEGIN X509 CRL-----\n\
+            ###\n\
+            -----END X509 CRL-----\n\
+        ";
+        assert!(decode_pem_if_armored(bad_chars).is_err());
+
+        // 3 non-padding chars + no `=` — not a valid 4-char quantum.
+        let truncated = b"\
+            -----BEGIN X509 CRL-----\n\
+            MAI\n\
+            -----END X509 CRL-----\n\
+        ";
+        assert!(decode_pem_if_armored(truncated).is_err());
     }
 
     #[tokio::test]

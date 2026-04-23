@@ -110,13 +110,21 @@ pub async fn update_hsts_preload() -> UpdateReport {
                 manifest
                     .bundles
                     .insert("hsts_preload".to_string(), meta.clone());
-                let _ = manifest.save();
-                Ok(UpdateOk {
-                    path,
-                    entry_count: meta.entry_count,
-                    bytes: bytes.len(),
-                    sha256_prefix: meta.sha256[..16].to_string(),
-                })
+                // Propagate manifest-save failures: leaving the cache
+                // file on disk while the manifest fails to record it
+                // produces a drift the loader can't detect (integrity
+                // check keys on the manifest). Reporting the failure
+                // here lets the operator remediate instead of seeing
+                // a bogus success.
+                match manifest.save() {
+                    Ok(_) => Ok(UpdateOk {
+                        path,
+                        entry_count: meta.entry_count,
+                        bytes: bytes.len(),
+                        sha256_prefix: meta.sha256[..16].to_string(),
+                    }),
+                    Err(e) => Err(format!("manifest save: {e}")),
+                }
             }
             Err(e) => Err(format!("write cache file: {e}")),
         },

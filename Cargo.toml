@@ -84,6 +84,13 @@ chrono = { version = "0.4", features = ["serde"] }
 # Low-level TLS message handling
 bytes = "1"
 hex = "0.4"
+# Strict base64 decoder for CRL PEM bodies. Already transitively
+# present via reqwest/zip; promoting to a direct dep swaps the
+# hand-rolled `decode_base64_lenient` in scanner/crl_fetch.rs for a
+# well-tested implementation that enforces RFC 4648 quantum +
+# padding rules — matters because CRL URLs come from certificate
+# contents kemist doesn't control.
+base64 = "0.22"
 
 # Cryptographic operations
 sha2 = "0.10"  # For certificate fingerprints
@@ -93,7 +100,7 @@ sha-1 = "0.10"  # For SHA-1 fingerprints
 # Uses webpki-roots (Mozilla CA bundle) via rustls — matches the TLS
 # validation path in src/scanner/probe.rs so the HTTP probe sees the
 # same trust set.
-reqwest = { version = "0.12", optional = true, default-features = false, features = ["rustls-tls-webpki-roots", "charset", "http2"] }
+reqwest = { version = "0.12", optional = true, default-features = false, features = ["rustls-tls-webpki-roots", "charset", "http2", "stream"] }
 
 # Compile-time perfect-hash table — used for the HSTS preload list
 # lookup. The preload snapshot is parsed at build time into a static

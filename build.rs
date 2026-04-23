@@ -67,7 +67,18 @@ fn build_preload_phf() {
             continue;
         }
         let name = Box::leak(entry.name.into_boxed_str()) as &'static str;
-        map.entry(name, &entry.include_subdomains.to_string());
+        // `phf_codegen::Map::entry` stores the `&str` value until
+        // `map.build()` runs — using `&some_bool.to_string()` here
+        // would hand it a reference to a temporary that drops at the
+        // end of this loop iteration (UB by the time the map is
+        // emitted). Route through literals so the value slice lives
+        // for the whole build-script scope.
+        let value = if entry.include_subdomains {
+            "true"
+        } else {
+            "false"
+        };
+        map.entry(name, value);
         included += 1;
     }
 
