@@ -160,9 +160,37 @@ fn to_model_version(v: rustls::ProtocolVersion) -> Option<TlsVersion> {
     }
 }
 
+/// Assemble the wire-order DER chain the server delivered into a
+/// single `Vec<Vec<u8>>` with `index 0 = leaf` followed by
+/// intermediates in delivered order. Preserves duplicates; does not
+/// re-sort. Downstream observations (Task 1 leaf-fingerprint capture,
+/// revocation probes) rely on this ordering.
+fn collect_chain_der(
+    end_entity: &CertificateDer<'_>,
+    intermediates: &[CertificateDer<'_>],
+) -> Vec<Vec<u8>> {
+    let mut out = Vec::with_capacity(1 + intermediates.len());
+    out.push(end_entity.to_vec());
+    for i in intermediates {
+        out.push(i.to_vec());
+    }
+    out
+}
+
+/// Parse each DER blob into a `CertificateInfo` and stamp its
+/// `wire_position` from the raw-chain index. Parse failures drop the
+/// entry silently (matching prior behavior) — a gap in the emitted
+/// position sequence signals "we got bytes at position N but couldn't
+/// parse them," which is itself a downstream-observable signal.
 fn decode_certs(raw: &[Vec<u8>]) -> Vec<CertificateInfo> {
     raw.iter()
-        .filter_map(|der| CertificateInfo::from_der(der).ok())
+        .enumerate()
+        .filter_map(|(i, der)| {
+            CertificateInfo::from_der(der).ok().map(|mut c| {
+                c.wire_position = i as u32;
+                c
+            })
+        })
         .collect()
 }
 
@@ -224,10 +252,7 @@ impl ServerCertVerifier for StateCollector {
         _now: UnixTime,
     ) -> Result<ServerCertVerified, rustls::Error> {
         if let Ok(mut guard) = self.certs.lock() {
-            guard.push(end_entity.to_vec());
-            for i in intermediates {
-                guard.push(i.to_vec());
-            }
+            guard.extend(collect_chain_der(end_entity, intermediates));
         }
         if !ocsp_response.is_empty() {
             if let Ok(mut guard) = self.ocsp_response.lock() {
@@ -275,5 +300,48 @@ impl ServerCertVerifier for StateCollector {
             SignatureScheme::RSA_PSS_SHA512,
             SignatureScheme::ED25519,
         ]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn collect_chain_der_preserves_wire_order() {
+        let leaf = CertificateDer::from(vec![0x30, 0x82, 0x00, 0x01]);
+        let int0 = CertificateDer::from(vec![0x30, 0x82, 0x00, 0x02]);
+        let int1 = CertificateDer::from(vec![0x30, 0x82, 0x00, 0x03]);
+
+        let out = collect_chain_der(&leaf, &[int0.clone(), int1.clone()]);
+
+        assert_eq!(out.len(), 3);
+        assert_eq!(out[0], leaf.as_ref());
+        assert_eq!(out[1], int0.as_ref());
+        assert_eq!(out[2], int1.as_ref());
+    }
+
+    #[test]
+    fn collect_chain_der_preserves_duplicates() {
+        // Two identical intermediates — some deployments legitimately
+        // send the same cert twice (misconfiguration or bridge cert).
+        // Observable shape must not silently dedup.
+        let leaf = CertificateDer::from(vec![0xAA, 0xBB]);
+        let dup = CertificateDer::from(vec![0xCC, 0xDD]);
+
+        let out = collect_chain_der(&leaf, &[dup.clone(), dup.clone()]);
+
+        assert_eq!(out.len(), 3);
+        assert_eq!(out[0], leaf.as_ref());
+        assert_eq!(out[1], dup.as_ref());
+        assert_eq!(out[2], dup.as_ref());
+    }
+
+    #[test]
+    fn collect_chain_der_leaf_only() {
+        let leaf = CertificateDer::from(vec![0x30, 0x00]);
+        let out = collect_chain_der(&leaf, &[]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0], leaf.as_ref());
     }
 }

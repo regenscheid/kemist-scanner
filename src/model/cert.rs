@@ -60,6 +60,14 @@ pub struct CertificateInfo {
     /// via extension OID 1.3.6.1.4.1.11129.2.4.2. Presence only —
     /// signatures are not validated.
     pub embedded_scts: u32,
+    /// Position of this cert in the wire-order chain delivered by
+    /// the server (0 = leaf, 1 = first intermediate, …). Assigned
+    /// at chain-assembly time; preserves the server's delivered
+    /// order without dedup or re-sort. Downstream rule engines
+    /// observe ordering directly instead of relying on array
+    /// index semantics.
+    #[serde(default)]
+    pub wire_position: u32,
     /// Parsed X.509 v3 extension observations. See
     /// [`crate::model::cert_extensions`].
     #[serde(default)]
@@ -149,6 +157,7 @@ impl CertificateInfo {
             fingerprint_sha256,
             fingerprint_sha1,
             embedded_scts,
+            wire_position: 0,
             extensions,
         })
     }

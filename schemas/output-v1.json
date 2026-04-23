@@ -682,7 +682,8 @@
         "public_key",
         "embedded_scts",
         "fingerprint_sha256",
-        "fingerprint_sha1"
+        "fingerprint_sha1",
+        "wire_position"
       ],
       "properties": {
         "subject_cn": { "type": "string" },
@@ -731,6 +732,11 @@
         "embedded_scts": { "type": "integer", "minimum": 0 },
         "fingerprint_sha256": { "type": "string" },
         "fingerprint_sha1": { "type": "string" },
+        "wire_position": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Position of this cert in the wire-order chain delivered by the server. `0` is the leaf; subsequent integers are intermediates in the order the server sent them. Duplicates are preserved (each copy carries its own position); parse failures appear as gaps in the sequence across `Certificates.chain`. Downstream rule engines observe chain ordering through this field directly."
+        },
         "extensions": { "$ref": "#/$defs/certExtensions" },
         "revocation": {
           "type": "object",

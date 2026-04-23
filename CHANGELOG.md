@@ -24,6 +24,11 @@ mechanics.
   Constraints (permitted/excluded subtrees), Certificate Policies
   OIDs, RFC 7633 Must-Staple flag, per-SCT detail (log_id,
   timestamp, signature). Always-on.
+- `tls.certificates.chain[].wire_position` — 0-indexed position in
+  the wire-order chain the server delivered (`0` = leaf). Duplicates
+  preserved; parse failures appear as gaps in the sequence. Lets
+  downstream rule engines observe chain ordering directly rather
+  than inferring it from array index semantics.
 - `tls.extensions.truncated_hmac`, `.npn`,
   `.supported_point_formats_echoed`, `.max_fragment_length` — new
   ServerHello observations via the always-on byte-level TLS 1.2

@@ -836,6 +836,15 @@ pub struct CertificateFacts {
     pub embedded_scts: u32,
     pub fingerprint_sha256: String,
     pub fingerprint_sha1: String,
+    /// Position of this cert in the wire-order chain delivered by
+    /// the server. `0` is the leaf; subsequent integers are
+    /// intermediates in the order the server sent them. Duplicates
+    /// are preserved (each copy carries its own position);
+    /// parse-failures show as gaps in the position sequence across
+    /// `Certificates.chain`. Downstream rule engines key on this
+    /// field to observe chain ordering directly rather than
+    /// inferring it from array index.
+    pub wire_position: u32,
     /// Parsed X.509 v3 extension observations. Always present;
     /// serializes to `{}` when no sub-fields are populated. See
     /// [`crate::model::cert_extensions::CertExtensions`].

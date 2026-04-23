@@ -1024,6 +1024,7 @@ fn cert_to_facts(c: &CertificateInfo) -> CertificateFacts {
         embedded_scts: c.embedded_scts,
         fingerprint_sha256: c.fingerprint_sha256.clone(),
         fingerprint_sha1: c.fingerprint_sha1.clone(),
+        wire_position: c.wire_position,
         extensions: c.extensions.clone(),
         revocation: None,
     }

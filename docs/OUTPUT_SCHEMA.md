@@ -509,6 +509,7 @@ RFC 7677 / RFC 5802 SCRAM channel-binding requirements.
 | `embedded_scts` | `int` | Count from extension 1.3.6.1.4.1.11129.2.4.2 |
 | `fingerprint_sha256` | `string` | Hex |
 | `fingerprint_sha1` | `string` | Hex |
+| `wire_position` | `int` | 0-indexed position in the wire-order chain the server delivered. `0` = leaf; subsequent integers are intermediates in delivered order. Duplicates are preserved; parse failures appear as gaps. Emitted so downstream rule engines observe chain ordering directly rather than relying on array index semantics. |
 | `extensions` | `CertExtensions` | Parsed X.509 v3 extensions — see below |
 
 `CertExtensions`:
