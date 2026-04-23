@@ -81,15 +81,21 @@ async fn legacy_cipher_probe_observes_weak_suites_on_fixture() {
         "fixture didn't accept any legacy suite (nginx config drift?)"
     );
 
-    // Every probe should be either Supported, NotSupported, or Error —
-    // never silently missing. NotProbed / IgnoredGroupReturnedCustomPrime
-    // are group-probe-only variants and should never appear here.
+    // Every probe should be either Supported, NotSupported, Error, or
+    // NotProbed — never silently missing. `IgnoredGroupReturnedCustomPrime`
+    // is group-probe-only and should never appear here. Cipher probes
+    // emit `NotProbed("openssl_3x_cipher_not_available:*")` for suites
+    // OpenSSL 3.x refuses to activate at context build time (static-DH /
+    // static-ECDH, occasionally RC4 / 3DES on distros that ship openssl
+    // with those disabled) — a legitimate backend-capability signal,
+    // not a missing observation.
     for r in &out.results {
         match &r.outcome {
             HandshakeOutcome::Supported
             | HandshakeOutcome::NotSupported
-            | HandshakeOutcome::Error(_) => {}
-            HandshakeOutcome::NotProbed(_) | HandshakeOutcome::IgnoredGroupReturnedCustomPrime => {
+            | HandshakeOutcome::Error(_)
+            | HandshakeOutcome::NotProbed(_) => {}
+            HandshakeOutcome::IgnoredGroupReturnedCustomPrime => {
                 panic!(
                     "cipher probe produced unexpected outcome variant for {}",
                     r.name
@@ -123,9 +129,14 @@ async fn kx_group_probe_records_per_version_outcomes_on_fixture() {
     let (addr, hostname) = fixture();
     let out = probe_kx_groups(addr, &hostname, timeout(), timeout(), Duration::ZERO).await;
 
-    // Five FFDHE + five non-FFDHE (X448, secp521r1, MLKEM512/1024,
-    // secp384r1MLKEM1024) target entries.
-    assert_eq!(out.results.len(), 10);
+    // Inventory: five FFDHE + five TLS 1.3 non-FFDHE groups aws-lc-rs
+    // doesn't ship (X448, secp521r1, MLKEM512/1024, secp384r1MLKEM1024)
+    // + three brainpool curves + three deprecated named curves
+    // OpenSSL 3.x refuses at handshake-build time (secp192r1, secp224r1,
+    // secp256k1). The last six are tripwires: they shrink if a future
+    // openssl-src dropped them, expand if new curves land in the probe
+    // list.
+    assert_eq!(out.results.len(), 16);
 
     // Every TLS 1.2 / TLS 1.3 cell is populated with some outcome.
     for r in &out.results {

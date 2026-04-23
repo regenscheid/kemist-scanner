@@ -11,9 +11,12 @@ RUN apt-get update && apt-get install -y \
     zlib1g-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Download and compile vulnerable OpenSSL 1.0.1f
+# Download and compile vulnerable OpenSSL 1.0.1f. Sourced from the
+# GitHub release mirror — the historical www.openssl.org/source/old/
+# redirect now points to a dead GitHub path (`openssl-1.0.1f` lowercase
+# tag) while the actual release lives under the `OpenSSL_1_0_1f` tag.
 RUN cd /tmp && \
-    wget https://www.openssl.org/source/old/1.0.1/openssl-1.0.1f.tar.gz && \
+    wget -L https://github.com/openssl/openssl/releases/download/OpenSSL_1_0_1f/openssl-1.0.1f.tar.gz && \
     tar -xzf openssl-1.0.1f.tar.gz && \
     cd openssl-1.0.1f && \
     ./config --prefix=/usr/local/openssl-vulnerable \
