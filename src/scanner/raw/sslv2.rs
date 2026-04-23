@@ -212,7 +212,7 @@ fn parse_sslv2_response(data: &[u8]) -> SslV2Observation {
     let cs_start = 13 + cert_len;
     let cs_end = cs_start + cs_len;
 
-    if cs_end > data.len() || cs_len % 3 != 0 {
+    if cs_end > data.len() || !cs_len.is_multiple_of(3) {
         return SslV2Observation {
             supported: true,
             ciphers_observed: Vec::new(),

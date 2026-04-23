@@ -117,7 +117,7 @@ fn classify_server_reply(buf: &[u8], offered: u16) -> HandshakeOutcome {
     // ServerHello body: version(2) + random(32) + session_id_len(1)
     // + session_id + cipher_suite(2) + compression(1) + extensions...
     let body = match record.get(4..) {
-        Some(b) if b.len() >= 2 + 32 + 1 + 2 + 1 => b,
+        Some(b) if b.len() > 2 + 32 + 1 + 2 => b,
         _ => return HandshakeOutcome::Error("truncated_server_hello".to_string()),
     };
 

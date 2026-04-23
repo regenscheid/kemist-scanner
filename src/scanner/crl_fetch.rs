@@ -67,10 +67,10 @@ pub struct CrlFetchResult {
     /// history of mass revocations.
     pub revoked_cert_count: Option<usize>,
     /// `true` when the leaf's serial was found in the CRL's
-    /// `revokedCertificates` list. `false` when the CRL was fetched
-    /// + parsed + searched AND the leaf serial was NOT present —
+    /// `revokedCertificates` list. `false` when the CRL was fetched,
+    /// parsed, and searched AND the leaf serial was NOT present —
     /// the canonical "not revoked" positive signal. `None` when
-    /// fetch / parse failed (no conclusion possible).
+    /// fetch or parse failed (no conclusion possible).
     pub leaf_revoked: Option<bool>,
     /// When `leaf_revoked == Some(true)`, the revocation date per
     /// RFC 5280 §5.3.1 (if present in the CRL entry).
@@ -299,10 +299,13 @@ fn decode_pem_if_armored(input: &[u8]) -> Result<Vec<u8>, String> {
     let text = std::str::from_utf8(rest).map_err(|e| format!("non-utf8 in pem armor: {e}"))?;
     // Strip the BEGIN line, END line, and any intermediate
     // whitespace/newlines; base64-decode the middle.
-    let Some(after_begin) = text.splitn(2, "\n").nth(1) else {
+    let Some(after_begin) = text.split_once("\n").map(|x| x.1) else {
         return Err("malformed pem: no newline after BEGIN".to_string());
     };
-    let Some(before_end) = after_begin.rsplitn(2, "-----END X509 CRL-----").nth(1) else {
+    let Some(before_end) = after_begin
+        .rsplit_once("-----END X509 CRL-----")
+        .map(|x| x.0)
+    else {
         return Err("malformed pem: no END marker".to_string());
     };
     // base64 decoder — we have a dep via x509-parser's transitive

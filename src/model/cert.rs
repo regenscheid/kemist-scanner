@@ -395,6 +395,31 @@ fn ec_curve_from_oid(oid: &str) -> Option<(&'static str, u16)> {
     })
 }
 
+/// Parse certificate chain from TLS handshake
+#[allow(dead_code)]
+pub fn parse_certificate_chain(
+    chain_data: &[u8],
+) -> Result<Vec<CertificateInfo>, Box<dyn std::error::Error>> {
+    let mut certificates = Vec::new();
+    let mut data = chain_data;
+
+    while !data.is_empty() {
+        match X509Certificate::from_der(data) {
+            Ok((remaining, _cert)) => {
+                if let Ok(cert_info) =
+                    CertificateInfo::from_der(&data[..data.len() - remaining.len()])
+                {
+                    certificates.push(cert_info);
+                }
+                data = remaining;
+            }
+            Err(_) => break,
+        }
+    }
+
+    Ok(certificates)
+}
+
 #[cfg(test)]
 mod ecc_tests {
     use super::{ec_curve_from_oid, eddsa_curve_from_alg_oid};
@@ -460,29 +485,4 @@ mod ecc_tests {
         );
         assert!(eddsa_curve_from_alg_oid("1.3.101.114").is_none());
     }
-}
-
-/// Parse certificate chain from TLS handshake
-#[allow(dead_code)]
-pub fn parse_certificate_chain(
-    chain_data: &[u8],
-) -> Result<Vec<CertificateInfo>, Box<dyn std::error::Error>> {
-    let mut certificates = Vec::new();
-    let mut data = chain_data;
-
-    while !data.is_empty() {
-        match X509Certificate::from_der(data) {
-            Ok((remaining, _cert)) => {
-                if let Ok(cert_info) =
-                    CertificateInfo::from_der(&data[..data.len() - remaining.len()])
-                {
-                    certificates.push(cert_info);
-                }
-                data = remaining;
-            }
-            Err(_) => break,
-        }
-    }
-
-    Ok(certificates)
 }

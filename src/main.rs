@@ -145,9 +145,9 @@ struct Args {
     trust_store: Vec<String>,
 
     /// Add a new named trust store beyond the compiled-in set.
-    /// Format: `NAME:PATH`. Name must be lowercase ASCII + digits
-    /// + hyphens and must not collide with a compiled-in store.
-    /// Validation against this store surfaces at
+    /// Format: `NAME:PATH`. Name must be lowercase ASCII letters,
+    /// digits, and hyphens, and must not collide with a compiled-in
+    /// store. Validation against this store surfaces at
     /// `certificates.validation.chain_valid_to_custom_roots.<name>`.
     /// Use for corporate PKI bundles, PIV-I roots, industry-
     /// specific trust programs, etc. Repeatable.

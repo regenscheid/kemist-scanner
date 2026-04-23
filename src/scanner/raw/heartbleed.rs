@@ -26,7 +26,7 @@
 //! - `Some(true)`  — vulnerable (oversized echo received)
 //! - `Some(false)` — not vulnerable (no heartbeat extension, or no echo)
 //! - `None`        — probe couldn't reach a state where it could decide
-//!                   (TCP refused, ClientHello send failed, etc.)
+//!   (TCP refused, ClientHello send failed, etc.)
 
 use std::net::SocketAddr;
 use std::time::Duration;

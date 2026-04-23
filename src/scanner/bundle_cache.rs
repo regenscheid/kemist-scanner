@@ -16,8 +16,8 @@
 //!
 //! The scanner loader checks the cache first; if a bundle file
 //! exists there AND the manifest confirms its integrity (SHA-256
-//! + non-empty), that file is used. Otherwise the loader falls
-//! through to the compile-time bundle. This preserves offline +
+//! match, non-empty), that file is used. Otherwise the loader falls
+//! through to the compile-time bundle. This preserves offline and
 //! reproducible builds as the default while letting operators
 //! refresh on demand.
 //!

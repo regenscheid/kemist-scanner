@@ -513,15 +513,14 @@ pub fn parse_security_txt(body: &str) -> Option<SecurityTxtParsed> {
         saw_any = true;
         match name.to_ascii_lowercase().as_str() {
             "contact" => out.contact.push(value),
-            "expires" => {
+            "expires"
                 // RFC 9116 §2.5.2: exactly one Expires field. Keep
                 // the first occurrence (duplicates are a producer
                 // bug; we surface it as-is rather than silently
                 // picking the last).
-                if out.expires.is_none() {
+                if out.expires.is_none() => {
                     out.expires = Some(value);
                 }
-            }
             "encryption" => out.encryption.push(value),
             "preferred-languages" => {
                 // Comma-separated; split + trim each.

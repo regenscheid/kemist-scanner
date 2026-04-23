@@ -30,8 +30,8 @@
 //! ## Non-goals
 //! - **OCSP response signature validation.** The parsed `content`
 //!   field downstream carries the response's `signature_algorithm`
-//!   + `responder_id` — rule engines that want to verify can do so
-//!   against a responder trust chain they control. kemist is a
+//!   and `responder_id` — rule engines that want to verify can do
+//!   so against a responder trust chain they control. kemist is a
 //!   sensor; signature cryptographic validation is a verdict-layer
 //!   concern.
 //! - **Request nonce (RFC 6960 §4.4.1).** Adds a request-reply
