@@ -412,6 +412,52 @@ fn fully_populated_openssl_observations_match_schema_v1() {
         ecdhe_suite_probed: Some("TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256".to_string()),
     };
 
+    // ROBOT probe — five variants with varied outcomes covering each
+    // branch of the classifier: alert, TCP reset, timeout, graceful
+    // close, and unexpected plaintext.
+    let bleichenbacher_oracle_probe = kemist::model::scan_result::BleichenbacherOracleProbe {
+        rsa_kex_suite_probed: Some("TLS_RSA_WITH_AES_128_CBC_SHA".to_string()),
+        method: ScanMethod::Probe,
+        reason: None,
+        per_variant: vec![
+            kemist::model::scan_result::RobotVariantObservation {
+                variant: "correctly_formatted_pkcs1".to_string(),
+                alert_category: Some("tls_alert_bad_record_mac".to_string()),
+                tcp_reset: false,
+                elapsed_ms: 42,
+                other_outcome: None,
+            },
+            kemist::model::scan_result::RobotVariantObservation {
+                variant: "invalid_0x00_02_prefix".to_string(),
+                alert_category: Some("tls_alert_handshake_failure".to_string()),
+                tcp_reset: false,
+                elapsed_ms: 18,
+                other_outcome: None,
+            },
+            kemist::model::scan_result::RobotVariantObservation {
+                variant: "invalid_version_0x00_02_byte_swap".to_string(),
+                alert_category: None,
+                tcp_reset: true,
+                elapsed_ms: 15,
+                other_outcome: None,
+            },
+            kemist::model::scan_result::RobotVariantObservation {
+                variant: "null_separator_missing".to_string(),
+                alert_category: None,
+                tcp_reset: false,
+                elapsed_ms: 5000,
+                other_outcome: Some("timeout".to_string()),
+            },
+            kemist::model::scan_result::RobotVariantObservation {
+                variant: "wrong_tls_version_in_pms".to_string(),
+                alert_category: None,
+                tcp_reset: false,
+                elapsed_ms: 38,
+                other_outcome: Some("graceful_close".to_string()),
+            },
+        ],
+    };
+
     let mut results = fixture_results();
     results.openssl_observations = Some(OpensslObservations {
         cipher_probes: Some(cipher_probes),
@@ -423,6 +469,7 @@ fn fully_populated_openssl_observations_match_schema_v1() {
         session_resumption: Some(session_resumption),
         sigalg_policy: Some(sigalg_policy),
         ephemeral_key_reuse: Some(ephemeral_key_reuse),
+        bleichenbacher_oracle_probe: Some(bleichenbacher_oracle_probe),
         probe_errors: vec![],
     });
 
@@ -649,6 +696,7 @@ fn ffdhe_cross_check_reason_surfaces_in_output() {
         session_resumption: None,
         sigalg_policy: None,
         ephemeral_key_reuse: None,
+        bleichenbacher_oracle_probe: None,
         probe_errors: vec![],
     });
 

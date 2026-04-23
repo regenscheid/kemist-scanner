@@ -118,6 +118,11 @@ pub struct OpensslObservations {
     /// only when the outer probe setup failed; family slots inside
     /// land as `not_probed` when no suite was observed supported.
     pub ephemeral_key_reuse: Option<crate::model::scan_result::EphemeralKeyReuseObservation>,
+    /// ROBOT / Bleichenbacher differential probe. Gated on
+    /// `TLS_RSA_*` suites observed at `Supported` by the cipher
+    /// probe; otherwise lands as `method: not_probed`.
+    pub bleichenbacher_oracle_probe:
+        Option<crate::model::scan_result::BleichenbacherOracleProbe>,
     /// Per-probe non-fatal errors collected during the scan. Populated so
     /// every "not probed" outcome carries a reason string rather than going
     /// silent.
@@ -205,6 +210,29 @@ pub async fn run_all_probes(cfg: &ScanConfig) -> Result<OpensslObservations, Sca
     )
     .await;
     out.sigalg_policy = Some(sap);
+
+    // ROBOT / Bleichenbacher differential probe. Gate on whether
+    // the earlier cipher probe saw any `TLS_RSA_*` suite at
+    // `Supported` — skip with the canonical reason string otherwise.
+    let rsa_kex_supported = out
+        .cipher_probes
+        .as_ref()
+        .map(|cp| {
+            cp.results.iter().any(|r| {
+                r.name.starts_with("TLS_RSA_")
+                    && matches!(r.outcome, HandshakeOutcome::Supported)
+            })
+        })
+        .unwrap_or(false);
+    let robot = crate::scanner::raw::robot::probe(
+        cfg.target,
+        &cfg.hostname,
+        cfg.timeout,
+        cfg.timeout,
+        rsa_kex_supported,
+    )
+    .await;
+    out.bleichenbacher_oracle_probe = Some(robot);
 
     Ok(out)
 }

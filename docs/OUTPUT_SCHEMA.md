@@ -266,6 +266,22 @@ a specific reason — never `supported: false` without a real probe.
     ecdhe_public_reused_across_connections: ObservationBool,
     dhe_suite_probed?:                      string, // IANA name
     ecdhe_suite_probed?:                    string  // IANA name
+  },
+  bleichenbacher_oracle_probe: {            // ROBOT differential
+    rsa_kex_suite_probed?:  string,         // IANA name of pinned suite
+    method:                 Method,
+    reason?:                string,
+    per_variant: [
+      {
+        variant:          "correctly_formatted_pkcs1" | "invalid_0x00_02_prefix" |
+                          "invalid_version_0x00_02_byte_swap" |
+                          "null_separator_missing" | "wrong_tls_version_in_pms",
+        alert_category?:  string,           // tls_alert_<name>
+        tcp_reset:        bool,
+        elapsed_ms:       int,
+        other_outcome?:   string            // timeout | graceful_close | setup_error:*
+      } * 5
+    ]
   }
 }
 ```
@@ -311,6 +327,30 @@ Notes:
   correctly); `{value: false}` = regular ServerHello (either TLS
   1.2 fallback or an unexpected non-HRR response from a TLS 1.3
   server). This probe adds one extra handshake per target.
+- **`bleichenbacher_oracle_probe`** — ROBOT / Bleichenbacher
+  differential observation. The probe pins
+  `TLS_RSA_WITH_AES_128_CBC_SHA` and for each of five malformed
+  PKCS#1 v1.5 `ClientKeyExchange` variants (`correctly_formatted_pkcs1`,
+  `invalid_0x00_02_prefix`, `invalid_version_0x00_02_byte_swap`,
+  `null_separator_missing`, `wrong_tls_version_in_pms`) runs a
+  fresh TLS 1.2 handshake up through `ServerHelloDone`, extracts
+  the leaf's RSA public key, `RSA_public_encrypt(Padding::NONE)`s
+  the malformed plaintext into a full modulus-sized ciphertext,
+  and sends `CKE + ChangeCipherSpec + Finished-placeholder`. It
+  then records the server's response: `alert_category`
+  (`tls_alert_bad_record_mac`, `tls_alert_decrypt_error`,
+  `tls_alert_handshake_failure`, etc.), `tcp_reset: true`
+  (`ConnectionReset`), `other_outcome: timeout | graceful_close |
+  unexpected_plaintext:* | setup_error:*`, and `elapsed_ms`. The
+  Finished placeholder is intentionally garbage — the scanner
+  never derives correct session keys; the differential signal
+  comes from whether the server rejects on CKE (earlier) or on
+  MAC failure of the placeholder (later), and with what alert.
+  Gated on `TLS_RSA_*` suites observed at `Supported` by the
+  earlier cipher probe; `method: not_probed, reason:
+  no_rsa_kex_suite_supported` otherwise. The scanner does **not**
+  emit a `vulnerable` boolean — the five-entry list is the
+  observation.
 - **`ephemeral_key_reuse`** — Raccoon-class observation
   (CVE-2020-1968). For each of DHE and ECDHE, the probe picks a
   server-supported suite from the earlier cipher probe, pins

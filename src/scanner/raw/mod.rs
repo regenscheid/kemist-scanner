@@ -7,5 +7,7 @@
 //! classifying the bytes that come back.
 
 pub mod heartbleed;
+#[cfg(feature = "legacy-probes")]
+pub mod robot;
 pub mod sslv2;
 pub mod static_dh;

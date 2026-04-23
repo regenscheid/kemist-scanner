@@ -161,7 +161,8 @@
             "grease_echoed",
             "hello_retry_request",
             "delegated_credentials",
-            "ephemeral_key_reuse"
+            "ephemeral_key_reuse",
+            "bleichenbacher_oracle_probe"
           ],
           "properties": {
             "ems": { "$ref": "#/$defs/observationBool" },
@@ -268,6 +269,48 @@
               },
               "additionalProperties": false,
               "description": "Ephemeral DH/ECDH public-value reuse observation (Raccoon signal, CVE-2020-1968). For each family the scanner runs two sequential TLS 1.2 handshakes against a supported suite and compares the server's ephemeral public value byte-for-byte. `true` = the server reused its ephemeral key across fresh handshakes; `false` = distinct keys; `not_probed` when no suite in the family was observed supported. Scanner records, downstream rule engines interpret."
+            },
+            "bleichenbacher_oracle_probe": {
+              "type": "object",
+              "required": ["method", "per_variant"],
+              "properties": {
+                "rsa_kex_suite_probed": {
+                  "type": "string",
+                  "description": "IANA name of the RSA-kex suite the probe pinned (`TLS_RSA_WITH_AES_128_CBC_SHA` today)."
+                },
+                "method": { "$ref": "#/$defs/method" },
+                "reason": { "type": "string" },
+                "per_variant": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "required": ["variant", "tcp_reset", "elapsed_ms"],
+                    "properties": {
+                      "variant": {
+                        "type": "string",
+                        "enum": [
+                          "correctly_formatted_pkcs1",
+                          "invalid_0x00_02_prefix",
+                          "invalid_version_0x00_02_byte_swap",
+                          "null_separator_missing",
+                          "wrong_tls_version_in_pms"
+                        ]
+                      },
+                      "alert_category": { "type": "string" },
+                      "tcp_reset": { "type": "boolean" },
+                      "elapsed_ms": { "type": "integer", "minimum": 0 },
+                      "other_outcome": {
+                        "type": "string",
+                        "description": "Non-alert, non-RST outcome: `timeout`, `graceful_close`, `unexpected_plaintext:<detail>`, `setup_error:<detail>`."
+                      }
+                    },
+                    "additionalProperties": false
+                  },
+                  "description": "Exactly five entries in a stable variant order when `method` is `probe`; empty when `not_probed`."
+                }
+              },
+              "additionalProperties": false,
+              "description": "Bleichenbacher / ROBOT differential probe. For each of five malformed PKCS#1 v1.5 `ClientKeyExchange` variants the scanner runs a fresh TLS 1.2 handshake against an RSA-kex suite, sends the malformed CKE + ChangeCipherSpec + a Finished placeholder, and records the server's response (alert category / TCP RST / timeout / graceful close). Scanner records the per-variant table; downstream rule engines compare. No `vulnerable` boolean is emitted."
             }
           },
           "additionalProperties": false

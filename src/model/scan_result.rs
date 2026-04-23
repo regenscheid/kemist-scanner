@@ -583,6 +583,70 @@ pub struct TlsExtensions {
     /// signal for Raccoon-class exposure (CVE-2020-1968). Scanner
     /// records; downstream rule engines interpret.
     pub ephemeral_key_reuse: EphemeralKeyReuseObservation,
+    /// Bleichenbacher / ROBOT differential probe. Per-variant
+    /// alert / timing / close-mode classification under five
+    /// malformed PKCS#1 v1.5 `ClientKeyExchange` ciphertexts. Gated
+    /// on `TLS_RSA_*` support observed by the cipher probe; when no
+    /// RSA-kex suite is supported the `method` is `not_probed` and
+    /// `per_variant` is empty. Observation only — the scanner
+    /// records the five-entry comparison table; downstream
+    /// interprets.
+    pub bleichenbacher_oracle_probe: BleichenbacherOracleProbe,
+}
+
+/// Per-variant record for the ROBOT differential probe.
+/// `alert_category` + `tcp_reset` + `other_outcome` are mutually
+/// exclusive — exactly one is populated per variant.
+#[derive(Serialize, Debug, Clone)]
+pub struct RobotVariantObservation {
+    /// Stable variant name — `"correctly_formatted_pkcs1"`,
+    /// `"invalid_0x00_02_prefix"`,
+    /// `"invalid_version_0x00_02_byte_swap"`,
+    /// `"null_separator_missing"`,
+    /// `"wrong_tls_version_in_pms"`.
+    pub variant: String,
+    /// Canonical `tls_alert_*` category string when the server
+    /// closed with an alert. Same taxonomy as `errors[].category`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub alert_category: Option<String>,
+    /// `true` when the socket closed with TCP RST
+    /// (`ErrorKind::ConnectionReset`). Mutually exclusive with
+    /// `alert_category`.
+    pub tcp_reset: bool,
+    /// Wall-clock elapsed from connect-start to
+    /// response-classification. Scanner emits; downstream rule
+    /// engines can compare timings across variants.
+    pub elapsed_ms: u64,
+    /// Non-alert, non-RST outcome classification:
+    /// `"timeout"`, `"graceful_close"`,
+    /// `"unexpected_plaintext:<detail>"`, or
+    /// `"setup_error:<detail>"`. `None` when an alert or RST
+    /// populated the other fields.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub other_outcome: Option<String>,
+}
+
+/// Outer result of the ROBOT probe. `per_variant` is empty on
+/// `method: not_probed`; otherwise it carries exactly five entries
+/// in the stable variant order.
+#[derive(Serialize, Debug, Clone)]
+pub struct BleichenbacherOracleProbe {
+    /// IANA name of the RSA-kex suite the probe pinned
+    /// (`TLS_RSA_WITH_AES_128_CBC_SHA` today). `None` when the
+    /// probe did not run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rsa_kex_suite_probed: Option<String>,
+    /// `probe` when the five variants ran; `not_probed` when the
+    /// cipher probe observed no `TLS_RSA_*` suite supported (or
+    /// the outer environment disabled the probe). Never `error`
+    /// at the outer level — per-variant setup failures are
+    /// recorded inside `per_variant[].other_outcome`.
+    pub method: Method,
+    /// Human-readable reason when `method` is `not_probed`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// Five entries when probed, empty when not.
+    pub per_variant: Vec<RobotVariantObservation>,
 }
 
 /// Ephemeral DH / ECDH public-value reuse observation. Two sequential

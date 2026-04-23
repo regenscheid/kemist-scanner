@@ -100,6 +100,18 @@ mechanics.
   `ecdhe_public_reused_across_connections`, and the pinned suite
   names. No side-channel attempt; ephemeral reuse is the
   prerequisite signal, not the exploit.
+- `tls.extensions.bleichenbacher_oracle_probe` — ROBOT /
+  Bleichenbacher differential probe. Gated on `TLS_RSA_*`
+  observed supported. Drives five raw-socket TLS 1.2 handshakes
+  pinned to `TLS_RSA_WITH_AES_128_CBC_SHA`, one per malformed
+  PKCS#1 v1.5 `ClientKeyExchange` variant
+  (`correctly_formatted_pkcs1`, `invalid_0x00_02_prefix`,
+  `invalid_version_0x00_02_byte_swap`, `null_separator_missing`,
+  `wrong_tls_version_in_pms`), sends `CKE + CCS +
+  Finished-placeholder`, and records the server's response
+  (alert category / TCP RST / timeout / graceful close) with
+  elapsed ms. No `vulnerable` boolean — the five-entry
+  comparison table is the observation.
 
 ### Added — CLI
 

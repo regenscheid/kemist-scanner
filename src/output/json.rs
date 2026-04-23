@@ -750,6 +750,7 @@ fn build_extensions(results: &ScanResults, ctx: &JsonEmitContext) -> TlsExtensio
     let (record_size_limit, compress_certificate_algorithms) = build_tls13_ee_observations(results);
     let delegated_credentials = build_delegated_credentials(results);
     let ephemeral_key_reuse = build_ephemeral_key_reuse(results);
+    let bleichenbacher_oracle_probe = build_bleichenbacher_oracle_probe(results);
 
     // RFC 8701 GREASE echo. `true` = server echoed an unknown
     // extension (protocol violation); `false` = server correctly
@@ -802,6 +803,32 @@ fn build_extensions(results: &ScanResults, ctx: &JsonEmitContext) -> TlsExtensio
         hello_retry_request,
         delegated_credentials,
         ephemeral_key_reuse,
+        bleichenbacher_oracle_probe,
+    }
+}
+
+/// Merge the ROBOT probe observation from
+/// `OpensslObservations.bleichenbacher_oracle_probe`. Feature-off
+/// builds emit a stable `feature_disabled` skeleton.
+fn build_bleichenbacher_oracle_probe(
+    results: &ScanResults,
+) -> crate::model::scan_result::BleichenbacherOracleProbe {
+    use crate::model::scan_result::{BleichenbacherOracleProbe, Method};
+
+    #[cfg(feature = "legacy-probes")]
+    {
+        if let Some(obs) = results.openssl_observations.as_ref() {
+            if let Some(rb) = obs.bleichenbacher_oracle_probe.as_ref() {
+                return rb.clone();
+            }
+        }
+    }
+    let _ = results;
+    BleichenbacherOracleProbe {
+        rsa_kex_suite_probed: None,
+        method: Method::NotProbed,
+        reason: Some("feature_disabled".to_string()),
+        per_variant: Vec::new(),
     }
 }
 
@@ -831,6 +858,29 @@ fn build_ephemeral_key_reuse(
     }
 }
 
+/// Pull the TLS 1.3 DC detail fields (valid_time,
+/// expected_cert_verify_algorithm) out of the feature-gated
+/// observation path. Returns `None` under non-legacy-probes builds
+/// so the caller's merge logic stays feature-agnostic.
+#[cfg(feature = "legacy-probes")]
+fn tls13_delegated_credential_facts(results: &ScanResults) -> Option<(u32, String)> {
+    let dc = results
+        .openssl_observations
+        .as_ref()?
+        .tls13_extensions
+        .as_ref()?
+        .delegated_credential
+        .as_ref()?;
+    Some((
+        dc.valid_time_seconds,
+        dc.expected_cert_verify_algorithm.clone(),
+    ))
+}
+#[cfg(not(feature = "legacy-probes"))]
+fn tls13_delegated_credential_facts(_results: &ScanResults) -> Option<(u32, String)> {
+    None
+}
+
 /// Merge the TLS 1.2 SH presence signal (from `hello.rs`) with the
 /// TLS 1.3 CertificateEntry parse (from `openssl/tls13_extensions.rs`)
 /// into a single [`DelegatedCredentialsObservation`]. TLS 1.3 takes
@@ -848,20 +898,13 @@ fn build_delegated_credentials(
         .and_then(|h| h.delegated_credential_advertised_in_sh)
         .unwrap_or(false);
 
-    #[cfg(feature = "legacy-probes")]
-    let tls13_dc = results
-        .openssl_observations
-        .as_ref()
-        .and_then(|o| o.tls13_extensions.as_ref())
-        .and_then(|e| e.delegated_credential.clone());
-    #[cfg(not(feature = "legacy-probes"))]
-    let tls13_dc: Option<crate::scanner::backends::openssl::tls13_extensions::DelegatedCredentialFacts> = None;
+    let tls13_dc = tls13_delegated_credential_facts(results);
 
     match (tls13_dc, tls12_seen) {
-        (Some(dc), _) => DelegatedCredentialsObservation {
+        (Some((valid_time, scheme)), _) => DelegatedCredentialsObservation {
             value: ObservationBool::probe(true),
-            valid_time_seconds: Some(dc.valid_time_seconds),
-            expected_cert_verify_algorithm: Some(dc.expected_cert_verify_algorithm),
+            valid_time_seconds: Some(valid_time),
+            expected_cert_verify_algorithm: Some(scheme),
             delivery_path: Some("tls1_3_certificate_entry".to_string()),
         },
         (None, true) => DelegatedCredentialsObservation {
