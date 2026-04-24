@@ -607,12 +607,31 @@ impl SslScanner {
     }
 
     async fn test_rustls_protocol(&self, version: TlsVersion) -> ProtocolSupport {
-        let mut config = rustls::ClientConfig::builder()
+        // Pin rustls to exactly the version under test. Without this
+        // pin the builder defaults to {TLS 1.2, TLS 1.3} and the
+        // handshake silently falls back to whichever the server
+        // accepts — so "TLS 1.3 support" against a 1.2-only server
+        // would complete via 1.2 and falsely report 1.3 offered.
+        let rv = match version {
+            TlsVersion::Tls12 => &rustls::version::TLS12,
+            TlsVersion::Tls13 => &rustls::version::TLS13,
+            _ => {
+                return ProtocolSupport {
+                    version,
+                    supported: false,
+                    error: Some(format!(
+                        "rustls_backend_version_out_of_scope:{version:?}"
+                    )),
+                };
+            }
+        };
+        let mut config = rustls::ClientConfig::builder_with_protocol_versions(&[rv])
             .dangerous()
             .with_custom_certificate_verifier(Arc::new(AcceptAllVerifier))
             .with_no_client_auth();
 
-        // Configure for specific TLS version
+        // ALPN per-version. TLS 1.3 clients commonly carry ALPN;
+        // TLS 1.2 probing leaves it empty to keep the hello minimal.
         match version {
             TlsVersion::Tls12 => {
                 config.alpn_protocols = vec![];
