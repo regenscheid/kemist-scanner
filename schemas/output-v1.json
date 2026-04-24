@@ -510,8 +510,8 @@
         "preload_list_status": { "type": "string" },
         "preload_list_source": {
           "type": "string",
-          "description": "Provenance of the HSTS preload snapshot used for this observation. `compiled_in` = the build-time Chromium snapshot bundled in the binary. `runtime_override:<path>` = an override file supplied via `--hsts-preload-list-path`. Consumers comparing results across runs must check this — the `preload_list_status` value is only comparable under the same source snapshot.",
-          "pattern": "^(compiled_in|runtime_override:.+)$"
+          "description": "Provenance of the HSTS preload snapshot used for this observation. `compiled_in` = the build-time Chromium snapshot bundled in the binary. `cache_refreshed:<path>` = the platform cache file written by `kemist --update-hsts-preload`. `runtime_override:<path>` = an override file supplied via `--hsts-preload-list-path`. Consumers comparing results across runs must check this — the `preload_list_status` value is only comparable under the same source snapshot.",
+          "pattern": "^(compiled_in|cache_refreshed:.+|runtime_override:.+)$"
         },
         "security_txt": {
           "type": "object",
@@ -735,7 +735,7 @@
         "prime_bits": { "type": "integer", "minimum": 0 },
         "classification": {
           "type": "string",
-          "enum": ["ffdhe2048", "ffdhe3072", "ffdhe4096", "ffdhe6144", "ffdhe8192", "custom"]
+          "enum": ["ffdhe2048", "ffdhe3072", "ffdhe4096", "ffdhe6144", "ffdhe8192", "modp1024", "modp1536", "modp2048", "modp3072", "custom"]
         },
         "generator": { "type": "integer", "minimum": 0 },
         "prime_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },

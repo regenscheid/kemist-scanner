@@ -791,3 +791,240 @@ fn legacy_probes_disabled_renders_empty_schema_sections() {
         );
     }
 }
+
+// --------------------------------------------------------------------
+// Schema ↔ Rust enum coverage.
+//
+// The fixture-driven tests above validate that a synthesized record
+// *shape* matches the schema, but they can't catch enum drift —
+// e.g. the scanner adds a new `DhClassification` variant and forgets
+// to extend the schema enum. That shipped twice in 0.3.0
+// (`preload_list_source: cache_refreshed:*` and the four `modp*` DH
+// classifications) and made it to production before dashboard AJV
+// caught it.
+//
+// These tests enumerate every variant of each schema-constrained
+// Rust enum and assert its serialized form is accepted by the
+// schema. They use an exhaustive `match` guard so adding a variant
+// to the Rust enum without updating the test produces a compile
+// error at the exact site where the dev is already editing.
+// --------------------------------------------------------------------
+
+/// Walk `$defs.<name>.enum` in the loaded schema and return it as
+/// a set of strings. Panics on shape mismatch — structural breakage
+/// here is a schema bug, not a test bug.
+fn schema_def_enum(schema: &serde_json::Value, def_name: &str) -> Vec<String> {
+    schema
+        .get("$defs")
+        .and_then(|d| d.get(def_name))
+        .and_then(|m| m.get("enum"))
+        .and_then(|e| e.as_array())
+        .unwrap_or_else(|| panic!("$defs.{def_name}.enum not an array in schema"))
+        .iter()
+        .map(|v| {
+            v.as_str()
+                .unwrap_or_else(|| panic!("$defs.{def_name}.enum entry not a string: {v}"))
+                .to_string()
+        })
+        .collect()
+}
+
+#[test]
+fn method_enum_every_variant_matches_schema() {
+    use kemist::model::scan_result::Method;
+    // Keep this list in sync with the Method enum. The `match` below
+    // is the compile-time guard — adding a variant without touching
+    // the array fails to compile.
+    let all = [
+        Method::Probe,
+        Method::NotProbed,
+        Method::NotApplicable,
+        Method::Error,
+        Method::ConnectionState,
+    ];
+    for v in &all {
+        let _guard: &str = match v {
+            Method::Probe => "probe",
+            Method::NotProbed => "not_probed",
+            Method::NotApplicable => "not_applicable",
+            Method::Error => "error",
+            Method::ConnectionState => "connection_state",
+        };
+    }
+
+    let schema = load_schema();
+    let schema_enum = schema_def_enum(&schema, "method");
+    for v in &all {
+        // Method serializes via serde snake_case — that serialized
+        // form is what actually lands in the output JSON, so we
+        // validate that rather than a hand-written table.
+        let serialized = serde_json::to_value(v).expect("Method serializes");
+        let as_str = serialized
+            .as_str()
+            .expect("Method serializes as JSON string")
+            .to_string();
+        assert!(
+            schema_enum.contains(&as_str),
+            "Method::{v:?} serializes as {as_str:?} but schema $defs.method.enum is {schema_enum:?}",
+        );
+    }
+}
+
+#[test]
+fn cipher_classification_every_variant_matches_schema() {
+    use kemist::model::cipher_classification::CipherClassification;
+    let all = [
+        CipherClassification::RsaKex,
+        CipherClassification::DheAead,
+        CipherClassification::DheCbc,
+        CipherClassification::EcdheAead,
+        CipherClassification::EcdheCbc,
+        CipherClassification::Anon,
+        CipherClassification::Export,
+        CipherClassification::StaticDh,
+        CipherClassification::StaticEcdh,
+        CipherClassification::Psk,
+        CipherClassification::DhePsk,
+        CipherClassification::EcdhePsk,
+        CipherClassification::RsaPsk,
+        CipherClassification::NullCipher,
+        CipherClassification::Other,
+    ];
+    for v in &all {
+        // Exhaustiveness guard — add the new variant here AND above.
+        let _guard: () = match v {
+            CipherClassification::RsaKex
+            | CipherClassification::DheAead
+            | CipherClassification::DheCbc
+            | CipherClassification::EcdheAead
+            | CipherClassification::EcdheCbc
+            | CipherClassification::Anon
+            | CipherClassification::Export
+            | CipherClassification::StaticDh
+            | CipherClassification::StaticEcdh
+            | CipherClassification::Psk
+            | CipherClassification::DhePsk
+            | CipherClassification::EcdhePsk
+            | CipherClassification::RsaPsk
+            | CipherClassification::NullCipher
+            | CipherClassification::Other => (),
+        };
+    }
+
+    let schema = load_schema();
+    let schema_enum = schema
+        .pointer("/$defs/cipherSuiteEntry/properties/classification/enum")
+        .and_then(|e| e.as_array())
+        .expect("$defs.cipherSuiteEntry.properties.classification.enum missing")
+        .iter()
+        .map(|v| v.as_str().expect("enum entry is string").to_string())
+        .collect::<Vec<_>>();
+
+    for v in &all {
+        let serialized = serde_json::to_value(v).expect("CipherClassification serializes");
+        let as_str = serialized
+            .as_str()
+            .expect("CipherClassification serializes as JSON string")
+            .to_string();
+        assert!(
+            schema_enum.contains(&as_str),
+            "CipherClassification::{v:?} serializes as {as_str:?} but schema enum is {schema_enum:?}",
+        );
+    }
+}
+
+#[cfg(feature = "legacy-probes")]
+#[test]
+fn dh_classification_every_variant_matches_schema() {
+    use kemist::scanner::openssl::dh_params::DhClassification;
+    let all = [
+        DhClassification::Ffdhe2048,
+        DhClassification::Ffdhe3072,
+        DhClassification::Ffdhe4096,
+        DhClassification::Ffdhe6144,
+        DhClassification::Ffdhe8192,
+        DhClassification::Modp1024,
+        DhClassification::Modp1536,
+        DhClassification::Modp2048,
+        DhClassification::Modp3072,
+        DhClassification::Custom,
+    ];
+    for v in &all {
+        let _guard: () = match v {
+            DhClassification::Ffdhe2048
+            | DhClassification::Ffdhe3072
+            | DhClassification::Ffdhe4096
+            | DhClassification::Ffdhe6144
+            | DhClassification::Ffdhe8192
+            | DhClassification::Modp1024
+            | DhClassification::Modp1536
+            | DhClassification::Modp2048
+            | DhClassification::Modp3072
+            | DhClassification::Custom => (),
+        };
+    }
+
+    let schema = load_schema();
+    let schema_enum = schema
+        .pointer("/$defs/dhParametersObservation/properties/classification/enum")
+        .and_then(|e| e.as_array())
+        .expect("$defs.dhParametersObservation.properties.classification.enum missing")
+        .iter()
+        .map(|v| v.as_str().expect("enum entry is string").to_string())
+        .collect::<Vec<_>>();
+
+    for v in &all {
+        let emitted = v.as_schema_str();
+        assert!(
+            schema_enum.contains(&emitted.to_string()),
+            "DhClassification::{v:?}.as_schema_str() == {emitted:?} but schema enum is {schema_enum:?}",
+        );
+    }
+}
+
+#[cfg(all(feature = "http-checks", feature = "legacy-probes"))]
+#[test]
+fn preload_list_source_all_emitted_forms_match_schema_pattern() {
+    // All three forms the scanner can emit into http.preload_list_source:
+    //   - "compiled_in"                (the default PHF bundled at build)
+    //   - "runtime_override:<path>"    (--hsts-preload-list-path)
+    //   - "cache_refreshed:<path>"     (cache file written by
+    //                                   --update-hsts-preload)
+    // The third form shipped in 0.3.0 without being added to the
+    // regex alternation — any scan that ran after --update-hsts-preload
+    // failed AJV validation downstream until this test (and the fix)
+    // landed.
+    let forms = [
+        "compiled_in",
+        "runtime_override:/etc/kemist/preload.json",
+        "cache_refreshed:/home/op/.cache/kemist/hsts_preload_list.json",
+    ];
+
+    // Validate via the full schema: substitute each form into a
+    // fixture record, serialize, and run jsonschema. This round-
+    // trips through the exact same validator downstream consumers
+    // use — no regex parsing in the test.
+    let schema_value = load_schema();
+    let validator = jsonschema::validator_for(&schema_value).expect("schema compiles");
+    let results = fixture_results();
+    let ctx = fixture_ctx();
+    let base = build_scan_result(&results, &ctx);
+    let mut base_value = serde_json::to_value(&base).expect("serialize base");
+
+    for form in &forms {
+        // Inject a minimally-valid http object carrying the form.
+        base_value["http"] = serde_json::json!({
+            "enabled": true,
+            "preload_list_source": form,
+        });
+        let errors: Vec<_> = validator.iter_errors(&base_value).collect();
+        assert!(
+            errors.is_empty(),
+            "preload_list_source form {form:?} rejected by schema: {:?}",
+            errors
+                .iter()
+                .map(|e| format!("{}: {}", e.instance_path, e))
+                .collect::<Vec<_>>(),
+        );
+    }
+}
