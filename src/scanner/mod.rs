@@ -619,9 +619,7 @@ impl SslScanner {
                 return ProtocolSupport {
                     version,
                     supported: false,
-                    error: Some(format!(
-                        "rustls_backend_version_out_of_scope:{version:?}"
-                    )),
+                    error: Some(format!("rustls_backend_version_out_of_scope:{version:?}")),
                 };
             }
         };

@@ -8,6 +8,84 @@ numbers follow [semver](https://semver.org/).
 
 (no changes yet)
 
+## [0.3.1] — 2026-04-24
+
+Bugfix release. Four independent fixes for issues discovered while
+integrating 0.3.0 with the kemist-dashboard pipeline. No schema-shape
+changes; `schema_version` remains `"1.0.0"`. All additions are
+additive / defensive.
+
+### Fixed
+
+- **`--update-trust-stores` exit code on non-macOS hosts.** The Apple
+  trust bundle has no portable refresh path — the macOS System Roots
+  keychain needs `security find-certificate`, which the bundle
+  updater can't automate from Rust. The 0.3.0 code surfaced this as
+  `UpdateReport.outcome = Err`, so `print_reports` returned `false`
+  and the CLI exited 1 even when every real fetch succeeded. That
+  broke `--update-trust-stores && --update-hsts-preload` chaining
+  and turned cron alerts into noise. Introduces a third
+  `UpdateOutcome::Info` variant for "diagnostic, not a failure" —
+  the apple note still prints, but the exit code is now
+  `!any_err_present`. Real failures (cache dir missing, write
+  errors, manifest-save errors, fetch errors) stay `Err` and keep
+  their non-zero exit. Four unit tests lock the invariant.
+- **`tls.versions_offered.tls1_3` false-true against TLS 1.2-only
+  servers.** `test_rustls_protocol` built its `rustls::ClientConfig`
+  via the default `builder()`, which enables both TLS 1.2 and 1.3 in
+  the client's `supported_versions` extension. The "test TLS 1.3
+  support" probe therefore offered both versions; on a 1.2-only
+  server rustls silently negotiated 1.2, the handshake completed,
+  and the scanner emitted `tls1_3.offered: true` despite every
+  downstream 1.3 probe (cipher suites, groups, HRR, resumption)
+  correctly failing with `protocol_version` alerts. Reproduced on
+  `login.nist.gov:443`. Switched to
+  `ClientConfig::builder_with_protocol_versions(&[rv])` with `rv`
+  being exactly `&rustls::version::TLS12` or `&TLS13` — the same
+  pinning idiom `backends/rustls/mod.rs` already uses for the group
+  and cipher probes.
+- **`http.preload_list_source` regex rejected real scanner output.**
+  The schema's pattern permitted only `compiled_in` and
+  `runtime_override:<path>`, but `scanner::http` at line 258 emits
+  `cache_refreshed:<path>` after the cache file written by
+  `--update-hsts-preload` gets loaded — so any scan that ran on a
+  host whose preload cache had been refreshed failed downstream AJV
+  validation. Widened the pattern to
+  `^(compiled_in|cache_refreshed:.+|runtime_override:.+)$`, matching
+  the shape `validation.trust_store_sources.*` already used.
+- **`tls.dh_parameters[].classification` enum missed the RFC 3526
+  Modp groups.** `DhClassification::as_schema_str` has ten variants
+  — the five FFDHEs, four Modp groups (`modp1024`, `modp1536`,
+  `modp2048`, `modp3072`), and `custom` — but the schema's enum only
+  listed the FFDHEs + `custom`. The federal-gov scan run on
+  2026-04-24 hit modp* at scale and the dashboard deploy pipeline
+  rejected hundreds of records. Added the four `modp*` strings.
+
+### Changed
+
+- **`tls.groups.*[].iana_code` now populated for aws-lc-rs-backed
+  groups.** The JSON emitter's aws-lc-rs branch hardcoded
+  `iana_code: None`; the OpenSSL branch already carried the field.
+  Downstream consumers therefore had to do a name→codepoint lookup
+  for modern-path groups (X25519, secp256r1, secp384r1, MLKEM768,
+  the PQC hybrids) but not legacy-path groups — inconsistent, so the
+  field was optional in practice. Routes the emitter through the
+  existing `rustls::groups::iana_code_for` helper (which the text
+  renderer already used as a fallback).
+
+### Added — regression guards
+
+- **Schema ↔ Rust enum coverage tests.** Four new tests in
+  [tests/schema_validation.rs](tests/schema_validation.rs) iterate
+  every variant of each schema-constrained Rust enum
+  (`Method`, `CipherClassification`, `DhClassification`) and
+  emitter (`http.preload_list_source` forms), asserting each one
+  round-trips the schema's enum or pattern constraint. Uses
+  exhaustive `match` guards so adding a Rust variant without
+  updating the schema (or the test list) produces a compile-time
+  failure at the editing site. Either of the two schema-gap bugs
+  above would have fired these tests before 0.3.0 shipped.
+
 ## [0.3.0] — 2026-04-23
 
 ### Added — Observation expansion workstream
