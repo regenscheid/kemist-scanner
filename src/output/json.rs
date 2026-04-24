@@ -520,31 +520,39 @@ fn build_groups(results: &ScanResults) -> TlsGroups {
     if let Some(probes) = &results.group_probes {
         for r in &probes.results {
             use crate::scanner::backends::HandshakeOutcome;
+            // iana_code mirrors what the OpenSSL branch emits: probe
+            // name → codepoint lookup. `iana_code_for` returns None
+            // only for names outside TARGET_GROUPS; the rustls probe
+            // only emits names from that table, so the fallback
+            // branch is defensive.
+            let iana_code = crate::scanner::backends::rustls::groups::iana_code_for(&r.name)
+                .map(|code| format!("0x{code:04X}"));
             let obs = match &r.outcome {
                 HandshakeOutcome::Supported => GroupObservation {
                     supported: Some(true),
                     method: Method::Probe,
                     reason: None,
-                    iana_code: None,
+                    iana_code: iana_code.clone(),
                     provider: Some("aws_lc_rs".to_string()),
                 },
                 HandshakeOutcome::NotSupported => GroupObservation {
                     supported: Some(false),
                     method: Method::Probe,
                     reason: None,
-                    iana_code: None,
+                    iana_code: iana_code.clone(),
                     provider: Some("aws_lc_rs".to_string()),
                 },
                 HandshakeOutcome::Error(ctx) => GroupObservation {
                     supported: None,
                     method: Method::Error,
                     reason: Some(ctx.clone()),
-                    iana_code: None,
+                    iana_code: iana_code.clone(),
                     provider: Some("aws_lc_rs".to_string()),
                 },
                 HandshakeOutcome::NotProbed(reason) => {
                     let mut o = GroupObservation::not_probed(reason.as_str());
                     o.provider = Some("aws_lc_rs".to_string());
+                    o.iana_code = iana_code.clone();
                     o
                 }
                 HandshakeOutcome::IgnoredGroupReturnedCustomPrime => unreachable!(
