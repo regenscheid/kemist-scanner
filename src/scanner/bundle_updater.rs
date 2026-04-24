@@ -5,11 +5,14 @@
 //! [`crate::scanner::bundle_cache`].
 //!
 //! Failure semantics: one failed fetch does NOT halt the others.
-//! Each bundle produces either an `Ok` that updates the manifest
-//! or an `Err(reason)` that's logged but leaves the prior cached
-//! bundle + manifest entry (if any) untouched. The exit code
-//! reflects whether ANY bundle failed — operators running under
-//! cron can alert on non-zero.
+//! Each bundle produces an [`UpdateOutcome::Ok`] that updates the
+//! manifest, an [`UpdateOutcome::Err`] that's logged but leaves
+//! the prior cached bundle + manifest entry (if any) untouched, or
+//! an [`UpdateOutcome::Info`] diagnostic for platforms / bundles
+//! that can't be refreshed at all (today: `apple`). The exit code
+//! reflects whether any bundle is `Err` — `Info` is diagnostic
+//! only, so `--update-trust-stores && --update-hsts-preload` isn't
+//! poisoned by the apple-on-non-macOS note on cron-driven hosts.
 
 #![cfg(all(feature = "http-checks", feature = "legacy-probes"))]
 
@@ -24,7 +27,19 @@ use crate::scanner::bundle_fetcher;
 /// reporting.
 pub struct UpdateReport {
     pub name: String,
-    pub outcome: Result<UpdateOk, String>,
+    pub outcome: UpdateOutcome,
+}
+
+/// Three-way: refresh succeeded, refresh failed, or refresh is
+/// unavailable on this platform / in this config. `Info` is
+/// diagnostic-only — it prints a human-readable note but does not
+/// count toward the non-zero exit code, so automated callers can
+/// `&&`-chain the refresh subcommands without being poisoned by
+/// known-unfixable cases (notably `apple` on non-macOS hosts).
+pub enum UpdateOutcome {
+    Ok(UpdateOk),
+    Err(String),
+    Info(String),
 }
 
 pub struct UpdateOk {
@@ -46,7 +61,7 @@ pub async fn update_all_trust_stores() -> Vec<UpdateReport> {
     let Some(dir) = trust_store_dir() else {
         reports.push(UpdateReport {
             name: "<setup>".to_string(),
-            outcome: Err(
+            outcome: UpdateOutcome::Err(
                 "cache directory unavailable (directories crate returned None)".to_string(),
             ),
         });
@@ -55,7 +70,7 @@ pub async fn update_all_trust_stores() -> Vec<UpdateReport> {
     if let Err(e) = ensure_dir(&dir) {
         reports.push(UpdateReport {
             name: "<setup>".to_string(),
-            outcome: Err(format!("failed to create cache dir: {e}")),
+            outcome: UpdateOutcome::Err(format!("failed to create cache dir: {e}")),
         });
         return reports;
     }
@@ -68,18 +83,22 @@ pub async fn update_all_trust_stores() -> Vec<UpdateReport> {
         reports.push(report);
     }
 
-    // Apple on non-macOS hosts: there's no portable way to extract
-    // the macOS System Roots keychain. Report explicitly so
-    // operators know why the bundle didn't refresh.
+    // Apple: there's no portable way to extract the macOS System
+    // Roots keychain from Rust. On non-macOS hosts the bundle can't
+    // be refreshed at all; on macOS the refresh is a manual
+    // `security find-certificate` step we haven't automated. Either
+    // way it's informational — not a failure — so automated callers
+    // can `--update-trust-stores && --update-hsts-preload` without
+    // the apple note poisoning the exit code.
     reports.push(UpdateReport {
         name: "apple".to_string(),
-        outcome: Err(apple_refresh_note()),
+        outcome: UpdateOutcome::Info(apple_refresh_note()),
     });
 
     if let Err(e) = manifest.save() {
         reports.push(UpdateReport {
             name: "<manifest>".to_string(),
-            outcome: Err(format!("manifest save: {e}")),
+            outcome: UpdateOutcome::Err(format!("manifest save: {e}")),
         });
     }
     reports
@@ -92,14 +111,14 @@ pub async fn update_hsts_preload() -> UpdateReport {
     let Some(path) = crate::scanner::bundle_cache::hsts_preload_path() else {
         return UpdateReport {
             name: "hsts_preload".to_string(),
-            outcome: Err("cache path unavailable".to_string()),
+            outcome: UpdateOutcome::Err("cache path unavailable".to_string()),
         };
     };
     if let Some(parent) = path.parent() {
         if let Err(e) = ensure_dir(parent) {
             return UpdateReport {
                 name: "hsts_preload".to_string(),
-                outcome: Err(format!("cache dir: {e}")),
+                outcome: UpdateOutcome::Err(format!("cache dir: {e}")),
             };
         }
     }
@@ -117,18 +136,18 @@ pub async fn update_hsts_preload() -> UpdateReport {
                 // here lets the operator remediate instead of seeing
                 // a bogus success.
                 match manifest.save() {
-                    Ok(_) => Ok(UpdateOk {
+                    Ok(_) => UpdateOutcome::Ok(UpdateOk {
                         path,
                         entry_count: meta.entry_count,
                         bytes: bytes.len(),
                         sha256_prefix: meta.sha256[..16].to_string(),
                     }),
-                    Err(e) => Err(format!("manifest save: {e}")),
+                    Err(e) => UpdateOutcome::Err(format!("manifest save: {e}")),
                 }
             }
-            Err(e) => Err(format!("write cache file: {e}")),
+            Err(e) => UpdateOutcome::Err(format!("write cache file: {e}")),
         },
-        Err(e) => Err(e),
+        Err(e) => UpdateOutcome::Err(e),
     };
     UpdateReport {
         name: "hsts_preload".to_string(),
@@ -137,25 +156,30 @@ pub async fn update_hsts_preload() -> UpdateReport {
 }
 
 /// Pretty-print a batch of reports for the CLI. Returns `true`
-/// when every entry succeeded.
+/// when no entry is `Err` — `Info` entries are diagnostic-only and
+/// do not flip this to `false`, so `&&`-chained automation isn't
+/// poisoned by known-unfixable cases.
 pub fn print_reports(label: &str, reports: &[UpdateReport]) -> bool {
-    let mut ok = true;
+    let mut all_ok = true;
     println!("kemist {label} update:");
     for r in reports {
         match &r.outcome {
-            Ok(o) => {
+            UpdateOutcome::Ok(o) => {
                 println!(
-                    "  {:20} ok  {} entries, {} bytes, sha256 {}...",
+                    "  {:20} ok   {} entries, {} bytes, sha256 {}...",
                     r.name, o.entry_count, o.bytes, o.sha256_prefix
                 );
             }
-            Err(e) => {
-                ok = false;
+            UpdateOutcome::Info(msg) => {
+                println!("  {:20} info {}", r.name, msg);
+            }
+            UpdateOutcome::Err(e) => {
+                all_ok = false;
                 println!("  {:20} FAILED: {}", r.name, e);
             }
         }
     }
-    ok
+    all_ok
 }
 
 /// Note emitted for the Apple bundle on non-macOS hosts, or as an
@@ -205,19 +229,70 @@ async fn refresh_one(
                 let digest = sha256_hex(&bytes);
                 meta.sha256 = digest.clone();
                 manifest.bundles.insert(name.to_string(), meta.clone());
-                Ok(UpdateOk {
+                UpdateOutcome::Ok(UpdateOk {
                     path: path.clone(),
                     entry_count: meta.entry_count,
                     bytes: bytes.len(),
                     sha256_prefix: digest[..16].to_string(),
                 })
             }
-            Err(e) => Err(format!("write {}: {e}", path.display())),
+            Err(e) => UpdateOutcome::Err(format!("write {}: {e}", path.display())),
         },
-        Err(e) => Err(e),
+        Err(e) => UpdateOutcome::Err(e),
     };
     UpdateReport {
         name: name.to_string(),
         outcome,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ok(name: &str) -> UpdateReport {
+        UpdateReport {
+            name: name.to_string(),
+            outcome: UpdateOutcome::Ok(UpdateOk {
+                path: std::path::PathBuf::from("/tmp/x.pem"),
+                entry_count: 1,
+                bytes: 1,
+                sha256_prefix: "deadbeef".to_string(),
+            }),
+        }
+    }
+    fn info(name: &str) -> UpdateReport {
+        UpdateReport {
+            name: name.to_string(),
+            outcome: UpdateOutcome::Info("skipped".to_string()),
+        }
+    }
+    fn err(name: &str) -> UpdateReport {
+        UpdateReport {
+            name: name.to_string(),
+            outcome: UpdateOutcome::Err("boom".to_string()),
+        }
+    }
+
+    #[test]
+    fn info_does_not_flip_exit_code() {
+        // Apple-on-non-macOS lands here: print_reports must return
+        // true so `--update-trust-stores && ...` keeps chaining.
+        assert!(print_reports("t", &[ok("a"), info("apple")]));
+    }
+
+    #[test]
+    fn err_flips_exit_code() {
+        assert!(!print_reports("t", &[ok("a"), err("b")]));
+    }
+
+    #[test]
+    fn err_flips_even_alongside_info() {
+        assert!(!print_reports("t", &[info("apple"), err("b")]));
+    }
+
+    #[test]
+    fn all_ok_is_ok() {
+        assert!(print_reports("t", &[ok("a"), ok("b")]));
     }
 }
