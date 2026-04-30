@@ -1611,20 +1611,63 @@ fn feature_disabled_reneg() -> RenegotiationBehavior {
 }
 
 fn build_session_resumption(results: &ScanResults) -> crate::model::scan_result::SessionResumption {
-    use crate::model::scan_result::{
-        ObservationBool, SessionResumption, Tls12Resumption, Tls13Resumption,
-    };
+    use crate::model::scan_result::{Method, ObservationBool};
 
     #[cfg(feature = "legacy-probes")]
-    {
+    let mut sr = {
         if let Some(obs) = results.openssl_observations.as_ref() {
             if let Some(sr) = obs.session_resumption.as_ref() {
-                return sr.clone();
+                sr.clone()
+            } else {
+                feature_disabled_session_resumption()
+            }
+        } else {
+            feature_disabled_session_resumption()
+        }
+    };
+    #[cfg(not(feature = "legacy-probes"))]
+    let mut sr = feature_disabled_session_resumption();
+
+    // Cross-reference: TLS 1.3 PSK resumption + 0-RTT are TLS 1.3
+    // mechanisms. If the protocol probe affirmatively reports TLS 1.3
+    // as not supported on this host, the rustls resumption probe will
+    // have failed with `ServerTlsVersionIsDisabledByOurConfig` (or
+    // similar) on handshake #1 — surface the slot as
+    // `not_applicable` rather than `not_probed`, preserving the
+    // original probe error in the reason for forensic continuity.
+    // Only an *affirmative* TLS-1.3-not-supported signal triggers the
+    // downgrade; if the version probe itself failed (`error` set,
+    // `supported` indeterminate), the original reason stands so we
+    // don't quietly bury a real measurement failure.
+    let tls13_affirmatively_unsupported = results
+        .protocol_support
+        .iter()
+        .find(|p| p.version == TlsVersion::Tls13)
+        .map(|p| !p.supported && p.error.is_none())
+        .unwrap_or(false);
+    if tls13_affirmatively_unsupported {
+        for slot in [
+            &mut sr.tls1_3.psk_resumption_accepted,
+            &mut sr.tls1_3.early_data_accepted,
+        ] {
+            if matches!(slot.method, Method::NotProbed | Method::Error) {
+                let new_reason = match slot.reason.as_deref() {
+                    Some(r) => format!("tls13_not_supported_on_host:{r}"),
+                    None => "tls13_not_supported_on_host".to_string(),
+                };
+                *slot = ObservationBool::not_applicable(&new_reason);
             }
         }
     }
-    let _ = results;
-    // http-checks-only / probe didn't run → stable NotProbed shape.
+
+    let _ = (results, &sr);
+    sr
+}
+
+fn feature_disabled_session_resumption() -> crate::model::scan_result::SessionResumption {
+    use crate::model::scan_result::{
+        ObservationBool, SessionResumption, Tls12Resumption, Tls13Resumption,
+    };
     SessionResumption {
         tls1_2: Tls12Resumption {
             session_ticket_issued: ObservationBool::not_probed("feature_disabled"),

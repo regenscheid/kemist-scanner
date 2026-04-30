@@ -1309,6 +1309,152 @@ fn hrr_keeps_not_probed_when_tls13_probe_inconclusive() {
         .contains("Connection reset by peer"));
 }
 
+/// TLS 1.3 session resumption + 0-RTT cross-reference: when the
+/// protocol probe affirmatively reports TLS 1.3 as not supported,
+/// `psk_resumption_accepted` and `early_data_accepted` (both TLS 1.3
+/// mechanisms) degrade from `not_probed` to `not_applicable` with
+/// `tls13_not_supported_on_host`. The original probe error is
+/// preserved in the reason for forensic continuity. fs.bbg.gov is
+/// the motivating case: rustls's resumption probe fails handshake #1
+/// with `ServerTlsVersionIsDisabledByOurConfig` because the server
+/// only speaks TLS 1.2.
+#[cfg(feature = "legacy-probes")]
+#[test]
+fn session_resumption_tls13_renders_not_applicable_when_tls13_unsupported() {
+    use kemist::model::scan_result::{ObservationBool, SessionResumption, Tls12Resumption, Tls13Resumption};
+    use kemist::scanner::openssl::OpensslObservations;
+
+    let mut results = fixture_results();
+    for p in results.protocol_support.iter_mut() {
+        if p.version == TlsVersion::Tls13 {
+            p.supported = false;
+            p.error = None;
+        }
+    }
+    results.openssl_observations = Some(OpensslObservations {
+        cipher_probes: None,
+        kx_group_probes: None,
+        fallback_scsv: None,
+        renegotiation: None,
+        client_auth: None,
+        tls13_extensions: None,
+        session_resumption: Some(SessionResumption {
+            tls1_2: Tls12Resumption {
+                session_ticket_issued: ObservationBool::probe(true),
+                ticket_lifetime_hint_secs: Some(7200),
+                session_id_issued: ObservationBool::probe(false),
+                ticket_rotated_across_connections: ObservationBool::probe(true),
+            },
+            tls1_3: Tls13Resumption {
+                new_session_ticket_count: None,
+                ticket_lifetime_secs: Vec::new(),
+                psk_resumption_accepted: ObservationBool::not_probed(
+                    "handshake1:peer is incompatible: ServerTlsVersionIsDisabledByOurConfig",
+                ),
+                early_data_accepted: ObservationBool::not_probed(
+                    "handshake1:peer is incompatible: ServerTlsVersionIsDisabledByOurConfig",
+                ),
+            },
+        }),
+        sigalg_policy: None,
+        ephemeral_key_reuse: None,
+        bleichenbacher_oracle_probe: None,
+        probe_errors: vec![],
+    });
+
+    let ctx = fixture_ctx();
+    let record = build_scan_result(&results, &ctx);
+    let value = serde_json::to_value(&record).expect("serialize");
+
+    let psk = value
+        .pointer("/tls/session_resumption/tls1_3/psk_resumption_accepted")
+        .expect("psk_resumption_accepted slot present");
+    assert_eq!(psk.get("method").unwrap().as_str(), Some("not_applicable"));
+    let psk_reason = psk.get("reason").unwrap().as_str().unwrap();
+    assert!(
+        psk_reason.starts_with("tls13_not_supported_on_host:"),
+        "expected tls13_not_supported_on_host prefix, got {psk_reason}"
+    );
+    assert!(psk_reason.contains("ServerTlsVersionIsDisabledByOurConfig"));
+
+    let ed = value
+        .pointer("/tls/session_resumption/tls1_3/early_data_accepted")
+        .expect("early_data_accepted slot present");
+    assert_eq!(ed.get("method").unwrap().as_str(), Some("not_applicable"));
+    assert!(ed
+        .get("reason")
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .starts_with("tls13_not_supported_on_host:"));
+
+    // TLS 1.2 portion of the same struct is untouched — those rows
+    // measure session_id / session_ticket / rotation, none of which
+    // depend on TLS 1.3 capability.
+    let session_ticket = value
+        .pointer("/tls/session_resumption/tls1_2/session_ticket_issued")
+        .expect("tls1_2 session_ticket_issued slot present");
+    assert_eq!(session_ticket.get("method").unwrap().as_str(), Some("probe"));
+    assert_eq!(session_ticket.get("value").unwrap().as_bool(), Some(true));
+}
+
+/// Negative case: when the TLS 1.3 protocol probe itself was
+/// inconclusive (`error` set), session resumption rows keep their
+/// original `not_probed` rendering — we don't bury a real
+/// measurement failure under `not_applicable`.
+#[cfg(feature = "legacy-probes")]
+#[test]
+fn session_resumption_keeps_not_probed_when_tls13_probe_inconclusive() {
+    use kemist::model::scan_result::{ObservationBool, SessionResumption, Tls12Resumption, Tls13Resumption};
+    use kemist::scanner::openssl::OpensslObservations;
+
+    let mut results = fixture_results();
+    for p in results.protocol_support.iter_mut() {
+        if p.version == TlsVersion::Tls13 {
+            p.supported = false;
+            p.error = Some("connection_timeout".to_string());
+        }
+    }
+    results.openssl_observations = Some(OpensslObservations {
+        cipher_probes: None,
+        kx_group_probes: None,
+        fallback_scsv: None,
+        renegotiation: None,
+        client_auth: None,
+        tls13_extensions: None,
+        session_resumption: Some(SessionResumption {
+            tls1_2: Tls12Resumption {
+                session_ticket_issued: ObservationBool::not_probed("handshake_failed"),
+                ticket_lifetime_hint_secs: None,
+                session_id_issued: ObservationBool::not_probed("handshake_failed"),
+                ticket_rotated_across_connections: ObservationBool::not_probed("handshake_failed"),
+            },
+            tls1_3: Tls13Resumption {
+                new_session_ticket_count: None,
+                ticket_lifetime_secs: Vec::new(),
+                psk_resumption_accepted: ObservationBool::not_probed("handshake1_timeout"),
+                early_data_accepted: ObservationBool::not_probed("handshake1_timeout"),
+            },
+        }),
+        sigalg_policy: None,
+        ephemeral_key_reuse: None,
+        bleichenbacher_oracle_probe: None,
+        probe_errors: vec![],
+    });
+
+    let ctx = fixture_ctx();
+    let record = build_scan_result(&results, &ctx);
+    let value = serde_json::to_value(&record).expect("serialize");
+    let psk = value
+        .pointer("/tls/session_resumption/tls1_3/psk_resumption_accepted")
+        .expect("psk_resumption_accepted slot present");
+    assert_eq!(psk.get("method").unwrap().as_str(), Some("not_probed"));
+    assert_eq!(
+        psk.get("reason").unwrap().as_str(),
+        Some("handshake1_timeout")
+    );
+}
+
 /// `HandshakeOutcome::WireRejected { reason }` — emitted by the
 /// raw-socket static-DH cipher probe when the server tears the
 /// connection down with a TCP RST after our ClientHello — must
