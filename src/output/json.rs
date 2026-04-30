@@ -1693,6 +1693,8 @@ fn feature_disabled_session_resumption() -> crate::model::scan_result::SessionRe
             ticket_lifetime_hint_secs: None,
             session_id_issued: ObservationBool::not_probed("feature_disabled"),
             ticket_rotated_across_connections: ObservationBool::not_probed("feature_disabled"),
+            session_ticket_resumption_accepted: ObservationBool::not_probed("feature_disabled"),
+            session_id_resumption_accepted: ObservationBool::not_probed("feature_disabled"),
         },
         tls1_3: Tls13Resumption {
             new_session_ticket_count: None,

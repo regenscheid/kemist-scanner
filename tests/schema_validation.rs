@@ -376,6 +376,12 @@ fn fully_populated_openssl_observations_match_schema_v1() {
             ticket_lifetime_hint_secs: Some(7200),
             session_id_issued: ObservationBool::probe(true),
             ticket_rotated_across_connections: ObservationBool::probe(true),
+            // Functional resumption results: this fixture mirrors the
+            // cloudflare.com pattern that motivated the v2 split —
+            // tickets resume successfully, session-ID caching does
+            // not (server issues IDs but doesn't accept them back).
+            session_ticket_resumption_accepted: ObservationBool::probe(true),
+            session_id_resumption_accepted: ObservationBool::probe(false),
         },
         tls1_3: Tls13Resumption {
             new_session_ticket_count: None,
@@ -652,6 +658,24 @@ fn fully_populated_openssl_observations_match_schema_v1() {
             .unwrap()
             .as_bool(),
         Some(true)
+    );
+    // Functional resumption fields. Fixture mirrors the cloudflare.com
+    // pattern: tickets work, session-ID caching doesn't.
+    assert_eq!(
+        sr12.get("session_ticket_resumption_accepted")
+            .unwrap()
+            .get("value")
+            .unwrap()
+            .as_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        sr12.get("session_id_resumption_accepted")
+            .unwrap()
+            .get("value")
+            .unwrap()
+            .as_bool(),
+        Some(false)
     );
     let sr13 = sr.get("tls1_3").unwrap();
     assert_eq!(
@@ -1344,6 +1368,10 @@ fn session_resumption_tls13_renders_not_applicable_when_tls13_unsupported() {
                 ticket_lifetime_hint_secs: Some(7200),
                 session_id_issued: ObservationBool::probe(false),
                 ticket_rotated_across_connections: ObservationBool::probe(true),
+                session_ticket_resumption_accepted: ObservationBool::probe(true),
+                session_id_resumption_accepted: ObservationBool::not_applicable(
+                    "no_session_issued_in_first_handshake",
+                ),
             },
             tls1_3: Tls13Resumption {
                 new_session_ticket_count: None,
@@ -1428,6 +1456,10 @@ fn session_resumption_keeps_not_probed_when_tls13_probe_inconclusive() {
                 ticket_lifetime_hint_secs: None,
                 session_id_issued: ObservationBool::not_probed("handshake_failed"),
                 ticket_rotated_across_connections: ObservationBool::not_probed("handshake_failed"),
+                session_ticket_resumption_accepted: ObservationBool::not_probed(
+                    "handshake_failed",
+                ),
+                session_id_resumption_accepted: ObservationBool::not_probed("handshake_failed"),
             },
             tls1_3: Tls13Resumption {
                 new_session_ticket_count: None,

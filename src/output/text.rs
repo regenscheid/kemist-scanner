@@ -570,6 +570,14 @@ fn render_session_resumption(sr: &crate::model::scan_result::SessionResumption) 
         "tls1_2.ticket_rotated_across_connections",
         &sr.tls1_2.ticket_rotated_across_connections,
     );
+    print_obs_bool(
+        "tls1_2.session_ticket_resumption_accepted",
+        &sr.tls1_2.session_ticket_resumption_accepted,
+    );
+    print_obs_bool(
+        "tls1_2.session_id_resumption_accepted",
+        &sr.tls1_2.session_id_resumption_accepted,
+    );
 }
 
 fn render_dh_parameters(entries: &[DhParametersObservation]) {

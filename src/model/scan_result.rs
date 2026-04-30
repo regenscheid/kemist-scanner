@@ -339,6 +339,26 @@ pub struct Tls12Resumption {
     /// secrecy friendlier); `false` = stable ticket (the server
     /// key that wraps the ticket is a standing secret).
     pub ticket_rotated_across_connections: ObservationBool,
+    /// **Functional** RFC 5077 ticket resumption test. The probe
+    /// completes a TLS 1.2 handshake, captures the issued session,
+    /// then attempts a fresh handshake with `SSL_set_session(prev)`
+    /// and reads `SSL_session_reused`. `true` = server accepted the
+    /// previously-issued ticket and resumed; `false` = server
+    /// declined and ran a full handshake; `not_applicable` when the
+    /// first handshake didn't yield a session to present.
+    /// Distinct from `session_ticket_issued`, which only tells you
+    /// whether the server *handed out* a ticket.
+    pub session_ticket_resumption_accepted: ObservationBool,
+    /// **Functional** RFC 5246 §F.1.4 session-ID resumption test.
+    /// Same shape as `session_ticket_resumption_accepted`, but the
+    /// probe builds the SslContext with `SSL_OP_NO_TICKET` so the
+    /// server falls back to session-ID-based caching. `true` =
+    /// server accepted the previously-issued session ID and resumed;
+    /// `false` = server issued an ID but didn't accept it back (the
+    /// classic "IDs assigned but not accepted" pattern). Distinct
+    /// from `session_id_issued`, which only tells you whether the
+    /// server *handed out* an ID.
+    pub session_id_resumption_accepted: ObservationBool,
 }
 
 #[derive(Serialize, Debug, Clone, Default)]

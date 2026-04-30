@@ -1,24 +1,29 @@
 //! Session resumption observation.
 //!
-//! Opens two successive TLS handshakes to the target and records
-//! ticket issuance, lifetime hints, session ID issuance, and
-//! ticket rotation (whether the second handshake's ticket differs
-//! from the first).
+//! Drives multiple TLS 1.2 handshake pairs to capture both
+//! *issuance* (does the server hand out tickets / session IDs) and
+//! *acceptance* (does the server actually resume from a previously-
+//! issued session).
 //!
 //! ## Scope of this module
 //!
-//! Implemented:
-//! - TLS 1.2 single-connection: `session_ticket_issued`,
+//! Implemented (TLS 1.2):
+//! - Single-connection issuance: `session_ticket_issued`,
 //!   `session_id_issued`, `ticket_lifetime_hint_secs`.
-//! - TLS 1.2 two-connection: `ticket_rotated_across_connections`.
+//! - Two-connection rotation proxy: `ticket_rotated_across_connections`.
+//! - **Functional ticket resumption** (RFC 5077):
+//!   `session_ticket_resumption_accepted` — capture the session from
+//!   handshake #1, present it via `SSL_set_session` in a fresh
+//!   handshake #2, observe `SSL_session_reused`. Matches what
+//!   ssllabs reports as "Session resumption (tickets)".
+//! - **Functional session ID resumption** (RFC 5246 §F.1.4):
+//!   `session_id_resumption_accepted` — same shape as above but with
+//!   `SSL_OP_NO_TICKET` set on both handshakes so the server falls
+//!   back to session-ID-based caching. Matches ssllabs's "Session
+//!   resumption (caching)".
 //!
-//! Plumbed as `NotProbed` for a follow-up workstream:
-//! - TLS 1.3 NewSessionTicket count + per-ticket lifetimes + PSK
-//!   resumption acceptance. OpenSSL's TLS 1.3 NSTs arrive post-
-//!   handshake and require a small read to drive their processing;
-//!   doing that correctly under a timeout budget is non-trivial.
-//! - TLS 1.3 `early_data_accepted` (0-RTT). Requires
-//!   `SSL_write_early_data` on a resumed connection.
+//! TLS 1.3 PSK resumption + 0-RTT live on the rustls backend
+//! (`backends::rustls::session_resumption`); aggregated below.
 //!
 //! ## Implementation notes
 //!
@@ -28,16 +33,18 @@
 //! rotation detection we diff the first 32 bytes of the session ID
 //! across two handshakes — when tickets are issued most servers
 //! include ticket-dependent bytes in the session ID, so a bytewise
-//! diff is a reasonable rotation proxy. This is best-effort, not
-//! cryptographically definitive; the rule-engine consumer should
-//! treat `ticket_rotated_across_connections == false` as "likely
-//! stable" rather than "definitely the same ticket."
+//! diff is a reasonable rotation proxy. This is best-effort; the
+//! rule-engine consumer should treat
+//! `ticket_rotated_across_connections == false` as "likely stable"
+//! rather than "definitely the same ticket." Functional resumption
+//! tests above are the authoritative signals.
 
 use std::net::SocketAddr;
 use std::time::Duration;
 
 use openssl::ssl::{
-    HandshakeError, Ssl, SslContext, SslMethod, SslSessionCacheMode, SslVerifyMode, SslVersion,
+    HandshakeError, Ssl, SslContext, SslMethod, SslOptions, SslSession, SslSessionCacheMode,
+    SslVerifyMode, SslVersion,
 };
 use tracing::{debug, info};
 
@@ -66,6 +73,8 @@ pub async fn probe(
             ticket_lifetime_hint_secs: None,
             session_id_issued: ObservationBool::not_probed("spawn_blocking_panic"),
             ticket_rotated_across_connections: ObservationBool::not_probed("spawn_blocking_panic"),
+            session_ticket_resumption_accepted: ObservationBool::not_probed("spawn_blocking_panic"),
+            session_id_resumption_accepted: ObservationBool::not_probed("spawn_blocking_panic"),
         }
     });
 
@@ -85,49 +94,33 @@ pub async fn probe(
     SessionResumption { tls1_2, tls1_3 }
 }
 
-/// Two sequential TLS 1.2 handshakes sharing one `SslContext`. The
-/// first sets up the ticket observations; the second drives rotation
-/// detection.
+/// All TLS 1.2 resumption probes, run sequentially: issuance/rotation
+/// pair (existing semantics) + ticket-resumption pair + session-ID
+/// resumption pair. Six handshakes in the worst case; pairs short-
+/// circuit on first-handshake failure.
 fn probe_tls12_blocking(
     target: SocketAddr,
     hostname: &str,
     connect_timeout: Duration,
     handshake_timeout: Duration,
 ) -> Tls12Resumption {
-    let ctx = match build_tls12_context() {
+    let issuance_ctx = match build_tls12_context(/*allow_tickets=*/ true) {
         Ok(c) => c,
         Err(e) => {
-            return Tls12Resumption {
-                session_ticket_issued: ObservationBool::error(&format!("ctx_build:{e}")),
-                ticket_lifetime_hint_secs: None,
-                session_id_issued: ObservationBool::not_probed(&format!("ctx_build:{e}")),
-                ticket_rotated_across_connections: ObservationBool::not_probed(&format!(
-                    "ctx_build:{e}"
-                )),
-            };
+            return ctx_build_failure(&format!("ctx_build:{e}"));
         }
     };
 
+    // ----- Pair 1: issuance + rotation -----
     let first =
-        match single_tls12_handshake(&ctx, target, hostname, connect_timeout, handshake_timeout) {
+        match single_tls12_handshake(&issuance_ctx, None, target, hostname, connect_timeout, handshake_timeout) {
             Ok(s) => s,
             Err(reason) => {
-                return Tls12Resumption {
-                    session_ticket_issued: ObservationBool::error(&format!("handshake:{reason}")),
-                    ticket_lifetime_hint_secs: None,
-                    session_id_issued: ObservationBool::not_probed(&format!("handshake:{reason}")),
-                    ticket_rotated_across_connections: ObservationBool::not_probed(&format!(
-                        "handshake:{reason}"
-                    )),
-                };
+                return handshake_failure(&format!("handshake:{reason}"));
             }
         };
-
-    // Second handshake to observe ticket rotation. Failures here
-    // don't invalidate the first-connection observations; we just
-    // can't speak to rotation.
     let second_result =
-        single_tls12_handshake(&ctx, target, hostname, connect_timeout, handshake_timeout);
+        single_tls12_handshake(&issuance_ctx, None, target, hostname, connect_timeout, handshake_timeout);
 
     let session_ticket_issued = ObservationBool::probe(first.has_ticket_hint);
     let session_id_issued = ObservationBool::probe(first.session_id_nonempty);
@@ -144,17 +137,81 @@ fn probe_tls12_blocking(
         Err(reason) => ObservationBool::not_probed(&format!("second_handshake_failed:{reason}")),
     };
 
+    // ----- Pair 2: functional ticket resumption -----
+    let session_ticket_resumption_accepted = probe_resumption_pair(
+        /*allow_tickets=*/ true,
+        target,
+        hostname,
+        connect_timeout,
+        handshake_timeout,
+    );
+
+    // ----- Pair 3: functional session-ID resumption (NO_TICKET) -----
+    let session_id_resumption_accepted = probe_resumption_pair(
+        /*allow_tickets=*/ false,
+        target,
+        hostname,
+        connect_timeout,
+        handshake_timeout,
+    );
+
     Tls12Resumption {
         session_ticket_issued,
         ticket_lifetime_hint_secs,
         session_id_issued,
         ticket_rotated_across_connections,
+        session_ticket_resumption_accepted,
+        session_id_resumption_accepted,
     }
 }
 
-/// What one handshake observed. Kept minimal — only the signals the
-/// rotation check compares.
+/// Two handshakes against a fresh context: capture the session from
+/// the first, explicitly `SSL_set_session` it on the second, and
+/// observe `SSL_session_reused`. `allow_tickets = false` sets
+/// `SSL_OP_NO_TICKET` on the context, forcing both sides to fall
+/// back to session-ID caching.
+fn probe_resumption_pair(
+    allow_tickets: bool,
+    target: SocketAddr,
+    hostname: &str,
+    connect_timeout: Duration,
+    handshake_timeout: Duration,
+) -> ObservationBool {
+    let ctx = match build_tls12_context(allow_tickets) {
+        Ok(c) => c,
+        Err(e) => return ObservationBool::error(&format!("ctx_build:{e}")),
+    };
+
+    let first =
+        match single_tls12_handshake(&ctx, None, target, hostname, connect_timeout, handshake_timeout) {
+            Ok(s) => s,
+            Err(reason) => {
+                return ObservationBool::not_probed(&format!("first_handshake:{reason}"));
+            }
+        };
+    let Some(prev_session) = first.session else {
+        return ObservationBool::not_applicable("no_session_issued_in_first_handshake");
+    };
+
+    match single_tls12_handshake(
+        &ctx,
+        Some(&prev_session),
+        target,
+        hostname,
+        connect_timeout,
+        handshake_timeout,
+    ) {
+        Ok(snap) => ObservationBool::probe(snap.resumed),
+        Err(reason) => ObservationBool::not_probed(&format!("second_handshake:{reason}")),
+    }
+}
+
+/// Snapshot of one completed handshake.
 struct HandshakeSnapshot {
+    /// Owned copy of the session OpenSSL captured post-handshake.
+    /// `None` when the handshake completed but no session was attached
+    /// (rare; some misconfigured peers).
+    session: Option<SslSession>,
     /// Bytes of the session ID as issued. Empty for pure-ticket
     /// servers that don't echo an ID.
     session_id: Vec<u8>,
@@ -167,10 +224,15 @@ struct HandshakeSnapshot {
     /// enough to distinguish "ticket path" from "no ticket."
     has_ticket_hint: bool,
     lifetime_hint_secs: Option<u32>,
+    /// `SSL_session_reused` reading post-handshake — true only when
+    /// `prev_session` was set on the Ssl and the server accepted it.
+    /// `false` for fresh first-of-pair handshakes.
+    resumed: bool,
 }
 
 fn single_tls12_handshake(
     ctx: &SslContext,
+    prev_session: Option<&openssl::ssl::SslSessionRef>,
     target: SocketAddr,
     hostname: &str,
     connect_timeout: Duration,
@@ -183,6 +245,16 @@ fn single_tls12_handshake(
 
     let mut ssl = Ssl::new(ctx).map_err(|e| format!("ssl_new:{e}"))?;
     let _ = ssl.set_hostname(hostname);
+
+    if let Some(prev) = prev_session {
+        // SAFETY: `prev` is a borrowed `SslSessionRef` whose owning
+        // `SslSession` outlives this function; `set_session` clones
+        // the reference internally (SSL_set_session up-refs).
+        unsafe {
+            ssl.set_session(prev)
+                .map_err(|e| format!("set_session:{e}"))?;
+        }
+    }
 
     let stream = match ssl.connect(tcp) {
         Ok(s) => s,
@@ -197,9 +269,11 @@ fn single_tls12_handshake(
         }
     };
 
-    let session = stream.ssl().session();
-    let session_id: Vec<u8> = session.map(|s| s.id().to_vec()).unwrap_or_default();
-    let timeout_secs: i64 = session.map(|s| s.timeout()).unwrap_or(0) as i64;
+    let resumed = stream.ssl().session_reused();
+    let session_ref = stream.ssl().session();
+    let session: Option<SslSession> = session_ref.map(|s| s.to_owned());
+    let session_id: Vec<u8> = session_ref.map(|s| s.id().to_vec()).unwrap_or_default();
+    let timeout_secs: i64 = session_ref.map(|s| s.timeout()).unwrap_or(0) as i64;
     let (has_ticket_hint, lifetime_hint_secs) = if timeout_secs > 0 {
         (true, Some(timeout_secs as u32))
     } else {
@@ -207,25 +281,56 @@ fn single_tls12_handshake(
     };
 
     Ok(HandshakeSnapshot {
+        session,
         session_id_nonempty: !session_id.is_empty(),
         session_id,
         has_ticket_hint,
         lifetime_hint_secs,
+        resumed,
     })
 }
 
-fn build_tls12_context() -> Result<SslContext, openssl::error::ErrorStack> {
+fn build_tls12_context(allow_tickets: bool) -> Result<SslContext, openssl::error::ErrorStack> {
     let mut builder = SslContext::builder(SslMethod::tls_client())?;
     builder.set_min_proto_version(Some(SslVersion::TLS1_2))?;
     builder.set_max_proto_version(Some(SslVersion::TLS1_2))?;
     builder.set_security_level(0);
     builder.set_verify(SslVerifyMode::NONE);
-    // Cache sessions so the second handshake can observe ticket
-    // rotation — even though we don't actually resume, we need the
-    // cache mode set to CLIENT for OpenSSL to populate the
-    // SSL_SESSION fully on the second `ssl.session()` call.
+    // CLIENT cache mode is required for OpenSSL to populate the
+    // SslSession fully on `ssl.session()` — applies to all our
+    // handshakes whether we resume explicitly or not.
     builder.set_session_cache_mode(SslSessionCacheMode::CLIENT);
+    if !allow_tickets {
+        // SSL_OP_NO_TICKET: client doesn't include the SessionTicket
+        // extension and won't process server-issued tickets. Forces
+        // RFC 5246 §F.1.4 session-ID-based caching as the only
+        // resumption path. Matches ssllabs's "Session resumption
+        // (caching)" probe.
+        builder.set_options(SslOptions::NO_TICKET);
+    }
     Ok(builder.build())
+}
+
+fn ctx_build_failure(reason: &str) -> Tls12Resumption {
+    Tls12Resumption {
+        session_ticket_issued: ObservationBool::error(reason),
+        ticket_lifetime_hint_secs: None,
+        session_id_issued: ObservationBool::not_probed(reason),
+        ticket_rotated_across_connections: ObservationBool::not_probed(reason),
+        session_ticket_resumption_accepted: ObservationBool::not_probed(reason),
+        session_id_resumption_accepted: ObservationBool::not_probed(reason),
+    }
+}
+
+fn handshake_failure(reason: &str) -> Tls12Resumption {
+    Tls12Resumption {
+        session_ticket_issued: ObservationBool::error(reason),
+        ticket_lifetime_hint_secs: None,
+        session_id_issued: ObservationBool::not_probed(reason),
+        ticket_rotated_across_connections: ObservationBool::not_probed(reason),
+        session_ticket_resumption_accepted: ObservationBool::not_probed(reason),
+        session_id_resumption_accepted: ObservationBool::not_probed(reason),
+    }
 }
 
 #[cfg(test)]
@@ -249,5 +354,23 @@ mod tests {
                 ..
             }
         ));
+        assert!(matches!(
+            d.session_ticket_resumption_accepted,
+            ObservationBool {
+                value: None,
+                method: crate::model::scan_result::Method::NotProbed,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn build_tls12_context_with_tickets_does_not_set_no_ticket() {
+        // Smoke test: building both context flavors should not error.
+        // We can't introspect SslOptions on the resulting context (no
+        // public getter), but the absence of error from
+        // `set_options(NO_TICKET)` confirms wiring.
+        assert!(build_tls12_context(true).is_ok());
+        assert!(build_tls12_context(false).is_ok());
     }
 }

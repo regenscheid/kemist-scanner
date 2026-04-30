@@ -1091,7 +1091,7 @@
     },
     "sessionResumption": {
       "type": "object",
-      "description": "Session resumption observations. TLS 1.2 ticket + rotation populated via a two-connection OpenSSL probe; TLS 1.3 PSK resumption and 0-RTT are stubbed as NotProbed pending a follow-up workstream.",
+      "description": "Session resumption observations. TLS 1.2 issuance + rotation + functional resumption (tickets and session-ID caching) populated via successive OpenSSL probe handshakes; TLS 1.3 PSK resumption + 0-RTT populated via a rustls-backed probe.",
       "required": ["tls1_2", "tls1_3"],
       "properties": {
         "tls1_2": {
@@ -1099,13 +1099,23 @@
           "required": [
             "session_ticket_issued",
             "session_id_issued",
-            "ticket_rotated_across_connections"
+            "ticket_rotated_across_connections",
+            "session_ticket_resumption_accepted",
+            "session_id_resumption_accepted"
           ],
           "properties": {
             "session_ticket_issued":             { "$ref": "#/$defs/observationBool" },
             "ticket_lifetime_hint_secs":         { "type": "integer", "minimum": 0 },
             "session_id_issued":                 { "$ref": "#/$defs/observationBool" },
-            "ticket_rotated_across_connections": { "$ref": "#/$defs/observationBool" }
+            "ticket_rotated_across_connections": { "$ref": "#/$defs/observationBool" },
+            "session_ticket_resumption_accepted": {
+              "$ref": "#/$defs/observationBool",
+              "description": "Functional RFC 5077 ticket resumption test. The probe captures the session from a first TLS 1.2 handshake and presents it via SSL_set_session on a fresh second handshake; `true` = server accepted the ticket and resumed (SSL_session_reused). Distinct from `session_ticket_issued` (issuance only)."
+            },
+            "session_id_resumption_accepted": {
+              "$ref": "#/$defs/observationBool",
+              "description": "Functional RFC 5246 §F.1.4 session-ID resumption test. Same shape as `session_ticket_resumption_accepted` but with SSL_OP_NO_TICKET set on both handshakes so the server falls back to session-ID caching. `true` = server accepted the previously-issued session ID and resumed; `false` = server issued an ID but didn't accept it back (the classic 'IDs assigned but not accepted' pattern)."
+            }
           },
           "additionalProperties": false
         },
