@@ -2,7 +2,7 @@
 
 Formal contract: [`schemas/output-v1.json`](../schemas/output-v1.json).
 This document is the human-readable field reference. Every emitted JSON
-record pins `schema_version: "1.0.0"` and validates against the JSON
+record pins `schema_version: "2.0.0"` and validates against the JSON
 Schema — both are CI-enforced.
 
 ## Stability contract
@@ -56,7 +56,7 @@ same; the field name is load-bearing for readability.
 
 ```
 ScanResult {
-  schema_version: "1.0.0"
+  schema_version: "2.0.0"
   scanner:      { name, version }
   capabilities: { ... }
   scan:         { ... }
@@ -70,7 +70,7 @@ ScanResult {
 ```
 
 ### `schema_version`
-String, always `"1.0.0"` in schema v1. Pin on this exact value; check
+String, always `"2.0.0"` in schema v2. Pin on this exact value; check
 the major before interpreting anything else.
 
 ### `scanner`

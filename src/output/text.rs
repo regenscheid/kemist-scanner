@@ -37,6 +37,8 @@ pub fn render(r: &ScanResult) {
     println!();
     render_extensions(r);
     println!();
+    render_behavioral_probes(r);
+    println!();
     render_sni_behavior(r);
     if let Some(http) = &r.http {
         if http.enabled {
@@ -386,9 +388,6 @@ fn render_extensions(r: &ScanResult) {
     if !ext.alpn_offered.is_empty() {
         kv("alpn_offered", &ext.alpn_offered.join(", "));
     }
-    if !ext.compression_offered.is_empty() {
-        kv("compression", &ext.compression_offered.join(", "));
-    }
     if !ext.sct.delivery_paths.is_empty() {
         kv(
             "sct",
@@ -427,6 +426,41 @@ fn render_extensions(r: &ScanResult) {
         };
         println!("  {:<22} {}", "tls13_downgrade_sentinel:", colored);
     }
+}
+
+/// Render `tls.behavioral_probes` — vulnerability probes plus
+/// non-extension handshake-time observations. Schema v2.0 split this
+/// out of `tls.extensions` because none of these are TLS extensions
+/// in the RFC 5246 §7.4.1.4 / RFC 8446 §4.2 sense.
+fn render_behavioral_probes(r: &ScanResult) {
+    let bp = &r.tls.behavioral_probes;
+    section("Behavioral probes");
+    print_obs_bool(
+        "heartbleed_echo",
+        &bp.heartbeat_echoes_oversized_payload,
+    );
+    if !bp.compression_offered.is_empty() {
+        kv("compression_methods", &bp.compression_offered.join(", "));
+    }
+    print_obs_bool("grease_echoed", &bp.grease_echoed);
+    print_obs_bool("hello_retry_request", &bp.hello_retry_request);
+    // ephemeral_key_reuse + bleichenbacher_oracle_probe are
+    // structured observations rather than ObservationBool — they
+    // already render through `render_legacy_probes` and the JSON
+    // output. Surface a one-line summary here so a reader of the
+    // text output sees them grouped under the right banner.
+    let dhe = &bp.ephemeral_key_reuse.dhe_public_reused_across_connections;
+    let ecdhe = &bp
+        .ephemeral_key_reuse
+        .ecdhe_public_reused_across_connections;
+    print_obs_bool("dhe_ephemeral_reuse", dhe);
+    print_obs_bool("ecdhe_ephemeral_reuse", ecdhe);
+    let robot_method = method_label(&bp.bleichenbacher_oracle_probe.method);
+    println!(
+        "  {:<22} {}",
+        "robot_probe:",
+        robot_method.to_string().yellow()
+    );
 }
 
 /// Render the OpenSSL-backed probe sections that don't fold into

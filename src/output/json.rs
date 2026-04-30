@@ -190,6 +190,7 @@ fn build_tls(results: &ScanResults, ctx: &JsonEmitContext) -> Tls {
         cipher_suites: build_cipher_suites(results),
         groups: build_groups(results),
         extensions: build_extensions(results, ctx),
+        behavioral_probes: build_behavioral_probes(results),
         downgrade_signaling: DowngradeSignaling {
             fallback_scsv_enforced: build_fallback_scsv_enforced(results),
             tls13_downgrade_sentinel: results
@@ -818,13 +819,6 @@ fn build_extensions(results: &ScanResults, ctx: &JsonEmitContext) -> TlsExtensio
         ObservationBool::not_probed(&format!("hello_probe_failed:{hello_fail_reason}"))
     };
 
-    // compression_offered: whatever the byte probe observed. Empty when the
-    // probe didn't succeed (consumers read `method` on other fields to know).
-    let compression_offered: Vec<String> = hello
-        .and_then(|h| h.compression_selected.clone())
-        .map(|c| vec![c])
-        .unwrap_or_default();
-
     let ocsp_stapling = build_ocsp_stapling(results, ctx);
 
     // SCT delivery paths. Embedded (cert extension) is counted via
@@ -854,8 +848,48 @@ fn build_extensions(results: &ScanResults, ctx: &JsonEmitContext) -> TlsExtensio
     let max_fragment_length = hello.and_then(|h| h.max_fragment_length.clone());
     let (record_size_limit, compress_certificate_algorithms) = build_tls13_ee_observations(results);
     let delegated_credentials = build_delegated_credentials(results);
-    let ephemeral_key_reuse = build_ephemeral_key_reuse(results);
-    let bleichenbacher_oracle_probe = build_bleichenbacher_oracle_probe(results);
+
+    TlsExtensions {
+        ems,
+        secure_renegotiation,
+        ocsp_stapling,
+        sct: SctObservation {
+            delivery_paths,
+            count: embedded_scts_total,
+        },
+        alpn_offered: results.alpn_offered.clone(),
+        encrypt_then_mac,
+        heartbeat_present,
+        truncated_hmac,
+        npn,
+        supported_point_formats_echoed,
+        max_fragment_length,
+        record_size_limit,
+        compress_certificate_algorithms,
+        delegated_credentials,
+    }
+}
+
+/// Build `tls.behavioral_probes`: vulnerability probes (Heartbleed,
+/// ephemeral reuse, ROBOT) plus ClientHello-body / ServerHello-variant
+/// signals that aren't TLS extensions per the RFC framework. Schema
+/// v2.0 split these out of `tls.extensions`.
+fn build_behavioral_probes(results: &ScanResults) -> crate::model::scan_result::BehavioralProbes {
+    use crate::model::scan_result::BehavioralProbes;
+
+    let hello = results.hello_observed.as_ref();
+    let hello_ok = hello.map(|h| h.server_hello_parsed).unwrap_or(false);
+    let hello_fail_reason = hello
+        .and_then(|h| h.error.clone())
+        .unwrap_or_else(|| "hello_probe_not_run".to_string());
+
+    // ClientHello/ServerHello body field — `compression_methods`
+    // (RFC 5246 §7.4.1.3), not an extension. Empty when the byte
+    // probe didn't succeed.
+    let compression_offered: Vec<String> = hello
+        .and_then(|h| h.compression_selected.clone())
+        .map(|c| vec![c])
+        .unwrap_or_default();
 
     // RFC 8701 GREASE echo. `true` = server echoed an unknown
     // extension (protocol violation); `false` = server correctly
@@ -911,33 +945,18 @@ fn build_extensions(results: &ScanResults, ctx: &JsonEmitContext) -> TlsExtensio
         None => ObservationBool::not_probed("hrr_probe_not_run"),
     };
 
-    TlsExtensions {
-        ems,
-        secure_renegotiation,
-        ocsp_stapling,
-        sct: SctObservation {
-            delivery_paths,
-            count: embedded_scts_total,
-        },
-        alpn_offered: results.alpn_offered.clone(),
-        encrypt_then_mac,
-        heartbeat_present,
-        heartbeat_echoes_oversized_payload: match results.heartbeat_echoes_oversized_payload {
-            Some(v) => ObservationBool::probe(v),
-            None => ObservationBool::not_probed("heartbeat_probe_inconclusive"),
-        },
+    let heartbeat_echoes_oversized_payload = match results.heartbeat_echoes_oversized_payload {
+        Some(v) => ObservationBool::probe(v),
+        None => ObservationBool::not_probed("heartbeat_probe_inconclusive"),
+    };
+
+    BehavioralProbes {
+        heartbeat_echoes_oversized_payload,
         compression_offered,
-        truncated_hmac,
-        npn,
-        supported_point_formats_echoed,
-        max_fragment_length,
-        record_size_limit,
-        compress_certificate_algorithms,
         grease_echoed,
         hello_retry_request,
-        delegated_credentials,
-        ephemeral_key_reuse,
-        bleichenbacher_oracle_probe,
+        ephemeral_key_reuse: build_ephemeral_key_reuse(results),
+        bleichenbacher_oracle_probe: build_bleichenbacher_oracle_probe(results),
     }
 }
 

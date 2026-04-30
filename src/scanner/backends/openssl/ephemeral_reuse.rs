@@ -289,17 +289,33 @@ fn extract_pub_hash(ssl: &SslRef, family: Family) -> Result<[u8; 32], String> {
             let dh = pkey.dh().map_err(|e| format!("pkey.dh:{e}"))?;
             dh_pub_value_bytes(&dh)?
         }
-        Family::Ecdhe => {
-            if pkey.id() != Id::EC {
-                return Err(format!("peer_tmp_key_not_ec:id={:?}", pkey.id()));
+        Family::Ecdhe => match pkey.id() {
+            // Classical NIST / brainpool curves (P-256, P-384, P-521,
+            // brainpool*) all classify as `Id::EC` and expose their
+            // public key as a point on a prime-curve group via
+            // `ec_key()`. Serialize as uncompressed point bytes — the
+            // standard wire form that's stable across runs.
+            Id::EC => {
+                let ec = pkey.ec_key().map_err(|e| format!("pkey.ec_key:{e}"))?;
+                let group = ec.group();
+                let mut ctx = BigNumContext::new().map_err(|e| format!("bn_ctx:{e}"))?;
+                ec.public_key()
+                    .to_bytes(group, PointConversionForm::UNCOMPRESSED, &mut ctx)
+                    .map_err(|e| format!("ec_point_to_bytes:{e}"))?
             }
-            let ec = pkey.ec_key().map_err(|e| format!("pkey.ec_key:{e}"))?;
-            let group = ec.group();
-            let mut ctx = BigNumContext::new().map_err(|e| format!("bn_ctx:{e}"))?;
-            ec.public_key()
-                .to_bytes(group, PointConversionForm::UNCOMPRESSED, &mut ctx)
-                .map_err(|e| format!("ec_point_to_bytes:{e}"))?
-        }
+            // RFC 7748 Montgomery curves — X25519 (32 bytes) and X448
+            // (56 bytes). OpenSSL exposes these as separate pkey types
+            // (`EVP_PKEY_X25519` / `EVP_PKEY_X448`, NIDs 1034 / 1035)
+            // because they don't ride the prime-curve point API; the
+            // public key is just raw bytes via
+            // `EVP_PKEY_get_raw_public_key`. Forward-secret + ephemeral
+            // — fully constitutes an ECDHE handshake from the
+            // reuse-detection perspective.
+            Id::X25519 | Id::X448 => pkey
+                .raw_public_key()
+                .map_err(|e| format!("raw_public_key:{e}"))?,
+            other => return Err(format!("peer_tmp_key_unsupported_ecdhe:id={:?}", other)),
+        },
     };
 
     let mut hasher = Sha256::new();

@@ -119,11 +119,11 @@ fn empty_fixture_record_matches_schema_v1() {
 }
 
 #[test]
-fn schema_version_is_pinned_to_1_0_0() {
+fn schema_version_is_pinned_to_2_0_0() {
     let results = fixture_results();
     let ctx = fixture_ctx();
     let record = build_scan_result(&results, &ctx);
-    assert_eq!(record.schema_version, "1.0.0");
+    assert_eq!(record.schema_version, "2.0.0");
 }
 
 #[test]
@@ -1230,7 +1230,7 @@ fn hrr_renders_not_applicable_when_tls13_unsupported_with_underlying_error() {
     let record = build_scan_result(&results, &ctx);
     let value = serde_json::to_value(&record).expect("serialize");
     let hrr = value
-        .pointer("/tls/extensions/hello_retry_request")
+        .pointer("/tls/behavioral_probes/hello_retry_request")
         .expect("hello_retry_request slot present");
     assert!(hrr.get("value").unwrap().is_null());
     assert_eq!(hrr.get("method").unwrap().as_str(), Some("not_applicable"));
@@ -1264,7 +1264,7 @@ fn hrr_renders_not_applicable_when_tls13_unsupported_and_probe_did_not_run() {
     let record = build_scan_result(&results, &ctx);
     let value = serde_json::to_value(&record).expect("serialize");
     let hrr = value
-        .pointer("/tls/extensions/hello_retry_request")
+        .pointer("/tls/behavioral_probes/hello_retry_request")
         .expect("hello_retry_request slot present");
     assert_eq!(hrr.get("method").unwrap().as_str(), Some("not_applicable"));
     assert_eq!(
@@ -1298,7 +1298,7 @@ fn hrr_keeps_not_probed_when_tls13_probe_inconclusive() {
     let record = build_scan_result(&results, &ctx);
     let value = serde_json::to_value(&record).expect("serialize");
     let hrr = value
-        .pointer("/tls/extensions/hello_retry_request")
+        .pointer("/tls/behavioral_probes/hello_retry_request")
         .expect("hello_retry_request slot present");
     assert_eq!(hrr.get("method").unwrap().as_str(), Some("not_probed"));
     assert!(hrr
@@ -1535,7 +1535,7 @@ fn hrr_renders_probe_when_tls13_supported_and_hrr_observed() {
     let record = build_scan_result(&results, &ctx);
     let value = serde_json::to_value(&record).expect("serialize");
     let hrr = value
-        .pointer("/tls/extensions/hello_retry_request")
+        .pointer("/tls/behavioral_probes/hello_retry_request")
         .expect("hello_retry_request slot present");
     assert_eq!(hrr.get("method").unwrap().as_str(), Some("probe"));
     assert_eq!(hrr.get("value").unwrap().as_bool(), Some(true));
