@@ -1185,3 +1185,135 @@ fn preload_list_source_all_emitted_forms_match_schema_pattern() {
         );
     }
 }
+
+/// HRR cross-reference: when the protocol probe affirmatively reports
+/// TLS 1.3 as not supported, the HRR row degrades to `not_applicable`
+/// with `tls13_not_supported_on_host` (HRR is a TLS 1.3 mechanism, so
+/// the question is moot). The underlying probe error is preserved in
+/// the reason for forensic continuity. fs.bbg.gov is the motivating
+/// case: the host RSTs every TLS 1.3 ClientHello, so the HRR probe
+/// reports `read_io: Connection reset by peer` and the protocol probe
+/// reports tls1_3 not supported.
+#[test]
+fn hrr_renders_not_applicable_when_tls13_unsupported_with_underlying_error() {
+    use kemist::scanner::hello::HelloRetryRequestObservation;
+
+    let mut results = fixture_results();
+    // Flip TLS 1.3 to not_supported (no error → affirmative no).
+    for p in results.protocol_support.iter_mut() {
+        if p.version == TlsVersion::Tls13 {
+            p.supported = false;
+            p.error = None;
+        }
+    }
+    results.hrr_observed = Some(HelloRetryRequestObservation {
+        hrr_observed: None,
+        error: Some("read_io: Connection reset by peer (os error 104)".to_string()),
+    });
+
+    let ctx = fixture_ctx();
+    let record = build_scan_result(&results, &ctx);
+    let value = serde_json::to_value(&record).expect("serialize");
+    let hrr = value
+        .pointer("/tls/extensions/hello_retry_request")
+        .expect("hello_retry_request slot present");
+    assert!(hrr.get("value").unwrap().is_null());
+    assert_eq!(hrr.get("method").unwrap().as_str(), Some("not_applicable"));
+    let reason = hrr.get("reason").unwrap().as_str().unwrap();
+    assert!(
+        reason.starts_with("tls13_not_supported_on_host:"),
+        "expected tls13_not_supported_on_host prefix, got {reason}"
+    );
+    assert!(
+        reason.contains("Connection reset by peer"),
+        "expected underlying probe error preserved in reason, got {reason}"
+    );
+}
+
+/// HRR cross-reference: when the HRR probe never ran but TLS 1.3 is
+/// affirmatively unsupported, the row still degrades to
+/// `not_applicable` with the bare `tls13_not_supported_on_host`
+/// reason — no probe error to preserve.
+#[test]
+fn hrr_renders_not_applicable_when_tls13_unsupported_and_probe_did_not_run() {
+    let mut results = fixture_results();
+    for p in results.protocol_support.iter_mut() {
+        if p.version == TlsVersion::Tls13 {
+            p.supported = false;
+            p.error = None;
+        }
+    }
+    results.hrr_observed = None;
+
+    let ctx = fixture_ctx();
+    let record = build_scan_result(&results, &ctx);
+    let value = serde_json::to_value(&record).expect("serialize");
+    let hrr = value
+        .pointer("/tls/extensions/hello_retry_request")
+        .expect("hello_retry_request slot present");
+    assert_eq!(hrr.get("method").unwrap().as_str(), Some("not_applicable"));
+    assert_eq!(
+        hrr.get("reason").unwrap().as_str(),
+        Some("tls13_not_supported_on_host")
+    );
+}
+
+/// Negative case: when the TLS 1.3 protocol probe itself failed
+/// (`error` set, `supported` indeterminate), the HRR row keeps the
+/// legacy `not_probed` rendering with the underlying read_io reason
+/// — we don't quietly bury a real measurement failure under
+/// `not_applicable`.
+#[test]
+fn hrr_keeps_not_probed_when_tls13_probe_inconclusive() {
+    use kemist::scanner::hello::HelloRetryRequestObservation;
+
+    let mut results = fixture_results();
+    for p in results.protocol_support.iter_mut() {
+        if p.version == TlsVersion::Tls13 {
+            p.supported = false;
+            p.error = Some("connection_timeout".to_string());
+        }
+    }
+    results.hrr_observed = Some(HelloRetryRequestObservation {
+        hrr_observed: None,
+        error: Some("read_io: Connection reset by peer (os error 104)".to_string()),
+    });
+
+    let ctx = fixture_ctx();
+    let record = build_scan_result(&results, &ctx);
+    let value = serde_json::to_value(&record).expect("serialize");
+    let hrr = value
+        .pointer("/tls/extensions/hello_retry_request")
+        .expect("hello_retry_request slot present");
+    assert_eq!(hrr.get("method").unwrap().as_str(), Some("not_probed"));
+    assert!(hrr
+        .get("reason")
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .contains("Connection reset by peer"));
+}
+
+/// Positive case: when TLS 1.3 is supported and the HRR probe
+/// returned a definitive answer, the row reports `method: probe` —
+/// the cross-reference doesn't interfere with successful probes.
+#[test]
+fn hrr_renders_probe_when_tls13_supported_and_hrr_observed() {
+    use kemist::scanner::hello::HelloRetryRequestObservation;
+
+    let mut results = fixture_results();
+    // protocol_support already has tls1_3 supported in the fixture.
+    results.hrr_observed = Some(HelloRetryRequestObservation {
+        hrr_observed: Some(true),
+        error: None,
+    });
+
+    let ctx = fixture_ctx();
+    let record = build_scan_result(&results, &ctx);
+    let value = serde_json::to_value(&record).expect("serialize");
+    let hrr = value
+        .pointer("/tls/extensions/hello_retry_request")
+        .expect("hello_retry_request slot present");
+    assert_eq!(hrr.get("method").unwrap().as_str(), Some("probe"));
+    assert_eq!(hrr.get("value").unwrap().as_bool(), Some(true));
+}

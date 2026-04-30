@@ -851,13 +851,43 @@ fn build_extensions(results: &ScanResults, ctx: &JsonEmitContext) -> TlsExtensio
     // separate probe that sends a TLS 1.3 ClientHello with an empty
     // `key_share`. `None` on the struct means the probe never ran
     // (shouldn't happen in practice since `scan()` always invokes it).
+    //
+    // Cross-reference: HRR is a TLS 1.3 mechanism. If the protocol
+    // probe pass affirmatively reports TLS 1.3 as not supported on
+    // this host, the HRR question is `not_applicable` — there is no
+    // TLS 1.3 handshake on this host for HRR to occur in. We still
+    // surface the underlying probe error in the reason so consumers
+    // who care about *why* HRR couldn't be measured (e.g. a peer-RST
+    // pattern that signals an aggressive TLS 1.3 rejection) retain
+    // that signal. Only an *affirmative* TLS-1.3-not-supported probe
+    // gates the downgrade — when the version probe itself failed
+    // (`error` set, `supported` unknown), the legacy `not_probed`
+    // path stands so we don't quietly bury a real measurement
+    // failure.
+    let tls13_affirmatively_unsupported = results
+        .protocol_support
+        .iter()
+        .find(|p| p.version == TlsVersion::Tls13)
+        .map(|p| !p.supported && p.error.is_none())
+        .unwrap_or(false);
+
     let hello_retry_request = match results.hrr_observed.as_ref() {
         Some(hrr) => match hrr.hrr_observed {
             Some(v) => ObservationBool::probe(v),
+            None if tls13_affirmatively_unsupported => {
+                let reason = match hrr.error.as_deref() {
+                    Some(e) => format!("tls13_not_supported_on_host:{e}"),
+                    None => "tls13_not_supported_on_host".to_string(),
+                };
+                ObservationBool::not_applicable(&reason)
+            }
             None => ObservationBool::not_probed(
                 hrr.error.as_deref().unwrap_or("hrr_probe_inconclusive"),
             ),
         },
+        None if tls13_affirmatively_unsupported => {
+            ObservationBool::not_applicable("tls13_not_supported_on_host")
+        }
         None => ObservationBool::not_probed("hrr_probe_not_run"),
     };
 
