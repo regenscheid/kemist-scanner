@@ -44,7 +44,7 @@ pub use self::rustls::RustlsBackend;
 /// emitted by group probes (aws-lc-rs doesn't ship some named groups;
 /// FFDHE at TLS 1.2 doesn't apply to ECDH codepoints), and
 /// `IgnoredGroupReturnedDifferentPrime` is FFDHE-specific. Cipher probes
-/// use only `Supported` / `NotSupported` / `Error`.
+/// use only `Supported` / `NotSupported` / `WireRejected` / `Error`.
 #[derive(Debug, Clone)]
 pub enum HandshakeOutcome {
     /// Handshake completed with the constrained offer.
@@ -52,6 +52,16 @@ pub enum HandshakeOutcome {
     /// Server evaluated the single-codepoint offer and rejected it —
     /// handshake alert or post-ClientHello reset.
     NotSupported,
+    /// Server rejected our offer at the wire level in a specific way
+    /// the probe wants to attribute. Verdict-equivalent to
+    /// `NotSupported` (`supported: false` in schema), but the `reason`
+    /// records *how* the server rejected — e.g.
+    /// `"server_rst_after_clienthello"` from raw-socket probes
+    /// (`raw::static_dh`) where the server tore the connection down
+    /// with a TCP RST instead of sending a TLS alert. Lets dashboards
+    /// distinguish "server slammed the door" from a vanilla
+    /// `handshake_failure` even though the verdict is the same.
+    WireRejected { reason: String },
     /// Probe itself failed (transport timeout, unexpected error).
     /// The string carries the scanner error category (and sometimes
     /// context) — format is caller-specific for backwards compatibility

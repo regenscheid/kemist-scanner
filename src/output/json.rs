@@ -375,10 +375,13 @@ fn build_cipher_suites(results: &ScanResults) -> TlsCipherSuites {
             let (supported, method, reason) = match &r.outcome {
                 HandshakeOutcome::Supported => (Some(true), Method::Probe, None),
                 HandshakeOutcome::NotSupported => (Some(false), Method::Probe, None),
+                HandshakeOutcome::WireRejected { reason } => {
+                    (Some(false), Method::Probe, Some(reason.clone()))
+                }
                 HandshakeOutcome::Error(e) => (None, Method::Error, Some(e.clone())),
                 HandshakeOutcome::NotProbed(_)
                 | HandshakeOutcome::IgnoredGroupReturnedDifferentPrime { .. } => unreachable!(
-                    "cipher probe never constructs NotProbed or \
+                    "aws-lc-rs cipher probe never constructs NotProbed or \
                      IgnoredGroupReturnedDifferentPrime variants"
                 ),
             };
@@ -469,6 +472,16 @@ fn merge_openssl_cipher_probes(
             let (supported, method, reason) = match &r.outcome {
                 HandshakeOutcome::Supported => (Some(true), Method::Probe, None),
                 HandshakeOutcome::NotSupported => (Some(false), Method::Probe, None),
+                // Wire-level rejection with attribution — emitted by
+                // raw-socket cipher probes (`raw::static_dh`) when the
+                // server tore the connection down with a TCP RST after
+                // our ClientHello. Verdict-equivalent to NotSupported;
+                // the reason records *how* the server rejected so
+                // dashboards can distinguish "server RST'd" from a
+                // vanilla `handshake_failure` alert.
+                HandshakeOutcome::WireRejected { reason } => {
+                    (Some(false), Method::Probe, Some(reason.clone()))
+                }
                 HandshakeOutcome::Error(e) => (None, Method::Error, Some(e.clone())),
                 // OpenSSL cipher probes emit `NotProbed` when the
                 // cipher name isn't recognized by the local OpenSSL
@@ -561,10 +574,12 @@ fn build_groups(results: &ScanResults) -> TlsGroups {
                     o.iana_code = iana_code.clone();
                     o
                 }
-                HandshakeOutcome::IgnoredGroupReturnedDifferentPrime { .. } => unreachable!(
+                HandshakeOutcome::IgnoredGroupReturnedDifferentPrime { .. }
+                | HandshakeOutcome::WireRejected { .. } => unreachable!(
                     "rustls group probe never constructs \
-                     IgnoredGroupReturnedDifferentPrime — FFDHE cross-check \
-                     is OpenSSL-only"
+                     IgnoredGroupReturnedDifferentPrime or WireRejected — \
+                     FFDHE cross-check is OpenSSL-only and WireRejected is \
+                     emitted only by raw-socket cipher probes"
                 ),
             };
             // Route by the version tag on the result. Classical ECDHE
@@ -695,6 +710,11 @@ fn merge_openssl_kx_groups(results: &ScanResults, out: &mut TlsGroups) {
                     returned_group: None,
                     returned_prime_bits: None,
                 },
+                HandshakeOutcome::WireRejected { .. } => unreachable!(
+                    "OpenSSL kx_groups probe never constructs \
+                     WireRejected — that variant is emitted only by \
+                     raw-socket cipher probes (`raw::static_dh`)"
+                ),
             })
         };
         // aws-lc-rs-first override discipline: a real aws-lc-rs probe

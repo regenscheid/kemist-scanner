@@ -262,6 +262,21 @@ fn fully_populated_openssl_observations_match_schema_v1() {
                 dh_snapshot: None,
                 ske_sig: None,
             },
+            // Static-DH raw probe variant: server tore the connection
+            // down with a TCP RST after our minimal ClientHello.
+            // Renders as `supported: false` with the explicit reason
+            // string capturing how the server rejected.
+            LegacyCipherResult {
+                name: "TLS_DH_RSA_WITH_AES_128_CBC_SHA".to_string(),
+                openssl_name: "DH-RSA-AES128-SHA".to_string(),
+                iana_code: 0x0031,
+                version: TlsVersion::Tls12,
+                outcome: HandshakeOutcome::WireRejected {
+                    reason: "server_rst_after_clienthello".to_string(),
+                },
+                dh_snapshot: None,
+                ske_sig: None,
+            },
         ],
     };
 
@@ -505,12 +520,12 @@ fn fully_populated_openssl_observations_match_schema_v1() {
     // tls.cipher_suites.* and tls.groups.{tls1_2,tls1_3} locations.
     let tls = record_value.get("tls").unwrap();
     let cs = tls.get("cipher_suites").unwrap();
-    // Fixture has 1 TLS 1.0 row (RC4-SHA), 0 TLS 1.1 rows, 2 TLS 1.2
+    // Fixture has 1 TLS 1.0 row (RC4-SHA), 0 TLS 1.1 rows, 4 TLS 1.2
     // rows (AES128-SHA supported + DHE-RSA-AES128-SHA supported +
-    // NULL-SHA rejected = 3).
+    // NULL-SHA rejected + DH-RSA-AES128-SHA wire-rejected).
     assert_eq!(cs.get("tls1_0").unwrap().as_array().unwrap().len(), 1);
     assert_eq!(cs.get("tls1_1").unwrap().as_array().unwrap().len(), 0);
-    assert_eq!(cs.get("tls1_2").unwrap().as_array().unwrap().len(), 3);
+    assert_eq!(cs.get("tls1_2").unwrap().as_array().unwrap().len(), 4);
     // Every emitted entry carries the provider tag.
     for v in ["tls1_0", "tls1_2"] {
         for row in cs.get(v).unwrap().as_array().unwrap() {
@@ -1292,6 +1307,68 @@ fn hrr_keeps_not_probed_when_tls13_probe_inconclusive() {
         .as_str()
         .unwrap()
         .contains("Connection reset by peer"));
+}
+
+/// `HandshakeOutcome::WireRejected { reason }` — emitted by the
+/// raw-socket static-DH cipher probe when the server tears the
+/// connection down with a TCP RST after our ClientHello — must
+/// render as `supported: false, method: probe, reason: <verbatim>`.
+/// Distinct from `Error` (which gives `supported: null`) and from a
+/// plain `NotSupported` (which gives no reason).
+#[cfg(feature = "legacy-probes")]
+#[test]
+fn wire_rejected_cipher_renders_as_supported_false_with_reason() {
+    use kemist::scanner::backends::HandshakeOutcome;
+    use kemist::scanner::openssl::{
+        ciphers::{LegacyCipherProbeOutput, LegacyCipherResult},
+        OpensslObservations,
+    };
+
+    let mut results = fixture_results();
+    results.openssl_observations = Some(OpensslObservations {
+        cipher_probes: Some(LegacyCipherProbeOutput {
+            results: vec![LegacyCipherResult {
+                name: "TLS_DH_RSA_WITH_AES_128_CBC_SHA".to_string(),
+                openssl_name: "DH-RSA-AES128-SHA".to_string(),
+                iana_code: 0x0031,
+                version: TlsVersion::Tls12,
+                outcome: HandshakeOutcome::WireRejected {
+                    reason: "server_rst_after_clienthello".to_string(),
+                },
+                dh_snapshot: None,
+                ske_sig: None,
+            }],
+        }),
+        kx_group_probes: None,
+        fallback_scsv: None,
+        renegotiation: None,
+        client_auth: None,
+        tls13_extensions: None,
+        session_resumption: None,
+        sigalg_policy: None,
+        ephemeral_key_reuse: None,
+        bleichenbacher_oracle_probe: None,
+        probe_errors: vec![],
+    });
+
+    let ctx = fixture_ctx();
+    let record = build_scan_result(&results, &ctx);
+    let value = serde_json::to_value(&record).expect("serialize");
+    let entries = value
+        .pointer("/tls/cipher_suites/tls1_2")
+        .expect("cipher_suites.tls1_2 present")
+        .as_array()
+        .expect("array");
+    let entry = entries
+        .iter()
+        .find(|e| e.get("iana_code").and_then(|c| c.as_str()) == Some("0x0031"))
+        .expect("0x0031 entry present");
+    assert_eq!(entry.get("supported").unwrap().as_bool(), Some(false));
+    assert_eq!(entry.get("method").unwrap().as_str(), Some("probe"));
+    assert_eq!(
+        entry.get("reason").unwrap().as_str(),
+        Some("server_rst_after_clienthello")
+    );
 }
 
 /// Positive case: when TLS 1.3 is supported and the HRR probe

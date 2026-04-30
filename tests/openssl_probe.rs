@@ -81,18 +81,22 @@ async fn legacy_cipher_probe_observes_weak_suites_on_fixture() {
         "fixture didn't accept any legacy suite (nginx config drift?)"
     );
 
-    // Every probe should be either Supported, NotSupported, Error, or
-    // NotProbed — never silently missing. `IgnoredGroupReturnedDifferentPrime`
-    // is group-probe-only and should never appear here. Cipher probes
-    // emit `NotProbed("openssl_3x_cipher_not_available:*")` for suites
-    // OpenSSL 3.x refuses to activate at context build time (static-DH /
+    // Every probe should be either Supported, NotSupported, WireRejected,
+    // Error, or NotProbed — never silently missing.
+    // `IgnoredGroupReturnedDifferentPrime` is group-probe-only and should
+    // never appear here. Cipher probes emit
+    // `NotProbed("openssl_3x_cipher_not_available:*")` for suites OpenSSL
+    // 3.x refuses to activate at context build time (static-DH /
     // static-ECDH, occasionally RC4 / 3DES on distros that ship openssl
     // with those disabled) — a legitimate backend-capability signal,
-    // not a missing observation.
+    // not a missing observation. `WireRejected` is emitted by the
+    // raw-socket static-DH probes when the server tears the connection
+    // down with a TCP RST after our ClientHello.
     for r in &out.results {
         match &r.outcome {
             HandshakeOutcome::Supported
             | HandshakeOutcome::NotSupported
+            | HandshakeOutcome::WireRejected { .. }
             | HandshakeOutcome::Error(_)
             | HandshakeOutcome::NotProbed(_) => {}
             HandshakeOutcome::IgnoredGroupReturnedDifferentPrime { .. } => {
