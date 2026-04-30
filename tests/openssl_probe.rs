@@ -82,7 +82,7 @@ async fn legacy_cipher_probe_observes_weak_suites_on_fixture() {
     );
 
     // Every probe should be either Supported, NotSupported, Error, or
-    // NotProbed — never silently missing. `IgnoredGroupReturnedCustomPrime`
+    // NotProbed — never silently missing. `IgnoredGroupReturnedDifferentPrime`
     // is group-probe-only and should never appear here. Cipher probes
     // emit `NotProbed("openssl_3x_cipher_not_available:*")` for suites
     // OpenSSL 3.x refuses to activate at context build time (static-DH /
@@ -95,7 +95,7 @@ async fn legacy_cipher_probe_observes_weak_suites_on_fixture() {
             | HandshakeOutcome::NotSupported
             | HandshakeOutcome::Error(_)
             | HandshakeOutcome::NotProbed(_) => {}
-            HandshakeOutcome::IgnoredGroupReturnedCustomPrime => {
+            HandshakeOutcome::IgnoredGroupReturnedDifferentPrime { .. } => {
                 panic!(
                     "cipher probe produced unexpected outcome variant for {}",
                     r.name
@@ -144,7 +144,7 @@ async fn kx_group_probe_records_per_version_outcomes_on_fixture() {
             r.tls12_outcome,
             HandshakeOutcome::Supported
                 | HandshakeOutcome::NotSupported
-                | HandshakeOutcome::IgnoredGroupReturnedCustomPrime
+                | HandshakeOutcome::IgnoredGroupReturnedDifferentPrime { .. }
                 | HandshakeOutcome::Error(_)
                 | HandshakeOutcome::NotProbed(_)
         ));
@@ -152,7 +152,7 @@ async fn kx_group_probe_records_per_version_outcomes_on_fixture() {
             r.tls13_outcome,
             HandshakeOutcome::Supported
                 | HandshakeOutcome::NotSupported
-                | HandshakeOutcome::IgnoredGroupReturnedCustomPrime
+                | HandshakeOutcome::IgnoredGroupReturnedDifferentPrime { .. }
                 | HandshakeOutcome::Error(_)
                 | HandshakeOutcome::NotProbed(_)
         ));

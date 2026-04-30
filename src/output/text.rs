@@ -187,7 +187,7 @@ fn render_groups(r: &ScanResult) {
         }
     }
     // TLS 1.2 — FFDHE only. This is where the FFDHE cross-check
-    // finding (`server_ignored_group_offer_returned_custom_prime`)
+    // finding (`server_does_not_honor_supported_groups`)
     // surfaces, handled inside print_group.
     if !g.tls1_2.is_empty() {
         println!("  {}:", "TLS 1.2".bold());
@@ -870,13 +870,14 @@ fn is_weak_cipher_name(name: &str) -> bool {
 
 fn print_group(name: &str, obs: &GroupObservation) {
     // Misconfig finding carried in the reason string for TLS 1.2 FFDHE
-    // entries where the server ignored our codepoint and returned a
-    // custom prime. Surface with a red `!` glyph + yellow callout so
-    // a reader doesn't parse it as "merely not supported."
+    // entries where cross-codepoint coherence determined the server
+    // doesn't honor `supported_groups`. Surface with a red `!` glyph +
+    // yellow callout so a reader doesn't parse it as "merely not
+    // supported."
     let ignored_offer = obs
         .reason
         .as_deref()
-        .map(|r| r == "server_ignored_group_offer_returned_custom_prime")
+        .map(|r| r == "server_does_not_honor_supported_groups")
         .unwrap_or(false);
 
     let (glyph, name_style) = match (obs.supported, &obs.method, ignored_offer) {
@@ -902,7 +903,24 @@ fn print_group(name: &str, obs: &GroupObservation) {
     });
 
     let tail = if ignored_offer {
-        format!("  [{}]", "server_ignored_offer".yellow())
+        // Render returned-prime evidence inline: "server returned
+        // ffdhe2048" or "server returned custom (1024 bits)" so the
+        // reader sees both the verdict and the substituted prime
+        // without consulting the JSON.
+        let returned = match (&obs.returned_group, obs.returned_prime_bits) {
+            (Some(g), Some(bits)) if g == "custom" => format!("custom ({bits}-bit)"),
+            (Some(g), _) => g.clone(),
+            (None, _) => String::new(),
+        };
+        if returned.is_empty() {
+            format!("  [{}]", "server_ignores_supported_groups".yellow())
+        } else {
+            format!(
+                "  [{}: {}]",
+                "server_ignores_supported_groups".yellow(),
+                format!("returned {}", returned).dimmed()
+            )
+        }
     } else {
         match (&obs.method, &obs.reason) {
             (Method::NotProbed, Some(r)) => {

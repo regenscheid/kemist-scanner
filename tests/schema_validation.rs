@@ -266,8 +266,15 @@ fn fully_populated_openssl_observations_match_schema_v1() {
     };
 
     // Named-group probe: FFDHE rows exercising Supported / NotSupported /
-    // IgnoredGroupReturnedCustomPrime, plus a non-FFDHE row demonstrating
+    // IgnoredGroupReturnedDifferentPrime, plus a non-FFDHE row demonstrating
     // an OpenSSL override of an aws-lc-rs `not_probed` slot.
+    //
+    // The ffdhe2048 self-match here triggers the cross-codepoint
+    // coherence downgrade because the ffdhe3072 row carries
+    // `IgnoredGroupReturnedDifferentPrime` evidence — the JSON
+    // builder downgrades both rows to
+    // `reason: server_does_not_honor_supported_groups` with
+    // returned-prime evidence preserved.
     let kx_group_probes = KxGroupProbeOutput {
         results: vec![
             KxGroupProbeResult {
@@ -279,7 +286,10 @@ fn fully_populated_openssl_observations_match_schema_v1() {
             KxGroupProbeResult {
                 group_name: "ffdhe3072".to_string(),
                 iana_code: 0x0101,
-                tls12_outcome: HandshakeOutcome::IgnoredGroupReturnedCustomPrime,
+                tls12_outcome: HandshakeOutcome::IgnoredGroupReturnedDifferentPrime {
+                    returned_group: "ffdhe2048".to_string(),
+                    returned_prime_bits: 2048,
+                },
                 tls13_outcome: HandshakeOutcome::NotProbed("provider_limit".to_string()),
             },
             KxGroupProbeResult {
@@ -685,7 +695,10 @@ fn ffdhe_cross_check_reason_surfaces_in_output() {
             results: vec![KxGroupProbeResult {
                 group_name: "ffdhe2048".to_string(),
                 iana_code: 0x0100,
-                tls12_outcome: HandshakeOutcome::IgnoredGroupReturnedCustomPrime,
+                tls12_outcome: HandshakeOutcome::IgnoredGroupReturnedDifferentPrime {
+                    returned_group: "custom".to_string(),
+                    returned_prime_bits: 1024,
+                },
                 tls13_outcome: HandshakeOutcome::Supported,
             }],
         }),
@@ -711,8 +724,152 @@ fn ffdhe_cross_check_reason_surfaces_in_output() {
     assert_eq!(tls12.get("supported").unwrap().as_bool(), Some(false));
     assert_eq!(
         tls12.get("reason").unwrap().as_str(),
-        Some("server_ignored_group_offer_returned_custom_prime")
+        Some("server_does_not_honor_supported_groups")
     );
+    assert_eq!(tls12.get("returned_group").unwrap().as_str(), Some("custom"));
+    assert_eq!(
+        tls12.get("returned_prime_bits").unwrap().as_u64(),
+        Some(1024)
+    );
+}
+
+/// Cross-codepoint coherence: when one FFDHE row reports
+/// `IgnoredGroupReturnedDifferentPrime`, every FFDHE TLS 1.2 row
+/// (including a sibling that "matched" its own offer) gets downgraded
+/// to `supported: false` with the same explicit reason. The matched
+/// row's `returned_group` records the row's own group classification,
+/// since that is the prime the server returned in response to the
+/// offer.
+#[cfg(feature = "legacy-probes")]
+#[test]
+fn ffdhe_cross_codepoint_coherence_downgrades_self_match() {
+    use kemist::scanner::backends::HandshakeOutcome;
+    use kemist::scanner::openssl::{
+        kx_groups::{KxGroupProbeOutput, KxGroupProbeResult},
+        OpensslObservations,
+    };
+
+    let mut results = fixture_results();
+    results.openssl_observations = Some(OpensslObservations {
+        cipher_probes: None,
+        kx_group_probes: Some(KxGroupProbeOutput {
+            results: vec![
+                KxGroupProbeResult {
+                    group_name: "ffdhe2048".to_string(),
+                    iana_code: 0x0100,
+                    tls12_outcome: HandshakeOutcome::Supported,
+                    tls13_outcome: HandshakeOutcome::NotSupported,
+                },
+                KxGroupProbeResult {
+                    group_name: "ffdhe3072".to_string(),
+                    iana_code: 0x0101,
+                    tls12_outcome: HandshakeOutcome::IgnoredGroupReturnedDifferentPrime {
+                        returned_group: "ffdhe2048".to_string(),
+                        returned_prime_bits: 2048,
+                    },
+                    tls13_outcome: HandshakeOutcome::NotSupported,
+                },
+            ],
+        }),
+        fallback_scsv: None,
+        renegotiation: None,
+        client_auth: None,
+        tls13_extensions: None,
+        session_resumption: None,
+        sigalg_policy: None,
+        ephemeral_key_reuse: None,
+        bleichenbacher_oracle_probe: None,
+        probe_errors: vec![],
+    });
+
+    let ctx = fixture_ctx();
+    let record = build_scan_result(&results, &ctx);
+    let value = serde_json::to_value(&record).expect("serialize");
+
+    // ffdhe2048 self-match is downgraded; returned_group reflects the
+    // matching prime the server actually returned.
+    let two = value
+        .pointer("/tls/groups/tls1_2/ffdhe2048")
+        .expect("ffdhe2048 row present");
+    assert_eq!(two.get("supported").unwrap().as_bool(), Some(false));
+    assert_eq!(
+        two.get("reason").unwrap().as_str(),
+        Some("server_does_not_honor_supported_groups")
+    );
+    assert_eq!(two.get("returned_group").unwrap().as_str(), Some("ffdhe2048"));
+    assert_eq!(two.get("returned_prime_bits").unwrap().as_u64(), Some(2048));
+
+    // ffdhe3072 row carries the original mismatch evidence.
+    let three = value
+        .pointer("/tls/groups/tls1_2/ffdhe3072")
+        .expect("ffdhe3072 row present");
+    assert_eq!(three.get("supported").unwrap().as_bool(), Some(false));
+    assert_eq!(
+        three.get("reason").unwrap().as_str(),
+        Some("server_does_not_honor_supported_groups")
+    );
+    assert_eq!(
+        three.get("returned_group").unwrap().as_str(),
+        Some("ffdhe2048")
+    );
+    assert_eq!(
+        three.get("returned_prime_bits").unwrap().as_u64(),
+        Some(2048)
+    );
+}
+
+/// Negative case: with no mismatch evidence, the cross-codepoint
+/// coherence pass leaves a Supported FFDHE row untouched (no
+/// `returned_group`, no reason string).
+#[cfg(feature = "legacy-probes")]
+#[test]
+fn ffdhe_supported_unchanged_without_mismatch_evidence() {
+    use kemist::scanner::backends::HandshakeOutcome;
+    use kemist::scanner::openssl::{
+        kx_groups::{KxGroupProbeOutput, KxGroupProbeResult},
+        OpensslObservations,
+    };
+
+    let mut results = fixture_results();
+    results.openssl_observations = Some(OpensslObservations {
+        cipher_probes: None,
+        kx_group_probes: Some(KxGroupProbeOutput {
+            results: vec![
+                KxGroupProbeResult {
+                    group_name: "ffdhe2048".to_string(),
+                    iana_code: 0x0100,
+                    tls12_outcome: HandshakeOutcome::Supported,
+                    tls13_outcome: HandshakeOutcome::NotSupported,
+                },
+                KxGroupProbeResult {
+                    group_name: "ffdhe3072".to_string(),
+                    iana_code: 0x0101,
+                    tls12_outcome: HandshakeOutcome::NotSupported,
+                    tls13_outcome: HandshakeOutcome::NotSupported,
+                },
+            ],
+        }),
+        fallback_scsv: None,
+        renegotiation: None,
+        client_auth: None,
+        tls13_extensions: None,
+        session_resumption: None,
+        sigalg_policy: None,
+        ephemeral_key_reuse: None,
+        bleichenbacher_oracle_probe: None,
+        probe_errors: vec![],
+    });
+
+    let ctx = fixture_ctx();
+    let record = build_scan_result(&results, &ctx);
+    let value = serde_json::to_value(&record).expect("serialize");
+    let two = value
+        .pointer("/tls/groups/tls1_2/ffdhe2048")
+        .expect("ffdhe2048 row present");
+    assert_eq!(two.get("supported").unwrap().as_bool(), Some(true));
+    assert!(two.get("reason").is_none());
+    assert!(two.get("returned_group").is_none());
+    assert!(two.get("returned_prime_bits").is_none());
 }
 
 #[cfg(not(feature = "legacy-probes"))]

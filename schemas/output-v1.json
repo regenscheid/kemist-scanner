@@ -674,7 +674,17 @@
         "method": { "$ref": "#/$defs/method" },
         "reason": { "type": "string" },
         "iana_code": { "type": "string", "pattern": "^0x[0-9A-Fa-f]{4}$" },
-        "provider": { "type": "string", "enum": ["aws_lc_rs", "openssl"] }
+        "provider": { "type": "string", "enum": ["aws_lc_rs", "openssl"] },
+        "returned_group": {
+          "type": "string",
+          "description": "FFDHE TLS 1.2 only. Classification of the prime the server actually returned when its behavior diverged from the codepoint we offered (or when cross-codepoint coherence determined the server isn't honoring `supported_groups`). Vocabulary mirrors `tls.dh_parameters[].classification`.",
+          "enum": ["ffdhe2048", "ffdhe3072", "ffdhe4096", "ffdhe6144", "ffdhe8192", "modp1024", "modp1536", "modp2048", "modp3072", "custom"]
+        },
+        "returned_prime_bits": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "FFDHE TLS 1.2 only. Bit length of the prime the server actually returned. Useful primarily when `returned_group == \"custom\"`."
+        }
       },
       "additionalProperties": false
     },

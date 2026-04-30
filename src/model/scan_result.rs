@@ -489,6 +489,20 @@ pub struct GroupObservation {
     /// [`CipherSuiteEntry::provider`] for the full contract.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
+    /// FFDHE rows only: classification of the prime the server returned
+    /// when its behavior diverged from the codepoint we offered (or when
+    /// the host-level cross-codepoint check determined the server isn't
+    /// honoring `supported_groups`). Vocabulary matches
+    /// `tls.dh_parameters[].classification` — `"ffdhe2048"`,
+    /// `"modp3072"`, `"custom"`, etc. Omitted when the row reflects an
+    /// honest match or a non-FFDHE codepoint.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub returned_group: Option<String>,
+    /// FFDHE rows only: bit-length of the prime the server actually
+    /// returned. Useful primarily when `returned_group == "custom"`,
+    /// where the size isn't conveyed by the classification name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub returned_prime_bits: Option<u32>,
 }
 
 impl GroupObservation {
@@ -499,6 +513,8 @@ impl GroupObservation {
             reason: None,
             iana_code: None,
             provider: None,
+            returned_group: None,
+            returned_prime_bits: None,
         }
     }
     pub fn not_probed(reason: &str) -> Self {
@@ -508,6 +524,8 @@ impl GroupObservation {
             reason: Some(reason.into()),
             iana_code: None,
             provider: None,
+            returned_group: None,
+            returned_prime_bits: None,
         }
     }
 }
