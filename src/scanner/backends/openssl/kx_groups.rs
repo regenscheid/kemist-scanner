@@ -17,11 +17,14 @@
 //! FFDHE rows cross-check against [`super::dh_params`]: after a
 //! successful TLS 1.2 handshake, the observed prime's SHA-256 must
 //! match the advertised codepoint. Servers that complete a DHE
-//! handshake with a *custom* prime ignored `supported_groups` — a
-//! misconfiguration finding surfaced via the
-//! [`HandshakeOutcome::IgnoredGroupReturnedCustomPrime`] variant. ECDH
-//! and ML-KEM rows skip this cross-check (their key exchange
-//! produces no modular prime).
+//! handshake with a *different* prime — known (a different FFDHE or
+//! MODP prime) or unclassified — ignored `supported_groups`, surfaced
+//! via the
+//! [`HandshakeOutcome::IgnoredGroupReturnedDifferentPrime`] variant
+//! (which carries the returned prime's classification + bit length so
+//! the JSON layer can render row-level evidence). ECDH and ML-KEM rows
+//! skip this cross-check (their key exchange produces no modular
+//! prime).
 
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -434,7 +437,10 @@ fn probe_blocking(
         Ok(stream) => match t.ffdhe_cross_check {
             Some(expected) => match dh_params::snapshot(stream.ssl()) {
                 Ok(Some(snap)) if snap.classification == expected => HandshakeOutcome::Supported,
-                Ok(Some(_)) => HandshakeOutcome::IgnoredGroupReturnedCustomPrime,
+                Ok(Some(snap)) => HandshakeOutcome::IgnoredGroupReturnedDifferentPrime {
+                    returned_group: snap.classification.as_schema_str().to_string(),
+                    returned_prime_bits: snap.prime_bits,
+                },
                 Ok(None) => {
                     HandshakeOutcome::Error("handshake_success_but_no_dh_tmp_key".to_string())
                 }

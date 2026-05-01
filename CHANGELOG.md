@@ -8,6 +8,164 @@ numbers follow [semver](https://semver.org/).
 
 (no changes yet)
 
+## [0.4.0] — 2026-04-30
+
+Schema v2.0. One breaking restructure (split `tls.extensions`),
+several signal-quality fixes that preserve schema shape, plus two
+new functional probe slots that match what ssllabs reports for the
+same behavior.
+
+### Schema — BREAKING
+
+- **`schema_version` bumped to `"2.0.0"`.** Pin on the major; v1.x
+  consumers will fail to parse v2 records. The breaking change is
+  the `tls.extensions` split (below). All other v2 additions are
+  additive new fields with default `not_probed: feature_disabled` /
+  empty rendering on absent data.
+- **`tls.extensions` split into `tls.extensions` + `tls.behavioral_probes`.**
+  Six fields moved out of `tls.extensions` because they aren't TLS
+  extensions in the RFC 5246 §7.4.1.4 / RFC 8446 §4.2 sense:
+  `heartbeat_echoes_oversized_payload`, `compression_offered`,
+  `grease_echoed`, `hello_retry_request`, `ephemeral_key_reuse`,
+  `bleichenbacher_oracle_probe`. The first is a Heartbleed
+  vulnerability probe, the second is a ClientHello-body field
+  (RFC 5246 §7.4.1.3, predates extensions), the third is an RFC
+  8701 conformance check, the fourth is a ServerHello variant
+  (random == sentinel per RFC 8446 §4.1.3), and the last two are
+  active vulnerability probes (Raccoon CVE-2020-1968, ROBOT). True
+  extensions stay under `tls.extensions`. Polarity (`true` = good
+  vs bad) varies per field within `behavioral_probes` and is
+  documented per-field in the schema; the bucket is a structural
+  grouping, not a polarity grouping. Dashboards reading
+  `tls.extensions.{ephemeral_key_reuse,bleichenbacher_oracle_probe,...}`
+  must update their JSON pointers to `tls.behavioral_probes.*`.
+
+### Added
+
+- **Functional TLS 1.2 session resumption probes.** Two new
+  observations on `tls.session_resumption.tls1_2`:
+  `session_ticket_resumption_accepted` (RFC 5077 ticket round-trip)
+  and `session_id_resumption_accepted` (RFC 5246 §F.1.4 session-ID
+  caching). Implemented as separate handshake pairs in
+  [scanner/backends/openssl/tickets.rs](src/scanner/backends/openssl/tickets.rs):
+  the probe captures the `SslSession` from the first handshake (via
+  `to_owned()` on `SslSessionRef`, which up-refs `SSL_SESSION`),
+  presents it on a fresh second handshake via `SSL_set_session`,
+  and reads `SSL_session_reused` post-handshake. The session-ID
+  variant builds the context with `SslOptions::NO_TICKET` so the
+  server falls back to session-ID caching, matching ssllabs's
+  "Session resumption (caching)" probe. Existing `session_ticket_issued`
+  / `session_id_issued` fields stay (issuance is independently
+  observable from acceptance — the cloudflare.com pattern is "IDs
+  issued, not accepted"). Cost: 4 additional TLS 1.2 handshakes
+  per host (was 2).
+- **`tls.behavioral_probes` block.** New top-level slot under
+  `tls`. Same field types as before, just re-housed. Schema
+  description makes per-field polarity explicit.
+- **`returned_group` + `returned_prime_bits` on FFDHE TLS 1.2
+  named-group rows.** When the cross-codepoint coherence pass
+  downgrades an FFDHE row to `supported: false`, the row records
+  what prime the server actually returned in response to the offer
+  (`"ffdhe2048"`, `"modp3072"`, `"custom"`, etc., matching the
+  `tls.dh_parameters[].classification` vocabulary, plus
+  `returned_prime_bits` for size when classification is `custom`).
+  Both fields omitted when the row reflects an honest match or a
+  non-FFDHE codepoint.
+
+### Changed
+
+- **FFDHE TLS 1.2 named-group reporting now distinguishes RFC 7919
+  named-group support from static-dhparam fallback.** Previously a
+  server with the RFC 7919 ffdhe2048 prime configured as its static
+  `ssl_dhparam` (the Mozilla / Apache / nginx default) would report
+  `supported: true` for the `ffdhe2048` codepoint even though it
+  ignores `supported_groups` entirely. fs.bbg.gov is the
+  motivating case: the server returns its 2048-bit prime regardless
+  of which FFDHE codepoint the client offers. ssllabs reads this
+  correctly as "no FFDHE named-group support"; kemist now matches.
+  Implementation: a new cross-codepoint coherence pass in
+  [output/json.rs](src/output/json.rs) — when *any* FFDHE TLS 1.2
+  probe returns a prime that doesn't match the offered codepoint
+  (the `IgnoredGroupReturnedDifferentPrime` outcome), every FFDHE
+  TLS 1.2 row gets downgraded to
+  `supported: false, reason: "server_does_not_honor_supported_groups"`
+  with `returned_group` + `returned_prime_bits` preserving per-row
+  evidence. TLS 1.3 FFDHE rows are unaffected (wire-confirmed via
+  `key_share` rather than inferred from prime hashing). Old reason
+  string `server_ignored_group_offer_returned_custom_prime` is
+  removed; the new string is more honest about what was concluded.
+- **ECDHE ephemeral-reuse probe handles X25519 / X448.** The probe
+  previously rejected non-classical-EC curves with the misleading
+  error `peer_tmp_key_not_ec:id=Id(1034)` whenever the server
+  selected X25519 (NID 1034) — common on modern servers per
+  Mozilla's intermediate config. The check at
+  [ephemeral_reuse.rs](src/scanner/backends/openssl/ephemeral_reuse.rs)
+  now branches on `pkey.id()`: classical EC keys (`Id::EC`)
+  serialize as uncompressed point bytes via `EcKeyRef::public_key`,
+  while RFC 7748 Montgomery curves (`Id::X25519`, `Id::X448`) pull
+  raw bytes via `pkey.raw_public_key()`. From the reuse-detection
+  perspective both are equivalent — we just hash whatever the
+  server actually sent. Anything outside those three pkey types
+  falls through to a more specific error
+  `peer_tmp_key_unsupported_ecdhe:id=<n>`.
+- **TCP RST mid-handshake on the static-DH raw probe is now a wire
+  rejection, not a probe error.** When the server slammed the
+  connection with `ECONNRESET` after our minimal ClientHello (the
+  fs.bbg.gov pattern — perimeter security flagging an unusual CH
+  shape), kemist emitted
+  `supported: null, method: error, reason: "read_reply:Connection reset by peer (os error 104)"`.
+  Semantically RST-after-CH is equivalent to the existing
+  clean-FIN-after-CH path the probe already classifies as
+  `NotSupported` — server saw our offer, chose not to engage. New
+  `HandshakeOutcome::WireRejected { reason }` variant routes
+  `io::ErrorKind::ConnectionReset` to
+  `supported: false, method: probe, reason: "server_rst_after_clienthello"`
+  in [scanner/raw/static_dh.rs](src/scanner/raw/static_dh.rs).
+  Other read errors (timeouts, generic IO) keep the legacy `Error`
+  rendering.
+- **HelloRetryRequest renders `not_applicable` on hosts that don't
+  support TLS 1.3.** HRR is a TLS 1.3 mechanism (RFC 8446 §4.1.3).
+  When the protocol probe affirmatively reports
+  `tls.versions_offered.tls1_3.supported: false`, the HRR row in
+  [output/json.rs](src/output/json.rs) downgrades from
+  `not_probed` to `not_applicable` with reason
+  `tls13_not_supported_on_host:<original_probe_error>` —
+  preserving the underlying HRR-probe error in the suffix so
+  consumers who care about *why* HRR wasn't observed (e.g. the
+  peer-RST-on-TLS-1.3-CH pattern fs.bbg.gov exhibits) keep the
+  forensic detail. Only *affirmative* TLS-1.3-not-supported
+  triggers the downgrade; if the version probe itself failed
+  (`error` set), the legacy `not_probed` rendering stands so a
+  real measurement failure isn't buried under `not_applicable`.
+- **TLS 1.3 session resumption + 0-RTT render `not_applicable` on
+  hosts that don't support TLS 1.3.** Same cross-reference logic
+  applied to `tls.session_resumption.tls1_3.psk_resumption_accepted`
+  and `early_data_accepted`. The rustls-backed probe's
+  `ServerTlsVersionIsDisabledByOurConfig` error (its way of saying
+  "you asked for TLS 1.3 only, server picked something else") is
+  preserved in the reason suffix.
+
+### Internal
+
+- **`HandshakeOutcome` gained two structured variants.**
+  `IgnoredGroupReturnedDifferentPrime { returned_group,
+  returned_prime_bits }` replaces the old unit
+  `IgnoredGroupReturnedCustomPrime` — the FFDHE cross-check now
+  carries the actual returned classification through to the JSON
+  layer instead of discarding it. `WireRejected { reason }` is the
+  new wire-level-rejection variant used by the static-DH raw probe
+  (see Changed above). All match sites updated; the cipher / group
+  rendering paths fall through to consistent rendering for both.
+
+### Documentation
+
+- Schema migration notes added to
+  [docs/OUTPUT_SCHEMA.md](docs/OUTPUT_SCHEMA.md) and
+  [docs/CHECKS.md](docs/CHECKS.md): reason-string changes for
+  FFDHE named-group rows, the `extensions` / `behavioral_probes`
+  split, and the new functional resumption probes. Existing field
+  documentation updated where field paths moved.
+
 ## [0.3.1] — 2026-04-24
 
 Bugfix release. Four independent fixes for issues discovered while

@@ -1,6 +1,8 @@
-//! kemist output schema v1.
+//! kemist output schema v2.
 //!
 //! See docs/OUTPUT_SCHEMA.md and schemas/output-v1.json for the formal contract.
+//! (Filename retained at v1 for URL stability across the v1→v2 cut; the
+//! `$id` and `title` inside the schema document carry the v2 marker.)
 //!
 //! Envelope rule: probe-derived tri-state observations carry `{value, method, reason?}`.
 //! Stable metadata (schema_version, target, fingerprints, IANA codepoints, etc.) is
@@ -12,7 +14,7 @@ use std::collections::BTreeMap;
 
 pub use crate::model::errors::ScannerError;
 
-pub const SCHEMA_VERSION: &str = "1.0.0";
+pub const SCHEMA_VERSION: &str = "2.0.0";
 
 /// Top-level scan record. Every emitted JSON document is a `ScanResult`.
 #[derive(Serialize, Debug, Clone)]
@@ -163,6 +165,15 @@ pub struct Tls {
     /// groups (X25519, ECDH, ML-KEM, hybrids) appear under `tls1_3`.
     pub groups: TlsGroups,
     pub extensions: TlsExtensions,
+    /// Non-extension handshake observations: vulnerability probes
+    /// (Heartbleed payload echo, ephemeral-key reuse / Raccoon, ROBOT)
+    /// plus ClientHello-body / ServerHello-variant signals
+    /// (`compression_offered`, `hello_retry_request`, `grease_echoed`).
+    /// These were grouped under `extensions` in schema v1.0 because
+    /// they're observed in the same handshake window, but none of
+    /// them are TLS extensions in the RFC 5246 §7.4.1.4 / RFC 8446
+    /// §4.2 sense — schema v2.0 separates them.
+    pub behavioral_probes: BehavioralProbes,
     pub downgrade_signaling: DowngradeSignaling,
     pub sni_behavior: SniBehavior,
     /// DH parameters captured from every completed DHE handshake,
@@ -330,6 +341,26 @@ pub struct Tls12Resumption {
     /// secrecy friendlier); `false` = stable ticket (the server
     /// key that wraps the ticket is a standing secret).
     pub ticket_rotated_across_connections: ObservationBool,
+    /// **Functional** RFC 5077 ticket resumption test. The probe
+    /// completes a TLS 1.2 handshake, captures the issued session,
+    /// then attempts a fresh handshake with `SSL_set_session(prev)`
+    /// and reads `SSL_session_reused`. `true` = server accepted the
+    /// previously-issued ticket and resumed; `false` = server
+    /// declined and ran a full handshake; `not_applicable` when the
+    /// first handshake didn't yield a session to present.
+    /// Distinct from `session_ticket_issued`, which only tells you
+    /// whether the server *handed out* a ticket.
+    pub session_ticket_resumption_accepted: ObservationBool,
+    /// **Functional** RFC 5246 §F.1.4 session-ID resumption test.
+    /// Same shape as `session_ticket_resumption_accepted`, but the
+    /// probe builds the SslContext with `SSL_OP_NO_TICKET` so the
+    /// server falls back to session-ID-based caching. `true` =
+    /// server accepted the previously-issued session ID and resumed;
+    /// `false` = server issued an ID but didn't accept it back (the
+    /// classic "IDs assigned but not accepted" pattern). Distinct
+    /// from `session_id_issued`, which only tells you whether the
+    /// server *handed out* an ID.
+    pub session_id_resumption_accepted: ObservationBool,
 }
 
 #[derive(Serialize, Debug, Clone, Default)]
@@ -489,6 +520,20 @@ pub struct GroupObservation {
     /// [`CipherSuiteEntry::provider`] for the full contract.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
+    /// FFDHE rows only: classification of the prime the server returned
+    /// when its behavior diverged from the codepoint we offered (or when
+    /// the host-level cross-codepoint check determined the server isn't
+    /// honoring `supported_groups`). Vocabulary matches
+    /// `tls.dh_parameters[].classification` — `"ffdhe2048"`,
+    /// `"modp3072"`, `"custom"`, etc. Omitted when the row reflects an
+    /// honest match or a non-FFDHE codepoint.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub returned_group: Option<String>,
+    /// FFDHE rows only: bit-length of the prime the server actually
+    /// returned. Useful primarily when `returned_group == "custom"`,
+    /// where the size isn't conveyed by the classification name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub returned_prime_bits: Option<u32>,
 }
 
 impl GroupObservation {
@@ -499,6 +544,8 @@ impl GroupObservation {
             reason: None,
             iana_code: None,
             provider: None,
+            returned_group: None,
+            returned_prime_bits: None,
         }
     }
     pub fn not_probed(reason: &str) -> Self {
@@ -508,10 +555,17 @@ impl GroupObservation {
             reason: Some(reason.into()),
             iana_code: None,
             provider: None,
+            returned_group: None,
+            returned_prime_bits: None,
         }
     }
 }
 
+/// True TLS extensions per RFC 5246 §7.4.1.4 / RFC 8446 §4.2 — fields
+/// that ride in the `extensions` block of ClientHello / ServerHello /
+/// EncryptedExtensions. Non-extension handshake observations
+/// (vulnerability probes, ClientHello-body fields, ServerHello
+/// variants) live in [`BehavioralProbes`].
 #[derive(Serialize, Debug, Clone)]
 pub struct TlsExtensions {
     pub ems: ObservationBool,
@@ -521,8 +575,6 @@ pub struct TlsExtensions {
     pub alpn_offered: Vec<String>,
     pub encrypt_then_mac: ObservationBool,
     pub heartbeat_present: ObservationBool,
-    pub heartbeat_echoes_oversized_payload: ObservationBool,
-    pub compression_offered: Vec<String>,
     /// RFC 6066 §7 — truncated_hmac extension. Server echo observed
     /// during the byte-level TLS 1.2 ServerHello probe.
     pub truncated_hmac: ObservationBool,
@@ -554,20 +606,6 @@ pub struct TlsExtensions {
     /// empty otherwise.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub compress_certificate_algorithms: Vec<String>,
-    /// RFC 8701 GREASE echo-detection. `true` = server echoed an
-    /// unknown extension (protocol violation signal). `false` =
-    /// server correctly ignored the GREASE extension we injected.
-    /// `not_probed` when the byte-level hello probe didn't produce
-    /// a ServerHello.
-    pub grease_echoed: ObservationBool,
-    /// RFC 8446 §4.1.3 HelloRetryRequest observation. `true` = the
-    /// dedicated TLS 1.3 ClientHello probe (empty `key_share`) saw a
-    /// ServerHello whose random matched the HRR sentinel. `false` =
-    /// the server responded with a regular ServerHello (either TLS 1.2
-    /// fallback, or it unexpectedly accepted the empty `key_share`).
-    /// `not_probed` / `error` — the probe did not reach a parseable
-    /// ServerHello; reason carries the failure mode.
-    pub hello_retry_request: ObservationBool,
     /// RFC 9345 delegated credentials observation. Offered in the
     /// TLS 1.2 byte-probe ClientHello (ext 0x0022) and in the TLS 1.3
     /// characterization handshake. `value` is `true` when the server
@@ -576,6 +614,43 @@ pub struct TlsExtensions {
     /// signature over the leaf pubkey and never compares `valid_time`
     /// against the wall clock — observation only.
     pub delegated_credentials: DelegatedCredentialsObservation,
+}
+
+/// Handshake-time observations that aren't TLS extensions: active
+/// vulnerability probes (Heartbleed payload echo, ephemeral-key reuse,
+/// ROBOT) plus ClientHello-body / ServerHello-variant signals
+/// (`compression_offered`, `hello_retry_request`, `grease_echoed`).
+/// Schema v2.0 split these out of `tls.extensions` to make the
+/// distinction explicit; v1.0 grouped them all under `extensions`.
+#[derive(Serialize, Debug, Clone)]
+pub struct BehavioralProbes {
+    /// Heartbleed (CVE-2014-0160) detection. `true` = server echoed
+    /// our oversized-payload heartbeat back, leaking adjacent memory
+    /// bytes. `false` = server correctly bounds-checked. The
+    /// `heartbeat_present` extension is recorded separately under
+    /// `extensions`; this field is the *behavioral* signal.
+    pub heartbeat_echoes_oversized_payload: ObservationBool,
+    /// Compression methods echoed back by the server in the
+    /// ServerHello `compression_methods` field (RFC 5246 §7.4.1.3).
+    /// Note: the field is in the ClientHello/ServerHello body proper,
+    /// not an extension. Non-empty list means CRIME-vulnerable
+    /// configuration (RFC 7457 §2.1).
+    pub compression_offered: Vec<String>,
+    /// RFC 8701 GREASE echo-detection. `true` = server echoed an
+    /// unknown extension (protocol violation signal — the server's
+    /// ClientHello parser is non-conformant). `false` = server
+    /// correctly ignored the GREASE extension we injected.
+    /// `not_probed` when the byte-level hello probe didn't produce
+    /// a ServerHello.
+    pub grease_echoed: ObservationBool,
+    /// RFC 8446 §4.1.3 HelloRetryRequest observation — a ServerHello
+    /// *variant* (random == sentinel), not an extension. `true` = the
+    /// dedicated TLS 1.3 ClientHello probe (empty `key_share`) saw a
+    /// ServerHello whose random matched the HRR sentinel. `false` =
+    /// the server responded with a regular ServerHello (either TLS 1.2
+    /// fallback, or it unexpectedly accepted the empty `key_share`).
+    /// `not_applicable` when TLS 1.3 isn't supported on the host.
+    pub hello_retry_request: ObservationBool,
     /// Ephemeral DH / ECDH public-value reuse observation. Captured
     /// by running two sequential TLS 1.2 handshakes per family and
     /// comparing the server's ephemeral public value byte-for-byte.

@@ -112,18 +112,18 @@ fn empty_fixture_record_matches_schema_v1() {
             eprintln!("schema error at {}: {}", e.instance_path, e);
         }
         panic!(
-            "ScanResult failed schema v1 validation with {} error(s)",
+            "ScanResult failed schema validation with {} error(s)",
             errors.len()
         );
     }
 }
 
 #[test]
-fn schema_version_is_pinned_to_1_0_0() {
+fn schema_version_is_pinned_to_2_0_0() {
     let results = fixture_results();
     let ctx = fixture_ctx();
     let record = build_scan_result(&results, &ctx);
-    assert_eq!(record.schema_version, "1.0.0");
+    assert_eq!(record.schema_version, "2.0.0");
 }
 
 #[test]
@@ -262,12 +262,34 @@ fn fully_populated_openssl_observations_match_schema_v1() {
                 dh_snapshot: None,
                 ske_sig: None,
             },
+            // Static-DH raw probe variant: server tore the connection
+            // down with a TCP RST after our minimal ClientHello.
+            // Renders as `supported: false` with the explicit reason
+            // string capturing how the server rejected.
+            LegacyCipherResult {
+                name: "TLS_DH_RSA_WITH_AES_128_CBC_SHA".to_string(),
+                openssl_name: "DH-RSA-AES128-SHA".to_string(),
+                iana_code: 0x0031,
+                version: TlsVersion::Tls12,
+                outcome: HandshakeOutcome::WireRejected {
+                    reason: "server_rst_after_clienthello".to_string(),
+                },
+                dh_snapshot: None,
+                ske_sig: None,
+            },
         ],
     };
 
     // Named-group probe: FFDHE rows exercising Supported / NotSupported /
-    // IgnoredGroupReturnedCustomPrime, plus a non-FFDHE row demonstrating
+    // IgnoredGroupReturnedDifferentPrime, plus a non-FFDHE row demonstrating
     // an OpenSSL override of an aws-lc-rs `not_probed` slot.
+    //
+    // The ffdhe2048 self-match here triggers the cross-codepoint
+    // coherence downgrade because the ffdhe3072 row carries
+    // `IgnoredGroupReturnedDifferentPrime` evidence — the JSON
+    // builder downgrades both rows to
+    // `reason: server_does_not_honor_supported_groups` with
+    // returned-prime evidence preserved.
     let kx_group_probes = KxGroupProbeOutput {
         results: vec![
             KxGroupProbeResult {
@@ -279,7 +301,10 @@ fn fully_populated_openssl_observations_match_schema_v1() {
             KxGroupProbeResult {
                 group_name: "ffdhe3072".to_string(),
                 iana_code: 0x0101,
-                tls12_outcome: HandshakeOutcome::IgnoredGroupReturnedCustomPrime,
+                tls12_outcome: HandshakeOutcome::IgnoredGroupReturnedDifferentPrime {
+                    returned_group: "ffdhe2048".to_string(),
+                    returned_prime_bits: 2048,
+                },
                 tls13_outcome: HandshakeOutcome::NotProbed("provider_limit".to_string()),
             },
             KxGroupProbeResult {
@@ -351,6 +376,12 @@ fn fully_populated_openssl_observations_match_schema_v1() {
             ticket_lifetime_hint_secs: Some(7200),
             session_id_issued: ObservationBool::probe(true),
             ticket_rotated_across_connections: ObservationBool::probe(true),
+            // Functional resumption results: this fixture mirrors the
+            // cloudflare.com pattern that motivated the v2 split —
+            // tickets resume successfully, session-ID caching does
+            // not (server issues IDs but doesn't accept them back).
+            session_ticket_resumption_accepted: ObservationBool::probe(true),
+            session_id_resumption_accepted: ObservationBool::probe(false),
         },
         tls1_3: Tls13Resumption {
             new_session_ticket_count: None,
@@ -495,12 +526,12 @@ fn fully_populated_openssl_observations_match_schema_v1() {
     // tls.cipher_suites.* and tls.groups.{tls1_2,tls1_3} locations.
     let tls = record_value.get("tls").unwrap();
     let cs = tls.get("cipher_suites").unwrap();
-    // Fixture has 1 TLS 1.0 row (RC4-SHA), 0 TLS 1.1 rows, 2 TLS 1.2
+    // Fixture has 1 TLS 1.0 row (RC4-SHA), 0 TLS 1.1 rows, 4 TLS 1.2
     // rows (AES128-SHA supported + DHE-RSA-AES128-SHA supported +
-    // NULL-SHA rejected = 3).
+    // NULL-SHA rejected + DH-RSA-AES128-SHA wire-rejected).
     assert_eq!(cs.get("tls1_0").unwrap().as_array().unwrap().len(), 1);
     assert_eq!(cs.get("tls1_1").unwrap().as_array().unwrap().len(), 0);
-    assert_eq!(cs.get("tls1_2").unwrap().as_array().unwrap().len(), 3);
+    assert_eq!(cs.get("tls1_2").unwrap().as_array().unwrap().len(), 4);
     // Every emitted entry carries the provider tag.
     for v in ["tls1_0", "tls1_2"] {
         for row in cs.get(v).unwrap().as_array().unwrap() {
@@ -628,6 +659,24 @@ fn fully_populated_openssl_observations_match_schema_v1() {
             .as_bool(),
         Some(true)
     );
+    // Functional resumption fields. Fixture mirrors the cloudflare.com
+    // pattern: tickets work, session-ID caching doesn't.
+    assert_eq!(
+        sr12.get("session_ticket_resumption_accepted")
+            .unwrap()
+            .get("value")
+            .unwrap()
+            .as_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        sr12.get("session_id_resumption_accepted")
+            .unwrap()
+            .get("value")
+            .unwrap()
+            .as_bool(),
+        Some(false)
+    );
     let sr13 = sr.get("tls1_3").unwrap();
     assert_eq!(
         sr13.get("psk_resumption_accepted")
@@ -685,7 +734,10 @@ fn ffdhe_cross_check_reason_surfaces_in_output() {
             results: vec![KxGroupProbeResult {
                 group_name: "ffdhe2048".to_string(),
                 iana_code: 0x0100,
-                tls12_outcome: HandshakeOutcome::IgnoredGroupReturnedCustomPrime,
+                tls12_outcome: HandshakeOutcome::IgnoredGroupReturnedDifferentPrime {
+                    returned_group: "custom".to_string(),
+                    returned_prime_bits: 1024,
+                },
                 tls13_outcome: HandshakeOutcome::Supported,
             }],
         }),
@@ -711,8 +763,158 @@ fn ffdhe_cross_check_reason_surfaces_in_output() {
     assert_eq!(tls12.get("supported").unwrap().as_bool(), Some(false));
     assert_eq!(
         tls12.get("reason").unwrap().as_str(),
-        Some("server_ignored_group_offer_returned_custom_prime")
+        Some("server_does_not_honor_supported_groups")
     );
+    assert_eq!(
+        tls12.get("returned_group").unwrap().as_str(),
+        Some("custom")
+    );
+    assert_eq!(
+        tls12.get("returned_prime_bits").unwrap().as_u64(),
+        Some(1024)
+    );
+}
+
+/// Cross-codepoint coherence: when one FFDHE row reports
+/// `IgnoredGroupReturnedDifferentPrime`, every FFDHE TLS 1.2 row
+/// (including a sibling that "matched" its own offer) gets downgraded
+/// to `supported: false` with the same explicit reason. The matched
+/// row's `returned_group` records the row's own group classification,
+/// since that is the prime the server returned in response to the
+/// offer.
+#[cfg(feature = "legacy-probes")]
+#[test]
+fn ffdhe_cross_codepoint_coherence_downgrades_self_match() {
+    use kemist::scanner::backends::HandshakeOutcome;
+    use kemist::scanner::openssl::{
+        kx_groups::{KxGroupProbeOutput, KxGroupProbeResult},
+        OpensslObservations,
+    };
+
+    let mut results = fixture_results();
+    results.openssl_observations = Some(OpensslObservations {
+        cipher_probes: None,
+        kx_group_probes: Some(KxGroupProbeOutput {
+            results: vec![
+                KxGroupProbeResult {
+                    group_name: "ffdhe2048".to_string(),
+                    iana_code: 0x0100,
+                    tls12_outcome: HandshakeOutcome::Supported,
+                    tls13_outcome: HandshakeOutcome::NotSupported,
+                },
+                KxGroupProbeResult {
+                    group_name: "ffdhe3072".to_string(),
+                    iana_code: 0x0101,
+                    tls12_outcome: HandshakeOutcome::IgnoredGroupReturnedDifferentPrime {
+                        returned_group: "ffdhe2048".to_string(),
+                        returned_prime_bits: 2048,
+                    },
+                    tls13_outcome: HandshakeOutcome::NotSupported,
+                },
+            ],
+        }),
+        fallback_scsv: None,
+        renegotiation: None,
+        client_auth: None,
+        tls13_extensions: None,
+        session_resumption: None,
+        sigalg_policy: None,
+        ephemeral_key_reuse: None,
+        bleichenbacher_oracle_probe: None,
+        probe_errors: vec![],
+    });
+
+    let ctx = fixture_ctx();
+    let record = build_scan_result(&results, &ctx);
+    let value = serde_json::to_value(&record).expect("serialize");
+
+    // ffdhe2048 self-match is downgraded; returned_group reflects the
+    // matching prime the server actually returned.
+    let two = value
+        .pointer("/tls/groups/tls1_2/ffdhe2048")
+        .expect("ffdhe2048 row present");
+    assert_eq!(two.get("supported").unwrap().as_bool(), Some(false));
+    assert_eq!(
+        two.get("reason").unwrap().as_str(),
+        Some("server_does_not_honor_supported_groups")
+    );
+    assert_eq!(
+        two.get("returned_group").unwrap().as_str(),
+        Some("ffdhe2048")
+    );
+    assert_eq!(two.get("returned_prime_bits").unwrap().as_u64(), Some(2048));
+
+    // ffdhe3072 row carries the original mismatch evidence.
+    let three = value
+        .pointer("/tls/groups/tls1_2/ffdhe3072")
+        .expect("ffdhe3072 row present");
+    assert_eq!(three.get("supported").unwrap().as_bool(), Some(false));
+    assert_eq!(
+        three.get("reason").unwrap().as_str(),
+        Some("server_does_not_honor_supported_groups")
+    );
+    assert_eq!(
+        three.get("returned_group").unwrap().as_str(),
+        Some("ffdhe2048")
+    );
+    assert_eq!(
+        three.get("returned_prime_bits").unwrap().as_u64(),
+        Some(2048)
+    );
+}
+
+/// Negative case: with no mismatch evidence, the cross-codepoint
+/// coherence pass leaves a Supported FFDHE row untouched (no
+/// `returned_group`, no reason string).
+#[cfg(feature = "legacy-probes")]
+#[test]
+fn ffdhe_supported_unchanged_without_mismatch_evidence() {
+    use kemist::scanner::backends::HandshakeOutcome;
+    use kemist::scanner::openssl::{
+        kx_groups::{KxGroupProbeOutput, KxGroupProbeResult},
+        OpensslObservations,
+    };
+
+    let mut results = fixture_results();
+    results.openssl_observations = Some(OpensslObservations {
+        cipher_probes: None,
+        kx_group_probes: Some(KxGroupProbeOutput {
+            results: vec![
+                KxGroupProbeResult {
+                    group_name: "ffdhe2048".to_string(),
+                    iana_code: 0x0100,
+                    tls12_outcome: HandshakeOutcome::Supported,
+                    tls13_outcome: HandshakeOutcome::NotSupported,
+                },
+                KxGroupProbeResult {
+                    group_name: "ffdhe3072".to_string(),
+                    iana_code: 0x0101,
+                    tls12_outcome: HandshakeOutcome::NotSupported,
+                    tls13_outcome: HandshakeOutcome::NotSupported,
+                },
+            ],
+        }),
+        fallback_scsv: None,
+        renegotiation: None,
+        client_auth: None,
+        tls13_extensions: None,
+        session_resumption: None,
+        sigalg_policy: None,
+        ephemeral_key_reuse: None,
+        bleichenbacher_oracle_probe: None,
+        probe_errors: vec![],
+    });
+
+    let ctx = fixture_ctx();
+    let record = build_scan_result(&results, &ctx);
+    let value = serde_json::to_value(&record).expect("serialize");
+    let two = value
+        .pointer("/tls/groups/tls1_2/ffdhe2048")
+        .expect("ffdhe2048 row present");
+    assert_eq!(two.get("supported").unwrap().as_bool(), Some(true));
+    assert!(two.get("reason").is_none());
+    assert!(two.get("returned_group").is_none());
+    assert!(two.get("returned_prime_bits").is_none());
 }
 
 #[cfg(not(feature = "legacy-probes"))]
@@ -1027,4 +1229,357 @@ fn preload_list_source_all_emitted_forms_match_schema_pattern() {
                 .collect::<Vec<_>>(),
         );
     }
+}
+
+/// HRR cross-reference: when the protocol probe affirmatively reports
+/// TLS 1.3 as not supported, the HRR row degrades to `not_applicable`
+/// with `tls13_not_supported_on_host` (HRR is a TLS 1.3 mechanism, so
+/// the question is moot). The underlying probe error is preserved in
+/// the reason for forensic continuity. fs.bbg.gov is the motivating
+/// case: the host RSTs every TLS 1.3 ClientHello, so the HRR probe
+/// reports `read_io: Connection reset by peer` and the protocol probe
+/// reports tls1_3 not supported.
+#[test]
+fn hrr_renders_not_applicable_when_tls13_unsupported_with_underlying_error() {
+    use kemist::scanner::hello::HelloRetryRequestObservation;
+
+    let mut results = fixture_results();
+    // Flip TLS 1.3 to not_supported (no error → affirmative no).
+    for p in results.protocol_support.iter_mut() {
+        if p.version == TlsVersion::Tls13 {
+            p.supported = false;
+            p.error = None;
+        }
+    }
+    results.hrr_observed = Some(HelloRetryRequestObservation {
+        hrr_observed: None,
+        error: Some("read_io: Connection reset by peer (os error 104)".to_string()),
+    });
+
+    let ctx = fixture_ctx();
+    let record = build_scan_result(&results, &ctx);
+    let value = serde_json::to_value(&record).expect("serialize");
+    let hrr = value
+        .pointer("/tls/behavioral_probes/hello_retry_request")
+        .expect("hello_retry_request slot present");
+    assert!(hrr.get("value").unwrap().is_null());
+    assert_eq!(hrr.get("method").unwrap().as_str(), Some("not_applicable"));
+    let reason = hrr.get("reason").unwrap().as_str().unwrap();
+    assert!(
+        reason.starts_with("tls13_not_supported_on_host:"),
+        "expected tls13_not_supported_on_host prefix, got {reason}"
+    );
+    assert!(
+        reason.contains("Connection reset by peer"),
+        "expected underlying probe error preserved in reason, got {reason}"
+    );
+}
+
+/// HRR cross-reference: when the HRR probe never ran but TLS 1.3 is
+/// affirmatively unsupported, the row still degrades to
+/// `not_applicable` with the bare `tls13_not_supported_on_host`
+/// reason — no probe error to preserve.
+#[test]
+fn hrr_renders_not_applicable_when_tls13_unsupported_and_probe_did_not_run() {
+    let mut results = fixture_results();
+    for p in results.protocol_support.iter_mut() {
+        if p.version == TlsVersion::Tls13 {
+            p.supported = false;
+            p.error = None;
+        }
+    }
+    results.hrr_observed = None;
+
+    let ctx = fixture_ctx();
+    let record = build_scan_result(&results, &ctx);
+    let value = serde_json::to_value(&record).expect("serialize");
+    let hrr = value
+        .pointer("/tls/behavioral_probes/hello_retry_request")
+        .expect("hello_retry_request slot present");
+    assert_eq!(hrr.get("method").unwrap().as_str(), Some("not_applicable"));
+    assert_eq!(
+        hrr.get("reason").unwrap().as_str(),
+        Some("tls13_not_supported_on_host")
+    );
+}
+
+/// Negative case: when the TLS 1.3 protocol probe itself failed
+/// (`error` set, `supported` indeterminate), the HRR row keeps the
+/// legacy `not_probed` rendering with the underlying read_io reason
+/// — we don't quietly bury a real measurement failure under
+/// `not_applicable`.
+#[test]
+fn hrr_keeps_not_probed_when_tls13_probe_inconclusive() {
+    use kemist::scanner::hello::HelloRetryRequestObservation;
+
+    let mut results = fixture_results();
+    for p in results.protocol_support.iter_mut() {
+        if p.version == TlsVersion::Tls13 {
+            p.supported = false;
+            p.error = Some("connection_timeout".to_string());
+        }
+    }
+    results.hrr_observed = Some(HelloRetryRequestObservation {
+        hrr_observed: None,
+        error: Some("read_io: Connection reset by peer (os error 104)".to_string()),
+    });
+
+    let ctx = fixture_ctx();
+    let record = build_scan_result(&results, &ctx);
+    let value = serde_json::to_value(&record).expect("serialize");
+    let hrr = value
+        .pointer("/tls/behavioral_probes/hello_retry_request")
+        .expect("hello_retry_request slot present");
+    assert_eq!(hrr.get("method").unwrap().as_str(), Some("not_probed"));
+    assert!(hrr
+        .get("reason")
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .contains("Connection reset by peer"));
+}
+
+/// TLS 1.3 session resumption + 0-RTT cross-reference: when the
+/// protocol probe affirmatively reports TLS 1.3 as not supported,
+/// `psk_resumption_accepted` and `early_data_accepted` (both TLS 1.3
+/// mechanisms) degrade from `not_probed` to `not_applicable` with
+/// `tls13_not_supported_on_host`. The original probe error is
+/// preserved in the reason for forensic continuity. fs.bbg.gov is
+/// the motivating case: rustls's resumption probe fails handshake #1
+/// with `ServerTlsVersionIsDisabledByOurConfig` because the server
+/// only speaks TLS 1.2.
+#[cfg(feature = "legacy-probes")]
+#[test]
+fn session_resumption_tls13_renders_not_applicable_when_tls13_unsupported() {
+    use kemist::model::scan_result::{
+        ObservationBool, SessionResumption, Tls12Resumption, Tls13Resumption,
+    };
+    use kemist::scanner::openssl::OpensslObservations;
+
+    let mut results = fixture_results();
+    for p in results.protocol_support.iter_mut() {
+        if p.version == TlsVersion::Tls13 {
+            p.supported = false;
+            p.error = None;
+        }
+    }
+    results.openssl_observations = Some(OpensslObservations {
+        cipher_probes: None,
+        kx_group_probes: None,
+        fallback_scsv: None,
+        renegotiation: None,
+        client_auth: None,
+        tls13_extensions: None,
+        session_resumption: Some(SessionResumption {
+            tls1_2: Tls12Resumption {
+                session_ticket_issued: ObservationBool::probe(true),
+                ticket_lifetime_hint_secs: Some(7200),
+                session_id_issued: ObservationBool::probe(false),
+                ticket_rotated_across_connections: ObservationBool::probe(true),
+                session_ticket_resumption_accepted: ObservationBool::probe(true),
+                session_id_resumption_accepted: ObservationBool::not_applicable(
+                    "no_session_issued_in_first_handshake",
+                ),
+            },
+            tls1_3: Tls13Resumption {
+                new_session_ticket_count: None,
+                ticket_lifetime_secs: Vec::new(),
+                psk_resumption_accepted: ObservationBool::not_probed(
+                    "handshake1:peer is incompatible: ServerTlsVersionIsDisabledByOurConfig",
+                ),
+                early_data_accepted: ObservationBool::not_probed(
+                    "handshake1:peer is incompatible: ServerTlsVersionIsDisabledByOurConfig",
+                ),
+            },
+        }),
+        sigalg_policy: None,
+        ephemeral_key_reuse: None,
+        bleichenbacher_oracle_probe: None,
+        probe_errors: vec![],
+    });
+
+    let ctx = fixture_ctx();
+    let record = build_scan_result(&results, &ctx);
+    let value = serde_json::to_value(&record).expect("serialize");
+
+    let psk = value
+        .pointer("/tls/session_resumption/tls1_3/psk_resumption_accepted")
+        .expect("psk_resumption_accepted slot present");
+    assert_eq!(psk.get("method").unwrap().as_str(), Some("not_applicable"));
+    let psk_reason = psk.get("reason").unwrap().as_str().unwrap();
+    assert!(
+        psk_reason.starts_with("tls13_not_supported_on_host:"),
+        "expected tls13_not_supported_on_host prefix, got {psk_reason}"
+    );
+    assert!(psk_reason.contains("ServerTlsVersionIsDisabledByOurConfig"));
+
+    let ed = value
+        .pointer("/tls/session_resumption/tls1_3/early_data_accepted")
+        .expect("early_data_accepted slot present");
+    assert_eq!(ed.get("method").unwrap().as_str(), Some("not_applicable"));
+    assert!(ed
+        .get("reason")
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .starts_with("tls13_not_supported_on_host:"));
+
+    // TLS 1.2 portion of the same struct is untouched — those rows
+    // measure session_id / session_ticket / rotation, none of which
+    // depend on TLS 1.3 capability.
+    let session_ticket = value
+        .pointer("/tls/session_resumption/tls1_2/session_ticket_issued")
+        .expect("tls1_2 session_ticket_issued slot present");
+    assert_eq!(
+        session_ticket.get("method").unwrap().as_str(),
+        Some("probe")
+    );
+    assert_eq!(session_ticket.get("value").unwrap().as_bool(), Some(true));
+}
+
+/// Negative case: when the TLS 1.3 protocol probe itself was
+/// inconclusive (`error` set), session resumption rows keep their
+/// original `not_probed` rendering — we don't bury a real
+/// measurement failure under `not_applicable`.
+#[cfg(feature = "legacy-probes")]
+#[test]
+fn session_resumption_keeps_not_probed_when_tls13_probe_inconclusive() {
+    use kemist::model::scan_result::{
+        ObservationBool, SessionResumption, Tls12Resumption, Tls13Resumption,
+    };
+    use kemist::scanner::openssl::OpensslObservations;
+
+    let mut results = fixture_results();
+    for p in results.protocol_support.iter_mut() {
+        if p.version == TlsVersion::Tls13 {
+            p.supported = false;
+            p.error = Some("connection_timeout".to_string());
+        }
+    }
+    results.openssl_observations = Some(OpensslObservations {
+        cipher_probes: None,
+        kx_group_probes: None,
+        fallback_scsv: None,
+        renegotiation: None,
+        client_auth: None,
+        tls13_extensions: None,
+        session_resumption: Some(SessionResumption {
+            tls1_2: Tls12Resumption {
+                session_ticket_issued: ObservationBool::not_probed("handshake_failed"),
+                ticket_lifetime_hint_secs: None,
+                session_id_issued: ObservationBool::not_probed("handshake_failed"),
+                ticket_rotated_across_connections: ObservationBool::not_probed("handshake_failed"),
+                session_ticket_resumption_accepted: ObservationBool::not_probed("handshake_failed"),
+                session_id_resumption_accepted: ObservationBool::not_probed("handshake_failed"),
+            },
+            tls1_3: Tls13Resumption {
+                new_session_ticket_count: None,
+                ticket_lifetime_secs: Vec::new(),
+                psk_resumption_accepted: ObservationBool::not_probed("handshake1_timeout"),
+                early_data_accepted: ObservationBool::not_probed("handshake1_timeout"),
+            },
+        }),
+        sigalg_policy: None,
+        ephemeral_key_reuse: None,
+        bleichenbacher_oracle_probe: None,
+        probe_errors: vec![],
+    });
+
+    let ctx = fixture_ctx();
+    let record = build_scan_result(&results, &ctx);
+    let value = serde_json::to_value(&record).expect("serialize");
+    let psk = value
+        .pointer("/tls/session_resumption/tls1_3/psk_resumption_accepted")
+        .expect("psk_resumption_accepted slot present");
+    assert_eq!(psk.get("method").unwrap().as_str(), Some("not_probed"));
+    assert_eq!(
+        psk.get("reason").unwrap().as_str(),
+        Some("handshake1_timeout")
+    );
+}
+
+/// `HandshakeOutcome::WireRejected { reason }` — emitted by the
+/// raw-socket static-DH cipher probe when the server tears the
+/// connection down with a TCP RST after our ClientHello — must
+/// render as `supported: false, method: probe, reason: <verbatim>`.
+/// Distinct from `Error` (which gives `supported: null`) and from a
+/// plain `NotSupported` (which gives no reason).
+#[cfg(feature = "legacy-probes")]
+#[test]
+fn wire_rejected_cipher_renders_as_supported_false_with_reason() {
+    use kemist::scanner::backends::HandshakeOutcome;
+    use kemist::scanner::openssl::{
+        ciphers::{LegacyCipherProbeOutput, LegacyCipherResult},
+        OpensslObservations,
+    };
+
+    let mut results = fixture_results();
+    results.openssl_observations = Some(OpensslObservations {
+        cipher_probes: Some(LegacyCipherProbeOutput {
+            results: vec![LegacyCipherResult {
+                name: "TLS_DH_RSA_WITH_AES_128_CBC_SHA".to_string(),
+                openssl_name: "DH-RSA-AES128-SHA".to_string(),
+                iana_code: 0x0031,
+                version: TlsVersion::Tls12,
+                outcome: HandshakeOutcome::WireRejected {
+                    reason: "server_rst_after_clienthello".to_string(),
+                },
+                dh_snapshot: None,
+                ske_sig: None,
+            }],
+        }),
+        kx_group_probes: None,
+        fallback_scsv: None,
+        renegotiation: None,
+        client_auth: None,
+        tls13_extensions: None,
+        session_resumption: None,
+        sigalg_policy: None,
+        ephemeral_key_reuse: None,
+        bleichenbacher_oracle_probe: None,
+        probe_errors: vec![],
+    });
+
+    let ctx = fixture_ctx();
+    let record = build_scan_result(&results, &ctx);
+    let value = serde_json::to_value(&record).expect("serialize");
+    let entries = value
+        .pointer("/tls/cipher_suites/tls1_2")
+        .expect("cipher_suites.tls1_2 present")
+        .as_array()
+        .expect("array");
+    let entry = entries
+        .iter()
+        .find(|e| e.get("iana_code").and_then(|c| c.as_str()) == Some("0x0031"))
+        .expect("0x0031 entry present");
+    assert_eq!(entry.get("supported").unwrap().as_bool(), Some(false));
+    assert_eq!(entry.get("method").unwrap().as_str(), Some("probe"));
+    assert_eq!(
+        entry.get("reason").unwrap().as_str(),
+        Some("server_rst_after_clienthello")
+    );
+}
+
+/// Positive case: when TLS 1.3 is supported and the HRR probe
+/// returned a definitive answer, the row reports `method: probe` —
+/// the cross-reference doesn't interfere with successful probes.
+#[test]
+fn hrr_renders_probe_when_tls13_supported_and_hrr_observed() {
+    use kemist::scanner::hello::HelloRetryRequestObservation;
+
+    let mut results = fixture_results();
+    // protocol_support already has tls1_3 supported in the fixture.
+    results.hrr_observed = Some(HelloRetryRequestObservation {
+        hrr_observed: Some(true),
+        error: None,
+    });
+
+    let ctx = fixture_ctx();
+    let record = build_scan_result(&results, &ctx);
+    let value = serde_json::to_value(&record).expect("serialize");
+    let hrr = value
+        .pointer("/tls/behavioral_probes/hello_retry_request")
+        .expect("hello_retry_request slot present");
+    assert_eq!(hrr.get("method").unwrap().as_str(), Some("probe"));
+    assert_eq!(hrr.get("value").unwrap().as_bool(), Some(true));
 }

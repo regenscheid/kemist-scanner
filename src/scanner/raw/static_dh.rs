@@ -74,6 +74,17 @@ pub async fn probe(
             // even sending an alert. Treat as a wire-level rejection.
             return HandshakeOutcome::NotSupported;
         }
+        Ok(Err(e)) if e.kind() == std::io::ErrorKind::ConnectionReset => {
+            // TCP RST after ClientHello. Semantically equivalent to a
+            // clean FIN here (server saw our offer and chose not to
+            // continue the TLS dialog), just more abrupt. Verdict is
+            // `supported: false`; the reason records *how* the server
+            // rejected so dashboards can distinguish "server RST'd"
+            // from a vanilla `handshake_failure` alert.
+            return HandshakeOutcome::WireRejected {
+                reason: "server_rst_after_clienthello".to_string(),
+            };
+        }
         Ok(Err(e)) => return HandshakeOutcome::Error(format!("read_reply:{e}")),
         Err(_) => return HandshakeOutcome::Error("reply_timeout".to_string()),
     };

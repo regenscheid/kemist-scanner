@@ -1,8 +1,8 @@
-# kemist output schema v1
+# kemist output schema v2
 
 Formal contract: [`schemas/output-v1.json`](../schemas/output-v1.json).
 This document is the human-readable field reference. Every emitted JSON
-record pins `schema_version: "1.0.0"` and validates against the JSON
+record pins `schema_version: "2.0.0"` and validates against the JSON
 Schema — both are CI-enforced.
 
 ## Stability contract
@@ -56,7 +56,7 @@ same; the field name is load-bearing for readability.
 
 ```
 ScanResult {
-  schema_version: "1.0.0"
+  schema_version: "2.0.0"
   scanner:      { name, version }
   capabilities: { ... }
   scan:         { ... }
@@ -70,7 +70,7 @@ ScanResult {
 ```
 
 ### `schema_version`
-String, always `"1.0.0"` in schema v1. Pin on this exact value; check
+String, always `"2.0.0"` in schema v2. Pin on this exact value; check
 the major before interpreting anything else.
 
 ### `scanner`
@@ -183,7 +183,7 @@ Values: `rsa_kex`, `dhe_aead`, `dhe_cbc`, `ecdhe_aead`, `ecdhe_cbc`,
 `ecdhe_psk`, `rsa_psk`, `null_cipher`, `other`. Privacy-dominant
 concerns (`null_cipher`, `anon`, `export`) take precedence over the
 kx prefix. TLS 1.3 suites (`TLS13_*`) map to `ecdhe_aead`. Stability
-contract: values permanent within schema v1.x; new values may be
+contract: values permanent within schema v2.x; new values may be
 added. See the "Enum stability" section at the bottom.
 
 One entry per probed suite, partitioned by TLS version. Suites outside
@@ -221,12 +221,28 @@ ship them (`X448`, `secp521r1`, `MLKEM512`, `MLKEM1024`,
 groups are TLS 1.3-only by design. `provider` distinguishes which
 backend produced the observation (`aws_lc_rs` vs `openssl`).
 
-**FFDHE cross-check.** A TLS 1.2 FFDHE entry with
-`{supported: false, reason: "server_ignored_group_offer_returned_custom_prime"}`
-means the server completed a DHE handshake but returned a prime that
-doesn't match the advertised codepoint — i.e. it ignored
-`supported_groups`. Distinct from a plain `false` (no alert / server
-just refused the group).
+**FFDHE cross-check + cross-codepoint coherence.** A TLS 1.2 FFDHE
+entry with
+`{supported: false, reason: "server_does_not_honor_supported_groups", returned_group, returned_prime_bits}`
+means the scanner has direct or cross-codepoint evidence that the
+server isn't honoring `supported_groups`:
+
+- Direct: the server completed a DHE handshake against this
+  codepoint's offer but returned a prime that didn't match. The
+  `returned_group` field carries the classification of the prime the
+  server *actually* sent (`"ffdhe2048"`, `"modp3072"`, `"custom"`,
+  etc., matching the `tls.dh_parameters[].classification` vocabulary);
+  `returned_prime_bits` carries its bit length.
+- Cross-codepoint: any FFDHE codepoint probe at TLS 1.2 reported a
+  direct mismatch, so every FFDHE TLS 1.2 row gets downgraded — the
+  matched ones too, since the match is also consistent with the
+  server returning a static prime regardless of offer (e.g. an RFC
+  7919 `ssl_dhparam` that happens to coincide with the requested
+  codepoint).
+
+Distinct from a plain `{supported: false}` (no `reason`,
+no `returned_group`), which means the server cleanly refused the
+group offer.
 
 Entries aws-lc-rs doesn't ship emit `not_probed` with
 a specific reason — never `supported: false` without a real probe.
@@ -808,7 +824,7 @@ that want to aggregate across alert types should match on the
 ## Enum stability
 
 The schema pins several fields to string enums. All values listed
-below are **permanent within schema v1.x** — never renamed, never
+below are **permanent within schema v2.x** — never renamed, never
 removed. New values may be added in minor-version bumps; consumers
 **MUST** tolerate unknown values gracefully rather than crashing or
 rejecting the record.

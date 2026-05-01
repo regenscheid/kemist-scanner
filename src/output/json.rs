@@ -1,4 +1,4 @@
-//! JSON emission for schema v1.
+//! JSON emission for schema v2.
 //!
 //! Converts internal `ScanResults` (probe data) into the
 //! canonical `ScanResult` shape defined in [`crate::model::scan_result`] and
@@ -22,7 +22,7 @@ use crate::model::scan_result::{
 use crate::model::scan_result::{ClientAuthCaDn, ClientAuthOidFilter};
 use crate::scanner::ScanResults;
 
-/// Inputs that the scanner does not yet capture but that schema v1 requires.
+/// Inputs that the scanner does not yet capture but that schema v2 requires.
 /// Supplied by `main.rs` around the `SslScanner::scan()` call.
 pub struct JsonEmitContext {
     pub host: String,
@@ -190,6 +190,7 @@ fn build_tls(results: &ScanResults, ctx: &JsonEmitContext) -> Tls {
         cipher_suites: build_cipher_suites(results),
         groups: build_groups(results),
         extensions: build_extensions(results, ctx),
+        behavioral_probes: build_behavioral_probes(results),
         downgrade_signaling: DowngradeSignaling {
             fallback_scsv_enforced: build_fallback_scsv_enforced(results),
             tls13_downgrade_sentinel: results
@@ -375,11 +376,14 @@ fn build_cipher_suites(results: &ScanResults) -> TlsCipherSuites {
             let (supported, method, reason) = match &r.outcome {
                 HandshakeOutcome::Supported => (Some(true), Method::Probe, None),
                 HandshakeOutcome::NotSupported => (Some(false), Method::Probe, None),
+                HandshakeOutcome::WireRejected { reason } => {
+                    (Some(false), Method::Probe, Some(reason.clone()))
+                }
                 HandshakeOutcome::Error(e) => (None, Method::Error, Some(e.clone())),
                 HandshakeOutcome::NotProbed(_)
-                | HandshakeOutcome::IgnoredGroupReturnedCustomPrime => unreachable!(
-                    "cipher probe never constructs NotProbed or \
-                     IgnoredGroupReturnedCustomPrime variants"
+                | HandshakeOutcome::IgnoredGroupReturnedDifferentPrime { .. } => unreachable!(
+                    "aws-lc-rs cipher probe never constructs NotProbed or \
+                     IgnoredGroupReturnedDifferentPrime variants"
                 ),
             };
             let entry = CipherSuiteEntry {
@@ -469,6 +473,16 @@ fn merge_openssl_cipher_probes(
             let (supported, method, reason) = match &r.outcome {
                 HandshakeOutcome::Supported => (Some(true), Method::Probe, None),
                 HandshakeOutcome::NotSupported => (Some(false), Method::Probe, None),
+                // Wire-level rejection with attribution — emitted by
+                // raw-socket cipher probes (`raw::static_dh`) when the
+                // server tore the connection down with a TCP RST after
+                // our ClientHello. Verdict-equivalent to NotSupported;
+                // the reason records *how* the server rejected so
+                // dashboards can distinguish "server RST'd" from a
+                // vanilla `handshake_failure` alert.
+                HandshakeOutcome::WireRejected { reason } => {
+                    (Some(false), Method::Probe, Some(reason.clone()))
+                }
                 HandshakeOutcome::Error(e) => (None, Method::Error, Some(e.clone())),
                 // OpenSSL cipher probes emit `NotProbed` when the
                 // cipher name isn't recognized by the local OpenSSL
@@ -480,9 +494,9 @@ fn merge_openssl_cipher_probes(
                 HandshakeOutcome::NotProbed(reason) => {
                     (None, Method::NotProbed, Some(reason.clone()))
                 }
-                HandshakeOutcome::IgnoredGroupReturnedCustomPrime => unreachable!(
+                HandshakeOutcome::IgnoredGroupReturnedDifferentPrime { .. } => unreachable!(
                     "OpenSSL cipher probe never constructs \
-                     IgnoredGroupReturnedCustomPrime variant — that's \
+                     IgnoredGroupReturnedDifferentPrime variant — that's \
                      FFDHE-specific"
                 ),
             };
@@ -534,6 +548,8 @@ fn build_groups(results: &ScanResults) -> TlsGroups {
                     reason: None,
                     iana_code: iana_code.clone(),
                     provider: Some("aws_lc_rs".to_string()),
+                    returned_group: None,
+                    returned_prime_bits: None,
                 },
                 HandshakeOutcome::NotSupported => GroupObservation {
                     supported: Some(false),
@@ -541,6 +557,8 @@ fn build_groups(results: &ScanResults) -> TlsGroups {
                     reason: None,
                     iana_code: iana_code.clone(),
                     provider: Some("aws_lc_rs".to_string()),
+                    returned_group: None,
+                    returned_prime_bits: None,
                 },
                 HandshakeOutcome::Error(ctx) => GroupObservation {
                     supported: None,
@@ -548,6 +566,8 @@ fn build_groups(results: &ScanResults) -> TlsGroups {
                     reason: Some(ctx.clone()),
                     iana_code: iana_code.clone(),
                     provider: Some("aws_lc_rs".to_string()),
+                    returned_group: None,
+                    returned_prime_bits: None,
                 },
                 HandshakeOutcome::NotProbed(reason) => {
                     let mut o = GroupObservation::not_probed(reason.as_str());
@@ -555,10 +575,12 @@ fn build_groups(results: &ScanResults) -> TlsGroups {
                     o.iana_code = iana_code.clone();
                     o
                 }
-                HandshakeOutcome::IgnoredGroupReturnedCustomPrime => unreachable!(
+                HandshakeOutcome::IgnoredGroupReturnedDifferentPrime { .. }
+                | HandshakeOutcome::WireRejected { .. } => unreachable!(
                     "rustls group probe never constructs \
-                     IgnoredGroupReturnedCustomPrime — FFDHE cross-check \
-                     is OpenSSL-only"
+                     IgnoredGroupReturnedDifferentPrime or WireRejected — \
+                     FFDHE cross-check is OpenSSL-only and WireRejected is \
+                     emitted only by raw-socket cipher probes"
                 ),
             };
             // Route by the version tag on the result. Classical ECDHE
@@ -591,28 +613,84 @@ fn merge_openssl_kx_groups(results: &ScanResults, out: &mut TlsGroups) {
         let Some(probes) = obs.kx_group_probes.as_ref() else {
             return;
         };
-        let to_obs = |o: &HandshakeOutcome, iana: &str| -> Option<GroupObservation> {
+
+        // Cross-codepoint coherence: a server that completes a TLS 1.2
+        // DHE handshake but returns a prime different from the FFDHE
+        // codepoint we offered has demonstrably not honored
+        // `supported_groups`. When that evidence exists, downgrade
+        // every FFDHE TLS 1.2 row — including rows whose returned
+        // prime "matched" the codepoint, since the match is also
+        // consistent with the server returning its static prime
+        // regardless of offer (the fs.bbg.gov pattern: an RFC 7919
+        // prime configured as the static `ssl_dhparam`). Per-row
+        // `returned_group` + `returned_prime_bits` preserve the
+        // observed evidence even after the verdict flips. TLS 1.3
+        // FFDHE rows are wire-confirmed via `key_share` and not
+        // subject to the downgrade.
+        let host_ignores_supported_groups = probes.results.iter().any(|r| {
+            ffdhe_bits_for_codepoint(r.iana_code).is_some()
+                && matches!(
+                    r.tls12_outcome,
+                    HandshakeOutcome::IgnoredGroupReturnedDifferentPrime { .. }
+                )
+        });
+
+        let to_obs = |o: &HandshakeOutcome,
+                      iana: &str,
+                      ffdhe_self_bits: Option<u32>,
+                      ffdhe_self_group: Option<&str>|
+         -> Option<GroupObservation> {
             Some(match o {
-                HandshakeOutcome::Supported => GroupObservation {
-                    supported: Some(true),
-                    method: Method::Probe,
-                    reason: None,
-                    iana_code: Some(iana.to_string()),
-                    provider: Some("openssl".to_string()),
-                },
+                HandshakeOutcome::Supported => {
+                    match (
+                        host_ignores_supported_groups,
+                        ffdhe_self_group,
+                        ffdhe_self_bits,
+                    ) {
+                        // FFDHE TLS 1.2 self-match downgraded by
+                        // cross-codepoint evidence. The server
+                        // returned the codepoint's expected prime, so
+                        // that is what we record as returned_group.
+                        (true, Some(self_group), Some(self_bits)) => GroupObservation {
+                            supported: Some(false),
+                            method: Method::Probe,
+                            reason: Some("server_does_not_honor_supported_groups".to_string()),
+                            iana_code: Some(iana.to_string()),
+                            provider: Some("openssl".to_string()),
+                            returned_group: Some(self_group.to_string()),
+                            returned_prime_bits: Some(self_bits),
+                        },
+                        _ => GroupObservation {
+                            supported: Some(true),
+                            method: Method::Probe,
+                            reason: None,
+                            iana_code: Some(iana.to_string()),
+                            provider: Some("openssl".to_string()),
+                            returned_group: None,
+                            returned_prime_bits: None,
+                        },
+                    }
+                }
                 HandshakeOutcome::NotSupported => GroupObservation {
                     supported: Some(false),
                     method: Method::Probe,
                     reason: None,
                     iana_code: Some(iana.to_string()),
                     provider: Some("openssl".to_string()),
+                    returned_group: None,
+                    returned_prime_bits: None,
                 },
-                HandshakeOutcome::IgnoredGroupReturnedCustomPrime => GroupObservation {
+                HandshakeOutcome::IgnoredGroupReturnedDifferentPrime {
+                    returned_group,
+                    returned_prime_bits,
+                } => GroupObservation {
                     supported: Some(false),
                     method: Method::Probe,
-                    reason: Some("server_ignored_group_offer_returned_custom_prime".to_string()),
+                    reason: Some("server_does_not_honor_supported_groups".to_string()),
                     iana_code: Some(iana.to_string()),
                     provider: Some("openssl".to_string()),
+                    returned_group: Some(returned_group.clone()),
+                    returned_prime_bits: Some(*returned_prime_bits),
                 },
                 HandshakeOutcome::Error(e) => GroupObservation {
                     supported: None,
@@ -620,6 +698,8 @@ fn merge_openssl_kx_groups(results: &ScanResults, out: &mut TlsGroups) {
                     reason: Some(e.clone()),
                     iana_code: Some(iana.to_string()),
                     provider: Some("openssl".to_string()),
+                    returned_group: None,
+                    returned_prime_bits: None,
                 },
                 // A "TLS 1.2 not applicable" cell for a non-FFDHE group
                 // would just clutter the output — suppress it.
@@ -630,7 +710,14 @@ fn merge_openssl_kx_groups(results: &ScanResults, out: &mut TlsGroups) {
                     reason: Some(r.clone()),
                     iana_code: Some(iana.to_string()),
                     provider: Some("openssl".to_string()),
+                    returned_group: None,
+                    returned_prime_bits: None,
                 },
+                HandshakeOutcome::WireRejected { .. } => unreachable!(
+                    "OpenSSL kx_groups probe never constructs \
+                     WireRejected — that variant is emitted only by \
+                     raw-socket cipher probes (`raw::static_dh`)"
+                ),
             })
         };
         // aws-lc-rs-first override discipline: a real aws-lc-rs probe
@@ -644,12 +731,17 @@ fn merge_openssl_kx_groups(results: &ScanResults, out: &mut TlsGroups) {
         };
         for r in &probes.results {
             let iana = format!("0x{:04X}", r.iana_code);
-            if let Some(o) = to_obs(&r.tls12_outcome, &iana) {
+            // Only TLS 1.2 FFDHE rows are subject to the downgrade —
+            // the row's own group classification + bit length describe
+            // what the server returned when it matched its own offer.
+            let ffdhe_self_bits = ffdhe_bits_for_codepoint(r.iana_code);
+            let ffdhe_self_group = ffdhe_self_bits.map(|_| r.group_name.as_str());
+            if let Some(o) = to_obs(&r.tls12_outcome, &iana, ffdhe_self_bits, ffdhe_self_group) {
                 if should_override(out.tls1_2.get(&r.group_name)) {
                     out.tls1_2.insert(r.group_name.clone(), o);
                 }
             }
-            if let Some(o) = to_obs(&r.tls13_outcome, &iana) {
+            if let Some(o) = to_obs(&r.tls13_outcome, &iana, None, None) {
                 if should_override(out.tls1_3.get(&r.group_name)) {
                     out.tls1_3.insert(r.group_name.clone(), o);
                 }
@@ -659,6 +751,21 @@ fn merge_openssl_kx_groups(results: &ScanResults, out: &mut TlsGroups) {
     #[cfg(not(feature = "legacy-probes"))]
     {
         let _ = (results, out);
+    }
+}
+
+/// Map an FFDHE IANA codepoint (RFC 7919 §5) to its prime bit length.
+/// Returns `None` for any non-FFDHE codepoint, which doubles as the
+/// FFDHE-or-not predicate used by the cross-codepoint coherence pass.
+#[cfg(feature = "legacy-probes")]
+fn ffdhe_bits_for_codepoint(code: u16) -> Option<u32> {
+    match code {
+        0x0100 => Some(2048),
+        0x0101 => Some(3072),
+        0x0102 => Some(4096),
+        0x0103 => Some(6144),
+        0x0104 => Some(8192),
+        _ => None,
     }
 }
 
@@ -714,13 +821,6 @@ fn build_extensions(results: &ScanResults, ctx: &JsonEmitContext) -> TlsExtensio
         ObservationBool::not_probed(&format!("hello_probe_failed:{hello_fail_reason}"))
     };
 
-    // compression_offered: whatever the byte probe observed. Empty when the
-    // probe didn't succeed (consumers read `method` on other fields to know).
-    let compression_offered: Vec<String> = hello
-        .and_then(|h| h.compression_selected.clone())
-        .map(|c| vec![c])
-        .unwrap_or_default();
-
     let ocsp_stapling = build_ocsp_stapling(results, ctx);
 
     // SCT delivery paths. Embedded (cert extension) is counted via
@@ -750,8 +850,48 @@ fn build_extensions(results: &ScanResults, ctx: &JsonEmitContext) -> TlsExtensio
     let max_fragment_length = hello.and_then(|h| h.max_fragment_length.clone());
     let (record_size_limit, compress_certificate_algorithms) = build_tls13_ee_observations(results);
     let delegated_credentials = build_delegated_credentials(results);
-    let ephemeral_key_reuse = build_ephemeral_key_reuse(results);
-    let bleichenbacher_oracle_probe = build_bleichenbacher_oracle_probe(results);
+
+    TlsExtensions {
+        ems,
+        secure_renegotiation,
+        ocsp_stapling,
+        sct: SctObservation {
+            delivery_paths,
+            count: embedded_scts_total,
+        },
+        alpn_offered: results.alpn_offered.clone(),
+        encrypt_then_mac,
+        heartbeat_present,
+        truncated_hmac,
+        npn,
+        supported_point_formats_echoed,
+        max_fragment_length,
+        record_size_limit,
+        compress_certificate_algorithms,
+        delegated_credentials,
+    }
+}
+
+/// Build `tls.behavioral_probes`: vulnerability probes (Heartbleed,
+/// ephemeral reuse, ROBOT) plus ClientHello-body / ServerHello-variant
+/// signals that aren't TLS extensions per the RFC framework. Schema
+/// v2.0 split these out of `tls.extensions`.
+fn build_behavioral_probes(results: &ScanResults) -> crate::model::scan_result::BehavioralProbes {
+    use crate::model::scan_result::BehavioralProbes;
+
+    let hello = results.hello_observed.as_ref();
+    let hello_ok = hello.map(|h| h.server_hello_parsed).unwrap_or(false);
+    let hello_fail_reason = hello
+        .and_then(|h| h.error.clone())
+        .unwrap_or_else(|| "hello_probe_not_run".to_string());
+
+    // ClientHello/ServerHello body field — `compression_methods`
+    // (RFC 5246 §7.4.1.3), not an extension. Empty when the byte
+    // probe didn't succeed.
+    let compression_offered: Vec<String> = hello
+        .and_then(|h| h.compression_selected.clone())
+        .map(|c| vec![c])
+        .unwrap_or_default();
 
     // RFC 8701 GREASE echo. `true` = server echoed an unknown
     // extension (protocol violation); `false` = server correctly
@@ -767,43 +907,58 @@ fn build_extensions(results: &ScanResults, ctx: &JsonEmitContext) -> TlsExtensio
     // separate probe that sends a TLS 1.3 ClientHello with an empty
     // `key_share`. `None` on the struct means the probe never ran
     // (shouldn't happen in practice since `scan()` always invokes it).
+    //
+    // Cross-reference: HRR is a TLS 1.3 mechanism. If the protocol
+    // probe pass affirmatively reports TLS 1.3 as not supported on
+    // this host, the HRR question is `not_applicable` — there is no
+    // TLS 1.3 handshake on this host for HRR to occur in. We still
+    // surface the underlying probe error in the reason so consumers
+    // who care about *why* HRR couldn't be measured (e.g. a peer-RST
+    // pattern that signals an aggressive TLS 1.3 rejection) retain
+    // that signal. Only an *affirmative* TLS-1.3-not-supported probe
+    // gates the downgrade — when the version probe itself failed
+    // (`error` set, `supported` unknown), the legacy `not_probed`
+    // path stands so we don't quietly bury a real measurement
+    // failure.
+    let tls13_affirmatively_unsupported = results
+        .protocol_support
+        .iter()
+        .find(|p| p.version == TlsVersion::Tls13)
+        .map(|p| !p.supported && p.error.is_none())
+        .unwrap_or(false);
+
     let hello_retry_request = match results.hrr_observed.as_ref() {
         Some(hrr) => match hrr.hrr_observed {
             Some(v) => ObservationBool::probe(v),
+            None if tls13_affirmatively_unsupported => {
+                let reason = match hrr.error.as_deref() {
+                    Some(e) => format!("tls13_not_supported_on_host:{e}"),
+                    None => "tls13_not_supported_on_host".to_string(),
+                };
+                ObservationBool::not_applicable(&reason)
+            }
             None => ObservationBool::not_probed(
                 hrr.error.as_deref().unwrap_or("hrr_probe_inconclusive"),
             ),
         },
+        None if tls13_affirmatively_unsupported => {
+            ObservationBool::not_applicable("tls13_not_supported_on_host")
+        }
         None => ObservationBool::not_probed("hrr_probe_not_run"),
     };
 
-    TlsExtensions {
-        ems,
-        secure_renegotiation,
-        ocsp_stapling,
-        sct: SctObservation {
-            delivery_paths,
-            count: embedded_scts_total,
-        },
-        alpn_offered: results.alpn_offered.clone(),
-        encrypt_then_mac,
-        heartbeat_present,
-        heartbeat_echoes_oversized_payload: match results.heartbeat_echoes_oversized_payload {
-            Some(v) => ObservationBool::probe(v),
-            None => ObservationBool::not_probed("heartbeat_probe_inconclusive"),
-        },
+    let heartbeat_echoes_oversized_payload = match results.heartbeat_echoes_oversized_payload {
+        Some(v) => ObservationBool::probe(v),
+        None => ObservationBool::not_probed("heartbeat_probe_inconclusive"),
+    };
+
+    BehavioralProbes {
+        heartbeat_echoes_oversized_payload,
         compression_offered,
-        truncated_hmac,
-        npn,
-        supported_point_formats_echoed,
-        max_fragment_length,
-        record_size_limit,
-        compress_certificate_algorithms,
         grease_echoed,
         hello_retry_request,
-        delegated_credentials,
-        ephemeral_key_reuse,
-        bleichenbacher_oracle_probe,
+        ephemeral_key_reuse: build_ephemeral_key_reuse(results),
+        bleichenbacher_oracle_probe: build_bleichenbacher_oracle_probe(results),
     }
 }
 
@@ -1477,26 +1632,71 @@ fn feature_disabled_reneg() -> RenegotiationBehavior {
 }
 
 fn build_session_resumption(results: &ScanResults) -> crate::model::scan_result::SessionResumption {
-    use crate::model::scan_result::{
-        ObservationBool, SessionResumption, Tls12Resumption, Tls13Resumption,
-    };
+    use crate::model::scan_result::{Method, ObservationBool};
 
     #[cfg(feature = "legacy-probes")]
-    {
+    let mut sr = {
         if let Some(obs) = results.openssl_observations.as_ref() {
             if let Some(sr) = obs.session_resumption.as_ref() {
-                return sr.clone();
+                sr.clone()
+            } else {
+                feature_disabled_session_resumption()
+            }
+        } else {
+            feature_disabled_session_resumption()
+        }
+    };
+    #[cfg(not(feature = "legacy-probes"))]
+    let mut sr = feature_disabled_session_resumption();
+
+    // Cross-reference: TLS 1.3 PSK resumption + 0-RTT are TLS 1.3
+    // mechanisms. If the protocol probe affirmatively reports TLS 1.3
+    // as not supported on this host, the rustls resumption probe will
+    // have failed with `ServerTlsVersionIsDisabledByOurConfig` (or
+    // similar) on handshake #1 — surface the slot as
+    // `not_applicable` rather than `not_probed`, preserving the
+    // original probe error in the reason for forensic continuity.
+    // Only an *affirmative* TLS-1.3-not-supported signal triggers the
+    // downgrade; if the version probe itself failed (`error` set,
+    // `supported` indeterminate), the original reason stands so we
+    // don't quietly bury a real measurement failure.
+    let tls13_affirmatively_unsupported = results
+        .protocol_support
+        .iter()
+        .find(|p| p.version == TlsVersion::Tls13)
+        .map(|p| !p.supported && p.error.is_none())
+        .unwrap_or(false);
+    if tls13_affirmatively_unsupported {
+        for slot in [
+            &mut sr.tls1_3.psk_resumption_accepted,
+            &mut sr.tls1_3.early_data_accepted,
+        ] {
+            if matches!(slot.method, Method::NotProbed | Method::Error) {
+                let new_reason = match slot.reason.as_deref() {
+                    Some(r) => format!("tls13_not_supported_on_host:{r}"),
+                    None => "tls13_not_supported_on_host".to_string(),
+                };
+                *slot = ObservationBool::not_applicable(&new_reason);
             }
         }
     }
-    let _ = results;
-    // http-checks-only / probe didn't run → stable NotProbed shape.
+
+    let _ = (results, &sr);
+    sr
+}
+
+fn feature_disabled_session_resumption() -> crate::model::scan_result::SessionResumption {
+    use crate::model::scan_result::{
+        ObservationBool, SessionResumption, Tls12Resumption, Tls13Resumption,
+    };
     SessionResumption {
         tls1_2: Tls12Resumption {
             session_ticket_issued: ObservationBool::not_probed("feature_disabled"),
             ticket_lifetime_hint_secs: None,
             session_id_issued: ObservationBool::not_probed("feature_disabled"),
             ticket_rotated_across_connections: ObservationBool::not_probed("feature_disabled"),
+            session_ticket_resumption_accepted: ObservationBool::not_probed("feature_disabled"),
+            session_id_resumption_accepted: ObservationBool::not_probed("feature_disabled"),
         },
         tls1_3: Tls13Resumption {
             new_session_ticket_count: None,

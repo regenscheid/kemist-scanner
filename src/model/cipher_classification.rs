@@ -25,7 +25,7 @@
 //! deployments kemist probes.
 //!
 //! **Stability contract:** values listed here are permanent within
-//! schema v1.x. New values may be added; existing names are never
+//! schema v2.x. New values may be added; existing names are never
 //! renamed or removed. If a new cipher suite doesn't fit any current
 //! variant, [`classify`] returns [`Other`] and the exhaustive test
 //! at the bottom of this module prints the unmapped name so the

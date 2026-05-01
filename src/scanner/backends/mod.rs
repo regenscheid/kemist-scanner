@@ -43,8 +43,8 @@ pub use self::rustls::RustlsBackend;
 /// Not every probe family produces every variant — `NotProbed` is only
 /// emitted by group probes (aws-lc-rs doesn't ship some named groups;
 /// FFDHE at TLS 1.2 doesn't apply to ECDH codepoints), and
-/// `IgnoredGroupReturnedCustomPrime` is FFDHE-specific. Cipher probes
-/// use only `Supported` / `NotSupported` / `Error`.
+/// `IgnoredGroupReturnedDifferentPrime` is FFDHE-specific. Cipher probes
+/// use only `Supported` / `NotSupported` / `WireRejected` / `Error`.
 #[derive(Debug, Clone)]
 pub enum HandshakeOutcome {
     /// Handshake completed with the constrained offer.
@@ -52,6 +52,16 @@ pub enum HandshakeOutcome {
     /// Server evaluated the single-codepoint offer and rejected it —
     /// handshake alert or post-ClientHello reset.
     NotSupported,
+    /// Server rejected our offer at the wire level in a specific way
+    /// the probe wants to attribute. Verdict-equivalent to
+    /// `NotSupported` (`supported: false` in schema), but the `reason`
+    /// records *how* the server rejected — e.g.
+    /// `"server_rst_after_clienthello"` from raw-socket probes
+    /// (`raw::static_dh`) where the server tore the connection down
+    /// with a TCP RST instead of sending a TLS alert. Lets dashboards
+    /// distinguish "server slammed the door" from a vanilla
+    /// `handshake_failure` even though the verdict is the same.
+    WireRejected { reason: String },
     /// Probe itself failed (transport timeout, unexpected error).
     /// The string carries the scanner error category (and sometimes
     /// context) — format is caller-specific for backwards compatibility
@@ -62,9 +72,16 @@ pub enum HandshakeOutcome {
     NotProbed(String),
     /// FFDHE-only: server completed a DHE handshake but returned a
     /// prime that doesn't match the advertised codepoint — i.e. it
-    /// ignored our `supported_groups` offer. Meaningless for ECDH /
-    /// ML-KEM / cipher probes.
-    IgnoredGroupReturnedCustomPrime,
+    /// ignored our `supported_groups` offer. `returned_group` carries
+    /// the classification of the prime the server actually sent
+    /// (`"ffdhe2048"`, `"modp3072"`, `"custom"`, etc., per
+    /// `DhClassification::as_schema_str`); `returned_prime_bits` is the
+    /// modulus size in bits. Meaningless for ECDH / ML-KEM / cipher
+    /// probes.
+    IgnoredGroupReturnedDifferentPrime {
+        returned_group: String,
+        returned_prime_bits: u32,
+    },
 }
 
 /// Heuristic: does this `ScannerError` indicate the server evaluated

@@ -91,8 +91,8 @@ run against a vendored OpenSSL 3.5 LTS (`openssl-src = "=300.5.5"`).
 | TLS 1.3 EncryptedExtensions capture | `SSL_CTX_set_msg_callback` intercepts msg_type 8; parser extracts `record_size_limit` (RFC 8449) and `compress_certificate` (RFC 8879). See caveat below. | `tls.extensions.record_size_limit`, `tls.extensions.compress_certificate_algorithms` | [openssl/tls13_extensions.rs](../src/scanner/backends/openssl/tls13_extensions.rs) |
 | Delegated credentials — TLS 1.3 | Same msg-callback intercepts msg_type 11 (Certificate); parser walks the leaf CertificateEntry extensions (RFC 8446 §4.4.2) for ext 0x0022; parses RFC 9345 §4.1 DelegatedCredential header (`valid_time`, `expected_cert_verify_algorithm`). No signature validation, no wall-clock comparison | `tls.extensions.delegated_credentials.{valid_time_seconds, expected_cert_verify_algorithm}` with `delivery_path = "tls1_3_certificate_entry"` | [openssl/tls13_extensions.rs](../src/scanner/backends/openssl/tls13_extensions.rs) |
 | Session resumption — TLS 1.2 ticket + rotation | Two sequential TLS 1.2 handshakes with session cache mode `CLIENT`; compare `SSL_SESSION_get_id` across handshakes for rotation proxy | `tls.session_resumption.tls1_2.*` | [openssl/tickets.rs](../src/scanner/backends/openssl/tickets.rs) |
-| Ephemeral DH/ECDH key reuse (Raccoon signal) | Read earlier cipher_probes for a supported DHE / ECDHE suite; pin `DHE-RSA-AES128-GCM-SHA256` / `ECDHE-RSA-AES128-GCM-SHA256`; run two fresh TLS 1.2 handshakes per family with session caching disabled; pull the server's ephemeral public value via `SSL_get_peer_tmp_key` (DH `Y` via openssl-sys `DH_get0_key` + `BN_bn2bin`; ECDH point via `EcPoint::to_bytes` uncompressed); compare SHA-256 across the pair. No side-channel attempt | `tls.extensions.ephemeral_key_reuse.*` | [openssl/ephemeral_reuse.rs](../src/scanner/backends/openssl/ephemeral_reuse.rs) |
-| ROBOT / Bleichenbacher differential probe | Gated on `TLS_RSA_*` suites observed supported by the cipher probe. For each of five malformed PKCS#1 v1.5 `ClientKeyExchange` variants, runs a raw-socket TLS 1.2 handshake pinned to `TLS_RSA_WITH_AES_128_CBC_SHA` through `ServerHelloDone`, extracts the leaf RSA pubkey, `RSA_public_encrypt(Padding::NONE)`s the crafted plaintext, then sends `CKE + CCS + Finished` with the Finished crypto-correct under the variant's *intended* PMS — TLS 1.2 PRF (P_SHA256) master-secret derivation, key expansion, SHA-256 transcript hash of ClientHello+ServerHello+Certificate+ServerHelloDone+CKE, HMAC-SHA1 MAC-then-encrypt with AES-128-CBC + explicit IV + TLS CBC padding. Classifies response: alert category / TCP RST / timeout / graceful close / unexpected plaintext, with `elapsed_ms`. Emits the five-entry per-variant table; no `vulnerable` boolean | `tls.extensions.bleichenbacher_oracle_probe.*` | [raw/robot.rs](../src/scanner/raw/robot.rs) |
+| Ephemeral DH/ECDH key reuse (Raccoon signal) | Read earlier cipher_probes for a supported DHE / ECDHE suite; pin `DHE-RSA-AES128-GCM-SHA256` / `ECDHE-RSA-AES128-GCM-SHA256`; run two fresh TLS 1.2 handshakes per family with session caching disabled; pull the server's ephemeral public value via `SSL_get_peer_tmp_key` (DH `Y` via openssl-sys `DH_get0_key` + `BN_bn2bin`; ECDH point via `EcPoint::to_bytes` uncompressed); compare SHA-256 across the pair. No side-channel attempt | `tls.behavioral_probes.ephemeral_key_reuse.*` | [openssl/ephemeral_reuse.rs](../src/scanner/backends/openssl/ephemeral_reuse.rs) |
+| ROBOT / Bleichenbacher differential probe | Gated on `TLS_RSA_*` suites observed supported by the cipher probe. For each of five malformed PKCS#1 v1.5 `ClientKeyExchange` variants, runs a raw-socket TLS 1.2 handshake pinned to `TLS_RSA_WITH_AES_128_CBC_SHA` through `ServerHelloDone`, extracts the leaf RSA pubkey, `RSA_public_encrypt(Padding::NONE)`s the crafted plaintext, then sends `CKE + CCS + Finished` with the Finished crypto-correct under the variant's *intended* PMS — TLS 1.2 PRF (P_SHA256) master-secret derivation, key expansion, SHA-256 transcript hash of ClientHello+ServerHello+Certificate+ServerHelloDone+CKE, HMAC-SHA1 MAC-then-encrypt with AES-128-CBC + explicit IV + TLS CBC padding. Classifies response: alert category / TCP RST / timeout / graceful close / unexpected plaintext, with `elapsed_ms`. Emits the five-entry per-variant table; no `vulnerable` boolean | `tls.behavioral_probes.bleichenbacher_oracle_probe.*` | [raw/robot.rs](../src/scanner/raw/robot.rs) |
 | Signature-algorithm policy probe | Five constrained handshakes with `SSL_CTX_set1_sigalgs_list` pinned to each constraint family (`sha256_plus_only`, `ecdsa_only`, `rsa_pss_only`, `rsa_pkcs1_only`, `eddsa_only`); capture outcome + selected sigalg | `tls.signature_algorithm_policy_probe.*` | [openssl/sigalg_policy.rs](../src/scanner/backends/openssl/sigalg_policy.rs) |
 | Leaf fingerprint per sigalg probe | `SSL_get_peer_certificate` after each completed constrained handshake; SHA-256 of leaf DER (lowercase hex) + subject DN via x509-parser (matches `certificates.leaf.subject_dn` formatting). Two distinct fingerprints across the probe set → dual-cert deployment signal; scanner records, downstream compares | `tls.signature_algorithm_policy_probe.*.leaf_fingerprint_sha256`, `tls.signature_algorithm_policy_probe.*.leaf_subject_dn` | [openssl/sigalg_policy.rs](../src/scanner/backends/openssl/sigalg_policy.rs) |
 
@@ -101,12 +101,17 @@ Error classification for every OpenSSL probe flows through
 `tls_alert_<snake_name>` categories as the rustls path, so rule engines
 can key on alert categories without knowing which backend produced them.
 
-**FFDHE cross-check.** A TLS 1.2 FFDHE probe that completes a DHE
-handshake but returns a prime that doesn't match the advertised
-codepoint surfaces as
-`{supported: false, reason: "server_ignored_group_offer_returned_custom_prime"}`.
-Distinct from a plain `supported: false` — the server ignored
-`supported_groups` entirely.
+**FFDHE cross-check + cross-codepoint coherence.** A TLS 1.2 FFDHE
+probe that completes a DHE handshake but returns a prime that doesn't
+match the advertised codepoint surfaces as
+`{supported: false, reason: "server_does_not_honor_supported_groups", returned_group, returned_prime_bits}`.
+When *any* FFDHE TLS 1.2 row reports a direct mismatch the verdict
+propagates to every FFDHE TLS 1.2 row — including ones whose returned
+prime "matched" the codepoint, since that match is also consistent
+with the server serving a static prime regardless of `supported_groups`
+(the common pattern: an RFC 7919 prime configured as the static
+`ssl_dhparam`). Distinct from a plain `supported: false` — the server
+ignored `supported_groups` entirely.
 
 **CertificateRequest probe discipline.** The scanner never provisions
 a real client certificate. OpenSSL's default behavior with no cert
@@ -326,14 +331,14 @@ ServerHello bytes.
 | `tls.extensions.encrypt_then_mac` | 22 (RFC 7366) |
 | `tls.extensions.heartbeat_present` | 15 (RFC 6520) |
 | `tls.extensions.secure_renegotiation` | 0xff01 (RFC 5746 renegotiation_info) |
-| `tls.extensions.compression_offered` | compression_method byte in ServerHello |
+| `tls.behavioral_probes.compression_offered` | compression_method byte in ServerHello |
 | `tls.extensions.sct.delivery_paths` (tls_extension) | 18 (signed_certificate_timestamp) |
 | `tls.extensions.truncated_hmac` | 4 (RFC 6066 §7 — deprecated) |
 | `tls.extensions.npn` | 13172 (Google pre-ALPN, deprecated) |
 | `tls.extensions.supported_point_formats_echoed` | 11 (RFC 4492 §5.1.2) — parsed canonical names |
 | `tls.extensions.max_fragment_length` | 1 (RFC 6066 §4) — server-echoed code mapped to `2^9`..`2^12` |
-| `tls.extensions.grease_echoed` | RFC 8701 conformance — ClientHello injects a GREASE ext codepoint (`0x0A0A`); probe walks ServerHello extensions looking for any echoed GREASE value |
-| `tls.extensions.hello_retry_request` | RFC 8446 §4.1.3 — dedicated TLS 1.3 probe with empty `key_share`; ServerHello random compared to the HRR sentinel (`cf21ad74…a8339c`, SHA-256 of `"HelloRetryRequest"`) |
+| `tls.behavioral_probes.grease_echoed` | RFC 8701 conformance — ClientHello injects a GREASE ext codepoint (`0x0A0A`); probe walks ServerHello extensions looking for any echoed GREASE value |
+| `tls.behavioral_probes.hello_retry_request` | RFC 8446 §4.1.3 — dedicated TLS 1.3 probe with empty `key_share`; ServerHello random compared to the HRR sentinel (`cf21ad74…a8339c`, SHA-256 of `"HelloRetryRequest"`) |
 | `tls.extensions.delegated_credentials` (TLS 1.2 path, presence only) | 0x0022 (RFC 9345) — ClientHello offers ext 0x0022 with a SignatureSchemeList; DC-supporting servers echo an empty ext 0x0022 in ServerHello. TLS 1.3 detail fields come from a separate Certificate-message observation (see OpenSSL backend table above) |
 | `tls.downgrade_protection.tls13_downgrade_sentinel` | Last 8 bytes of ServerRandom per RFC 8446 §4.1.3 |
 

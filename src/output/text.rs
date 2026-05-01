@@ -37,6 +37,8 @@ pub fn render(r: &ScanResult) {
     println!();
     render_extensions(r);
     println!();
+    render_behavioral_probes(r);
+    println!();
     render_sni_behavior(r);
     if let Some(http) = &r.http {
         if http.enabled {
@@ -187,7 +189,7 @@ fn render_groups(r: &ScanResult) {
         }
     }
     // TLS 1.2 — FFDHE only. This is where the FFDHE cross-check
-    // finding (`server_ignored_group_offer_returned_custom_prime`)
+    // finding (`server_does_not_honor_supported_groups`)
     // surfaces, handled inside print_group.
     if !g.tls1_2.is_empty() {
         println!("  {}:", "TLS 1.2".bold());
@@ -386,9 +388,6 @@ fn render_extensions(r: &ScanResult) {
     if !ext.alpn_offered.is_empty() {
         kv("alpn_offered", &ext.alpn_offered.join(", "));
     }
-    if !ext.compression_offered.is_empty() {
-        kv("compression", &ext.compression_offered.join(", "));
-    }
     if !ext.sct.delivery_paths.is_empty() {
         kv(
             "sct",
@@ -427,6 +426,38 @@ fn render_extensions(r: &ScanResult) {
         };
         println!("  {:<22} {}", "tls13_downgrade_sentinel:", colored);
     }
+}
+
+/// Render `tls.behavioral_probes` — vulnerability probes plus
+/// non-extension handshake-time observations. Schema v2.0 split this
+/// out of `tls.extensions` because none of these are TLS extensions
+/// in the RFC 5246 §7.4.1.4 / RFC 8446 §4.2 sense.
+fn render_behavioral_probes(r: &ScanResult) {
+    let bp = &r.tls.behavioral_probes;
+    section("Behavioral probes");
+    print_obs_bool("heartbleed_echo", &bp.heartbeat_echoes_oversized_payload);
+    if !bp.compression_offered.is_empty() {
+        kv("compression_methods", &bp.compression_offered.join(", "));
+    }
+    print_obs_bool("grease_echoed", &bp.grease_echoed);
+    print_obs_bool("hello_retry_request", &bp.hello_retry_request);
+    // ephemeral_key_reuse + bleichenbacher_oracle_probe are
+    // structured observations rather than ObservationBool — they
+    // already render through `render_legacy_probes` and the JSON
+    // output. Surface a one-line summary here so a reader of the
+    // text output sees them grouped under the right banner.
+    let dhe = &bp.ephemeral_key_reuse.dhe_public_reused_across_connections;
+    let ecdhe = &bp
+        .ephemeral_key_reuse
+        .ecdhe_public_reused_across_connections;
+    print_obs_bool("dhe_ephemeral_reuse", dhe);
+    print_obs_bool("ecdhe_ephemeral_reuse", ecdhe);
+    let robot_method = method_label(&bp.bleichenbacher_oracle_probe.method);
+    println!(
+        "  {:<22} {}",
+        "robot_probe:",
+        robot_method.to_string().yellow()
+    );
 }
 
 /// Render the OpenSSL-backed probe sections that don't fold into
@@ -535,6 +566,14 @@ fn render_session_resumption(sr: &crate::model::scan_result::SessionResumption) 
     print_obs_bool(
         "tls1_2.ticket_rotated_across_connections",
         &sr.tls1_2.ticket_rotated_across_connections,
+    );
+    print_obs_bool(
+        "tls1_2.session_ticket_resumption_accepted",
+        &sr.tls1_2.session_ticket_resumption_accepted,
+    );
+    print_obs_bool(
+        "tls1_2.session_id_resumption_accepted",
+        &sr.tls1_2.session_id_resumption_accepted,
     );
 }
 
@@ -870,13 +909,14 @@ fn is_weak_cipher_name(name: &str) -> bool {
 
 fn print_group(name: &str, obs: &GroupObservation) {
     // Misconfig finding carried in the reason string for TLS 1.2 FFDHE
-    // entries where the server ignored our codepoint and returned a
-    // custom prime. Surface with a red `!` glyph + yellow callout so
-    // a reader doesn't parse it as "merely not supported."
+    // entries where cross-codepoint coherence determined the server
+    // doesn't honor `supported_groups`. Surface with a red `!` glyph +
+    // yellow callout so a reader doesn't parse it as "merely not
+    // supported."
     let ignored_offer = obs
         .reason
         .as_deref()
-        .map(|r| r == "server_ignored_group_offer_returned_custom_prime")
+        .map(|r| r == "server_does_not_honor_supported_groups")
         .unwrap_or(false);
 
     let (glyph, name_style) = match (obs.supported, &obs.method, ignored_offer) {
@@ -902,7 +942,24 @@ fn print_group(name: &str, obs: &GroupObservation) {
     });
 
     let tail = if ignored_offer {
-        format!("  [{}]", "server_ignored_offer".yellow())
+        // Render returned-prime evidence inline: "server returned
+        // ffdhe2048" or "server returned custom (1024 bits)" so the
+        // reader sees both the verdict and the substituted prime
+        // without consulting the JSON.
+        let returned = match (&obs.returned_group, obs.returned_prime_bits) {
+            (Some(g), Some(bits)) if g == "custom" => format!("custom ({bits}-bit)"),
+            (Some(g), _) => g.clone(),
+            (None, _) => String::new(),
+        };
+        if returned.is_empty() {
+            format!("  [{}]", "server_ignores_supported_groups".yellow())
+        } else {
+            format!(
+                "  [{}: {}]",
+                "server_ignores_supported_groups".yellow(),
+                format!("returned {}", returned).dimmed()
+            )
+        }
     } else {
         match (&obs.method, &obs.reason) {
             (Method::NotProbed, Some(r)) => {
