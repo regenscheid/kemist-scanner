@@ -112,7 +112,7 @@ fn empty_fixture_record_matches_schema_v1() {
             eprintln!("schema error at {}: {}", e.instance_path, e);
         }
         panic!(
-            "ScanResult failed schema v1 validation with {} error(s)",
+            "ScanResult failed schema validation with {} error(s)",
             errors.len()
         );
     }
@@ -765,7 +765,10 @@ fn ffdhe_cross_check_reason_surfaces_in_output() {
         tls12.get("reason").unwrap().as_str(),
         Some("server_does_not_honor_supported_groups")
     );
-    assert_eq!(tls12.get("returned_group").unwrap().as_str(), Some("custom"));
+    assert_eq!(
+        tls12.get("returned_group").unwrap().as_str(),
+        Some("custom")
+    );
     assert_eq!(
         tls12.get("returned_prime_bits").unwrap().as_u64(),
         Some(1024)
@@ -835,7 +838,10 @@ fn ffdhe_cross_codepoint_coherence_downgrades_self_match() {
         two.get("reason").unwrap().as_str(),
         Some("server_does_not_honor_supported_groups")
     );
-    assert_eq!(two.get("returned_group").unwrap().as_str(), Some("ffdhe2048"));
+    assert_eq!(
+        two.get("returned_group").unwrap().as_str(),
+        Some("ffdhe2048")
+    );
     assert_eq!(two.get("returned_prime_bits").unwrap().as_u64(), Some(2048));
 
     // ffdhe3072 row carries the original mismatch evidence.
@@ -1345,7 +1351,9 @@ fn hrr_keeps_not_probed_when_tls13_probe_inconclusive() {
 #[cfg(feature = "legacy-probes")]
 #[test]
 fn session_resumption_tls13_renders_not_applicable_when_tls13_unsupported() {
-    use kemist::model::scan_result::{ObservationBool, SessionResumption, Tls12Resumption, Tls13Resumption};
+    use kemist::model::scan_result::{
+        ObservationBool, SessionResumption, Tls12Resumption, Tls13Resumption,
+    };
     use kemist::scanner::openssl::OpensslObservations;
 
     let mut results = fixture_results();
@@ -1422,7 +1430,10 @@ fn session_resumption_tls13_renders_not_applicable_when_tls13_unsupported() {
     let session_ticket = value
         .pointer("/tls/session_resumption/tls1_2/session_ticket_issued")
         .expect("tls1_2 session_ticket_issued slot present");
-    assert_eq!(session_ticket.get("method").unwrap().as_str(), Some("probe"));
+    assert_eq!(
+        session_ticket.get("method").unwrap().as_str(),
+        Some("probe")
+    );
     assert_eq!(session_ticket.get("value").unwrap().as_bool(), Some(true));
 }
 
@@ -1433,7 +1444,9 @@ fn session_resumption_tls13_renders_not_applicable_when_tls13_unsupported() {
 #[cfg(feature = "legacy-probes")]
 #[test]
 fn session_resumption_keeps_not_probed_when_tls13_probe_inconclusive() {
-    use kemist::model::scan_result::{ObservationBool, SessionResumption, Tls12Resumption, Tls13Resumption};
+    use kemist::model::scan_result::{
+        ObservationBool, SessionResumption, Tls12Resumption, Tls13Resumption,
+    };
     use kemist::scanner::openssl::OpensslObservations;
 
     let mut results = fixture_results();
@@ -1456,9 +1469,7 @@ fn session_resumption_keeps_not_probed_when_tls13_probe_inconclusive() {
                 ticket_lifetime_hint_secs: None,
                 session_id_issued: ObservationBool::not_probed("handshake_failed"),
                 ticket_rotated_across_connections: ObservationBool::not_probed("handshake_failed"),
-                session_ticket_resumption_accepted: ObservationBool::not_probed(
-                    "handshake_failed",
-                ),
+                session_ticket_resumption_accepted: ObservationBool::not_probed("handshake_failed"),
                 session_id_resumption_accepted: ObservationBool::not_probed("handshake_failed"),
             },
             tls1_3: Tls13Resumption {

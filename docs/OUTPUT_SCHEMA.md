@@ -1,4 +1,4 @@
-# kemist output schema v1
+# kemist output schema v2
 
 Formal contract: [`schemas/output-v1.json`](../schemas/output-v1.json).
 This document is the human-readable field reference. Every emitted JSON
@@ -183,7 +183,7 @@ Values: `rsa_kex`, `dhe_aead`, `dhe_cbc`, `ecdhe_aead`, `ecdhe_cbc`,
 `ecdhe_psk`, `rsa_psk`, `null_cipher`, `other`. Privacy-dominant
 concerns (`null_cipher`, `anon`, `export`) take precedence over the
 kx prefix. TLS 1.3 suites (`TLS13_*`) map to `ecdhe_aead`. Stability
-contract: values permanent within schema v1.x; new values may be
+contract: values permanent within schema v2.x; new values may be
 added. See the "Enum stability" section at the bottom.
 
 One entry per probed suite, partitioned by TLS version. Suites outside
@@ -824,7 +824,7 @@ that want to aggregate across alert types should match on the
 ## Enum stability
 
 The schema pins several fields to string enums. All values listed
-below are **permanent within schema v1.x** — never renamed, never
+below are **permanent within schema v2.x** — never renamed, never
 removed. New values may be added in minor-version bumps; consumers
 **MUST** tolerate unknown values gracefully rather than crashing or
 rejecting the record.

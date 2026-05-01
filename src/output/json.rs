@@ -1,4 +1,4 @@
-//! JSON emission for schema v1.
+//! JSON emission for schema v2.
 //!
 //! Converts internal `ScanResults` (probe data) into the
 //! canonical `ScanResult` shape defined in [`crate::model::scan_result`] and
@@ -22,7 +22,7 @@ use crate::model::scan_result::{
 use crate::model::scan_result::{ClientAuthCaDn, ClientAuthOidFilter};
 use crate::scanner::ScanResults;
 
-/// Inputs that the scanner does not yet capture but that schema v1 requires.
+/// Inputs that the scanner does not yet capture but that schema v2 requires.
 /// Supplied by `main.rs` around the `SslScanner::scan()` call.
 pub struct JsonEmitContext {
     pub host: String,
@@ -642,7 +642,11 @@ fn merge_openssl_kx_groups(results: &ScanResults, out: &mut TlsGroups) {
          -> Option<GroupObservation> {
             Some(match o {
                 HandshakeOutcome::Supported => {
-                    match (host_ignores_supported_groups, ffdhe_self_group, ffdhe_self_bits) {
+                    match (
+                        host_ignores_supported_groups,
+                        ffdhe_self_group,
+                        ffdhe_self_bits,
+                    ) {
                         // FFDHE TLS 1.2 self-match downgraded by
                         // cross-codepoint evidence. The server
                         // returned the codepoint's expected prime, so
@@ -650,9 +654,7 @@ fn merge_openssl_kx_groups(results: &ScanResults, out: &mut TlsGroups) {
                         (true, Some(self_group), Some(self_bits)) => GroupObservation {
                             supported: Some(false),
                             method: Method::Probe,
-                            reason: Some(
-                                "server_does_not_honor_supported_groups".to_string(),
-                            ),
+                            reason: Some("server_does_not_honor_supported_groups".to_string()),
                             iana_code: Some(iana.to_string()),
                             provider: Some("openssl".to_string()),
                             returned_group: Some(self_group.to_string()),

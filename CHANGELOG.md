@@ -6,6 +6,10 @@ numbers follow [semver](https://semver.org/).
 
 ## [Unreleased]
 
+(no changes yet)
+
+## [0.4.0] — 2026-04-30
+
 Schema v2.0. One breaking restructure (split `tls.extensions`),
 several signal-quality fixes that preserve schema shape, plus two
 new functional probe slots that match what ssllabs reports for the

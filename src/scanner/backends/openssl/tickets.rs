@@ -112,15 +112,27 @@ fn probe_tls12_blocking(
     };
 
     // ----- Pair 1: issuance + rotation -----
-    let first =
-        match single_tls12_handshake(&issuance_ctx, None, target, hostname, connect_timeout, handshake_timeout) {
-            Ok(s) => s,
-            Err(reason) => {
-                return handshake_failure(&format!("handshake:{reason}"));
-            }
-        };
-    let second_result =
-        single_tls12_handshake(&issuance_ctx, None, target, hostname, connect_timeout, handshake_timeout);
+    let first = match single_tls12_handshake(
+        &issuance_ctx,
+        None,
+        target,
+        hostname,
+        connect_timeout,
+        handshake_timeout,
+    ) {
+        Ok(s) => s,
+        Err(reason) => {
+            return handshake_failure(&format!("handshake:{reason}"));
+        }
+    };
+    let second_result = single_tls12_handshake(
+        &issuance_ctx,
+        None,
+        target,
+        hostname,
+        connect_timeout,
+        handshake_timeout,
+    );
 
     let session_ticket_issued = ObservationBool::probe(first.has_ticket_hint);
     let session_id_issued = ObservationBool::probe(first.session_id_nonempty);
@@ -182,13 +194,19 @@ fn probe_resumption_pair(
         Err(e) => return ObservationBool::error(&format!("ctx_build:{e}")),
     };
 
-    let first =
-        match single_tls12_handshake(&ctx, None, target, hostname, connect_timeout, handshake_timeout) {
-            Ok(s) => s,
-            Err(reason) => {
-                return ObservationBool::not_probed(&format!("first_handshake:{reason}"));
-            }
-        };
+    let first = match single_tls12_handshake(
+        &ctx,
+        None,
+        target,
+        hostname,
+        connect_timeout,
+        handshake_timeout,
+    ) {
+        Ok(s) => s,
+        Err(reason) => {
+            return ObservationBool::not_probed(&format!("first_handshake:{reason}"));
+        }
+    };
     let Some(prev_session) = first.session else {
         return ObservationBool::not_applicable("no_session_issued_in_first_handshake");
     };

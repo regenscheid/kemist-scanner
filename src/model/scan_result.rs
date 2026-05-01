@@ -1,6 +1,8 @@
-//! kemist output schema v1.
+//! kemist output schema v2.
 //!
 //! See docs/OUTPUT_SCHEMA.md and schemas/output-v1.json for the formal contract.
+//! (Filename retained at v1 for URL stability across the v1→v2 cut; the
+//! `$id` and `title` inside the schema document carry the v2 marker.)
 //!
 //! Envelope rule: probe-derived tri-state observations carry `{value, method, reason?}`.
 //! Stable metadata (schema_version, target, fingerprints, IANA codepoints, etc.) is

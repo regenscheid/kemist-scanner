@@ -435,10 +435,7 @@ fn render_extensions(r: &ScanResult) {
 fn render_behavioral_probes(r: &ScanResult) {
     let bp = &r.tls.behavioral_probes;
     section("Behavioral probes");
-    print_obs_bool(
-        "heartbleed_echo",
-        &bp.heartbeat_echoes_oversized_payload,
-    );
+    print_obs_bool("heartbleed_echo", &bp.heartbeat_echoes_oversized_payload);
     if !bp.compression_offered.is_empty() {
         kv("compression_methods", &bp.compression_offered.join(", "));
     }

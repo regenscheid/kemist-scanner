@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/regenscheid/kemist-scanner/schemas/output-v1.json",
-  "title": "kemist scan result (schema v1)",
+  "title": "kemist scan result (schema v2)",
   "description": "One record per scanned target. See docs/OUTPUT_SCHEMA.md for field-by-field semantics. Tri-state: {value: false, method: probe} is a real negative, {value: null, method: not_probed|not_applicable|error} is an absence of signal — downstream rule engines MUST distinguish these.",
   "type": "object",
   "required": [
@@ -729,7 +729,7 @@
         "provider": { "type": "string", "enum": ["aws_lc_rs", "openssl", "raw_socket"] },
         "classification": {
           "type": "string",
-          "description": "Kx + privacy family per src/model/cipher_classification.rs. Values are stable within schema v1.x; new values may be added.",
+          "description": "Kx + privacy family per src/model/cipher_classification.rs. Values are stable within schema v2.x; new values may be added.",
           "enum": [
             "rsa_kex",
             "dhe_aead",
