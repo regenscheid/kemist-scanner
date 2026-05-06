@@ -12,6 +12,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+use crate::model::cert::CertificateInfo;
 pub use crate::model::errors::ScannerError;
 
 pub const SCHEMA_VERSION: &str = "2.0.0";
@@ -278,6 +279,12 @@ pub struct ConstrainedProbeResult {
     /// `leaf_fingerprint_sha256`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub leaf_subject_dn: Option<String>,
+    /// Parsed certificate chain observed on this constrained probe.
+    /// Internal-only: the JSON emitter deduplicates these into
+    /// `certificates.alternates[]` rather than repeating full chains
+    /// under every sigalg probe row.
+    #[serde(skip_serializing)]
+    pub cert_chain: Vec<CertificateInfo>,
 }
 
 impl Default for ConstrainedProbeResult {
@@ -290,6 +297,7 @@ impl Default for ConstrainedProbeResult {
             reason: None,
             leaf_fingerprint_sha256: None,
             leaf_subject_dn: None,
+            cert_chain: Vec::new(),
         }
     }
 }
@@ -1021,6 +1029,19 @@ pub struct ClientAuthRequestEntry {
 
 #[derive(Serialize, Debug, Clone)]
 pub struct Certificates {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub leaf: Option<CertificateFacts>,
+    pub chain: Vec<CertificateFacts>,
+    pub chain_length: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub alternates: Vec<CertificateAlternate>,
+}
+
+#[derive(Serialize, Debug, Clone)]
+pub struct CertificateAlternate {
+    /// Probe paths that observed this alternate leaf/chain. Stable
+    /// strings such as `signature_algorithm_policy.rsa_pss_only`.
+    pub observed_via: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub leaf: Option<CertificateFacts>,
     pub chain: Vec<CertificateFacts>,

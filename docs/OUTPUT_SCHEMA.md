@@ -605,9 +605,19 @@ RFC 7677 / RFC 5802 SCRAM channel-binding requirements.
 {
   leaf?: CertificateFacts,
   chain: [CertificateFacts...],
-  chain_length: int
+  chain_length: int,
+  alternates?: [CertificateAlternate...]
 }
 ```
+
+`alternates` contains full chains observed by constrained probe
+handshakes when they differ from the primary characterization leaf,
+deduplicated by leaf SHA-256 fingerprint. Today this is populated from
+the OpenSSL signature-algorithm policy probes, with `observed_via`
+values such as `signature_algorithm_policy.rsa_pss_only`. Validation
+and revocation fields still describe only the primary chain.
+
+`CertificateAlternate = {observed_via: string[], leaf?: CertificateFacts, chain: CertificateFacts[], chain_length: int}`.
 
 `CertificateFacts`:
 

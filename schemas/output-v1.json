@@ -467,7 +467,12 @@
       "properties": {
         "leaf": { "$ref": "#/$defs/certificateFacts" },
         "chain": { "type": "array", "items": { "$ref": "#/$defs/certificateFacts" } },
-        "chain_length": { "type": "integer", "minimum": 0 }
+        "chain_length": { "type": "integer", "minimum": 0 },
+        "alternates": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/certificateAlternate" },
+          "description": "Alternate certificate chains observed by constrained probe handshakes, deduplicated by leaf SHA-256 fingerprint. The primary characterization chain remains in leaf/chain; validation and revocation observations currently apply only to the primary chain."
+        }
       },
       "additionalProperties": false
     },
@@ -907,6 +912,21 @@
           },
           "additionalProperties": false
         }
+      },
+      "additionalProperties": false
+    },
+    "certificateAlternate": {
+      "type": "object",
+      "required": ["observed_via", "chain", "chain_length"],
+      "properties": {
+        "observed_via": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Probe paths that observed this alternate leaf/chain, for example signature_algorithm_policy.rsa_pss_only."
+        },
+        "leaf": { "$ref": "#/$defs/certificateFacts" },
+        "chain": { "type": "array", "items": { "$ref": "#/$defs/certificateFacts" } },
+        "chain_length": { "type": "integer", "minimum": 0 }
       },
       "additionalProperties": false
     },

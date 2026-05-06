@@ -90,6 +90,44 @@ fn fixture_ctx() -> JsonEmitContext {
     }
 }
 
+#[cfg(feature = "legacy-probes")]
+fn fixture_cert(
+    fingerprint_sha256: &str,
+    subject: &str,
+    wire_position: u32,
+) -> kemist::model::cert::CertificateInfo {
+    kemist::model::cert::CertificateInfo {
+        subject: subject.to_string(),
+        issuer: "CN=Test Issuer, O=Test, C=US".to_string(),
+        serial_number: format!("01{:02x}", wire_position),
+        not_before: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
+        not_after: Utc.with_ymd_and_hms(2027, 1, 1, 0, 0, 0).unwrap(),
+        signature_algorithm: "sha256WithRSAEncryption".to_string(),
+        signature_algorithm_oid: "1.2.840.113549.1.1.11".to_string(),
+        signature_algorithm_structured: kemist::model::scan_result::SignatureAlgorithmStructured {
+            hash: Some("sha256".to_string()),
+            algorithm: "rsa".to_string(),
+            parameters: None,
+        },
+        pqc_signature_family: None,
+        public_key_algorithm: "RSA".to_string(),
+        public_key_size: 2048,
+        rsa_exponent: Some(65_537),
+        ecc_curve_name: None,
+        ecc_curve_oid: None,
+        ecc_key_strength: None,
+        san: vec!["example.test".to_string()],
+        is_self_signed: false,
+        is_expired: false,
+        days_until_expiry: 365,
+        fingerprint_sha256: fingerprint_sha256.to_string(),
+        fingerprint_sha1: "1".repeat(40),
+        embedded_scts: 0,
+        wire_position,
+        extensions: kemist::model::cert_extensions::CertExtensions::default(),
+    }
+}
+
 fn load_schema() -> serde_json::Value {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("schemas/output-v1.json");
     let bytes = std::fs::read(&path).expect("schemas/output-v1.json must be present");
@@ -188,6 +226,83 @@ fn error_category_strings_are_canonical() {
 // against `schemas/output-v1.json`, plus that every new `tls.*` section
 // actually carries the values the builders produced.
 // --------------------------------------------------------------------
+
+#[cfg(feature = "legacy-probes")]
+#[test]
+fn sigalg_policy_alternate_certificate_chains_surface_once() {
+    use kemist::model::scan_result::{
+        ConstrainedProbeResult, Method as ScanMethod, SigalgOutcome, SignatureAlgorithmPolicyProbe,
+    };
+    use kemist::scanner::openssl::OpensslObservations;
+
+    let primary_fp = "a".repeat(64);
+    let alternate_fp = "b".repeat(64);
+    let primary_chain = vec![fixture_cert(&primary_fp, "CN=ecdsa.example.test", 0)];
+    let alternate_chain = vec![fixture_cert(&alternate_fp, "CN=rsa.example.test", 0)];
+
+    let complete =
+        |sigalg: &str, chain: Vec<kemist::model::cert::CertificateInfo>| ConstrainedProbeResult {
+            outcome: SigalgOutcome::HandshakeComplete,
+            selected_sigalg: Some(sigalg.to_string()),
+            method: ScanMethod::Probe,
+            leaf_fingerprint_sha256: chain.first().map(|c| c.fingerprint_sha256.clone()),
+            leaf_subject_dn: chain.first().map(|c| c.subject.clone()),
+            cert_chain: chain,
+            ..Default::default()
+        };
+
+    let mut results = fixture_results();
+    results.certificate_chain = primary_chain.clone();
+    results.openssl_observations = Some(OpensslObservations {
+        sigalg_policy: Some(SignatureAlgorithmPolicyProbe {
+            sha256_plus_only: complete("ecdsa_secp256r1_sha256", primary_chain.clone()),
+            ecdsa_only: complete("ecdsa_secp256r1_sha256", primary_chain),
+            rsa_pss_only: complete("rsa_pss_rsae_sha256", alternate_chain.clone()),
+            rsa_pkcs1_only: complete("rsa_pkcs1_sha256", alternate_chain),
+            eddsa_only: ConstrainedProbeResult {
+                outcome: SigalgOutcome::HandshakeFailure,
+                method: ScanMethod::Probe,
+                reason: Some("tls_alert_handshake_failure".to_string()),
+                alert: Some("tls_alert_handshake_failure".to_string()),
+                ..Default::default()
+            },
+        }),
+        ..Default::default()
+    });
+
+    let record = build_scan_result(&results, &fixture_ctx());
+    assert_eq!(record.certificates.alternates.len(), 1);
+    let alternate = &record.certificates.alternates[0];
+    assert_eq!(alternate.chain_length, 1);
+    assert_eq!(
+        alternate
+            .leaf
+            .as_ref()
+            .map(|leaf| leaf.fingerprint_sha256.as_str()),
+        Some(alternate_fp.as_str())
+    );
+    assert_eq!(
+        alternate.observed_via,
+        vec![
+            "signature_algorithm_policy.rsa_pss_only".to_string(),
+            "signature_algorithm_policy.rsa_pkcs1_only".to_string(),
+        ]
+    );
+
+    let record_value = serde_json::to_value(&record).expect("serialize");
+    let schema_value = load_schema();
+    let validator = jsonschema::validator_for(&schema_value).expect("schema compiles");
+    let errors: Vec<_> = validator.iter_errors(&record_value).collect();
+    if !errors.is_empty() {
+        for e in &errors {
+            eprintln!("schema error at {}: {}", e.instance_path, e);
+        }
+        panic!(
+            "ScanResult failed schema validation with {} error(s)",
+            errors.len()
+        );
+    }
+}
 
 #[cfg(feature = "legacy-probes")]
 #[test]
@@ -407,6 +522,7 @@ fn fully_populated_openssl_observations_match_schema_v1() {
         reason: None,
         leaf_fingerprint_sha256: Some(fp.to_string()),
         leaf_subject_dn: Some("CN=example.com, O=Test, C=US".to_string()),
+        ..Default::default()
     };
     let sigalg_policy = SignatureAlgorithmPolicyProbe {
         sha256_plus_only: complete("ecdsa_secp256r1_sha256", &ecdsa_leaf_fp),
@@ -420,6 +536,7 @@ fn fully_populated_openssl_observations_match_schema_v1() {
             reason: Some("tls_alert_handshake_failure".to_string()),
             leaf_fingerprint_sha256: None,
             leaf_subject_dn: None,
+            ..Default::default()
         },
         eddsa_only: ConstrainedProbeResult {
             outcome: SigalgOutcome::HandshakeFailure,
@@ -429,6 +546,7 @@ fn fully_populated_openssl_observations_match_schema_v1() {
             reason: Some("tls_alert_handshake_failure".to_string()),
             leaf_fingerprint_sha256: None,
             leaf_subject_dn: None,
+            ..Default::default()
         },
     };
 

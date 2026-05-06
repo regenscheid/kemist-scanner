@@ -561,6 +561,7 @@ fn sigalg_constrained_to_handshake_result(
     let mut hr = HandshakeResult::outcome_only(outcome);
     hr.alert = r.alert;
     hr.ske_signature_name = r.selected_sigalg;
+    hr.cert_chain = r.cert_chain;
     hr
 }
 

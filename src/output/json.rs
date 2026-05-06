@@ -6,17 +6,19 @@
 //! scanner measured" to "what the JSON contract says."
 
 use chrono::{DateTime, Utc};
+#[cfg(feature = "legacy-probes")]
+use std::collections::BTreeMap;
 
 use crate::model::cert::CertificateInfo;
 use crate::model::errors::ScannerError;
 use crate::model::protocol::TlsVersion;
 use crate::model::scan_result::{
-    Capabilities, CertificateFacts, Certificates, CipherSuiteEntry, ClientAuthRequestEntry,
-    DhParametersObservation, DowngradeSignaling, GroupObservation, Hsts, Http, Method,
-    ObservationBool, OcspStapling, PublicKey, RenegotiationBehavior, ScanMetadata, ScanResult,
-    Scanner as ScannerMeta, SctObservation, SecurityTxt, SkeSigObservation, SniBehavior, Tls,
-    TlsCipherSuites, TlsExtensions, TlsGroups, TlsNegotiated, TlsVersionsOffered, Validation,
-    VersionOffered, SCHEMA_VERSION,
+    Capabilities, CertificateAlternate, CertificateFacts, Certificates, CipherSuiteEntry,
+    ClientAuthRequestEntry, DhParametersObservation, DowngradeSignaling, GroupObservation, Hsts,
+    Http, Method, ObservationBool, OcspStapling, PublicKey, RenegotiationBehavior, ScanMetadata,
+    ScanResult, Scanner as ScannerMeta, SctObservation, SecurityTxt, SkeSigObservation,
+    SniBehavior, Tls, TlsCipherSuites, TlsExtensions, TlsGroups, TlsNegotiated, TlsVersionsOffered,
+    Validation, VersionOffered, SCHEMA_VERSION,
 };
 #[cfg(feature = "legacy-probes")]
 use crate::model::scan_result::{ClientAuthCaDn, ClientAuthOidFilter};
@@ -1277,7 +1279,73 @@ fn build_certificates(results: &ScanResults) -> Certificates {
         leaf: facts.first().cloned(),
         chain: facts.clone(),
         chain_length: facts.len(),
+        alternates: build_alternate_certificates(results),
     }
+}
+
+#[cfg(feature = "legacy-probes")]
+fn build_alternate_certificates(results: &ScanResults) -> Vec<CertificateAlternate> {
+    let primary_leaf = results
+        .certificate_chain
+        .first()
+        .map(|c| c.fingerprint_sha256.as_str());
+    let Some(obs) = results.openssl_observations.as_ref() else {
+        return Vec::new();
+    };
+    let Some(policy) = obs.sigalg_policy.as_ref() else {
+        return Vec::new();
+    };
+
+    let probes = [
+        (
+            "signature_algorithm_policy.sha256_plus_only",
+            &policy.sha256_plus_only,
+        ),
+        ("signature_algorithm_policy.ecdsa_only", &policy.ecdsa_only),
+        (
+            "signature_algorithm_policy.rsa_pss_only",
+            &policy.rsa_pss_only,
+        ),
+        (
+            "signature_algorithm_policy.rsa_pkcs1_only",
+            &policy.rsa_pkcs1_only,
+        ),
+        ("signature_algorithm_policy.eddsa_only", &policy.eddsa_only),
+    ];
+
+    let mut by_leaf: BTreeMap<String, (Vec<String>, Vec<CertificateInfo>)> = BTreeMap::new();
+    for (via, probe) in probes {
+        let Some(leaf) = probe.cert_chain.first() else {
+            continue;
+        };
+        if Some(leaf.fingerprint_sha256.as_str()) == primary_leaf {
+            continue;
+        }
+        let entry = by_leaf
+            .entry(leaf.fingerprint_sha256.clone())
+            .or_insert_with(|| (Vec::new(), probe.cert_chain.clone()));
+        if !entry.0.iter().any(|v| v == via) {
+            entry.0.push(via.to_string());
+        }
+    }
+
+    by_leaf
+        .into_values()
+        .map(|(observed_via, chain)| {
+            let facts: Vec<CertificateFacts> = chain.iter().map(cert_to_facts).collect();
+            CertificateAlternate {
+                observed_via,
+                leaf: facts.first().cloned(),
+                chain: facts.clone(),
+                chain_length: facts.len(),
+            }
+        })
+        .collect()
+}
+
+#[cfg(not(feature = "legacy-probes"))]
+fn build_alternate_certificates(_results: &ScanResults) -> Vec<CertificateAlternate> {
+    Vec::new()
 }
 
 /// Assemble the leaf's out-of-band revocation observations:
@@ -1749,12 +1817,9 @@ fn build_sigalg_policy(
     // resolving to the same not_probed reason.
     let slot = || ConstrainedProbeResult {
         outcome: SigalgOutcome::NotProbed,
-        selected_sigalg: None,
-        alert: None,
         method: Method::NotProbed,
         reason: Some(reason.to_string()),
-        leaf_fingerprint_sha256: None,
-        leaf_subject_dn: None,
+        ..Default::default()
     };
     SignatureAlgorithmPolicyProbe {
         sha256_plus_only: slot(),
