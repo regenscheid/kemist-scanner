@@ -210,12 +210,12 @@
               "type": "integer",
               "minimum": 0,
               "maximum": 65535,
-              "description": "RFC 8449 — observed in TLS 1.3 EncryptedExtensions. Populated when the OpenSSL-backed EE probe (feature `legacy-probes`) completed a TLS 1.3 handshake and the server advertised the extension."
+              "description": "RFC 8449 — observed in TLS 1.3 EncryptedExtensions. Current OpenSSL-backed probe can parse this extension when present, but cannot inject the required client offer for ext 28 in this build; conformant servers therefore usually omit it. Absence is not evidence that the server lacks record_size_limit support."
             },
             "compress_certificate_algorithms": {
               "type": "array",
               "items": { "type": "string" },
-              "description": "RFC 8879 — server-advertised certificate compression algorithms. Populated via the OpenSSL EncryptedExtensions probe."
+              "description": "RFC 8879 — server-advertised certificate compression algorithms. Current OpenSSL-backed probe can parse this extension when present, but cannot inject the required client offer for ext 27 in this build; conformant servers therefore usually omit it. An empty array is not evidence that the server lacks certificate compression support."
             },
             "delegated_credentials": {
               "type": "object",
