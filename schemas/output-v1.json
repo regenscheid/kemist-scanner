@@ -375,6 +375,7 @@
         },
         "renegotiation_behavior": {
           "type": "object",
+          "description": "OpenSSL-backed TLS 1.2 client-initiated renegotiation probe. kemist does not currently provoke or classify server-initiated renegotiation.",
           "required": ["method"],
           "properties": {
             "client_initiated_verdict": {
