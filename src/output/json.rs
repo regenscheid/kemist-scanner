@@ -1494,10 +1494,10 @@ fn build_fallback_scsv_enforced(results: &ScanResults) -> ObservationBool {
     #[cfg(feature = "legacy-probes")]
     {
         let Some(obs) = results.openssl_observations.as_ref() else {
-            return ObservationBool::not_probed("feature_disabled");
+            return ObservationBool::not_probed(legacy_probe_unavailable_reason(results));
         };
         let Some(scsv) = obs.fallback_scsv.as_ref() else {
-            return ObservationBool::not_probed("feature_disabled");
+            return ObservationBool::not_probed(legacy_probe_unavailable_reason(results));
         };
         match scsv.enforced {
             Some(true) => ObservationBool {
@@ -1593,10 +1593,10 @@ fn build_renegotiation_behavior(results: &ScanResults) -> RenegotiationBehavior 
     {
         use crate::scanner::openssl::renegotiation::RenegotiationVerdict;
         let Some(obs) = results.openssl_observations.as_ref() else {
-            return feature_disabled_reneg();
+            return legacy_unavailable_reneg(results);
         };
         let Some(ro) = obs.renegotiation.as_ref() else {
-            return feature_disabled_reneg();
+            return legacy_unavailable_reneg(results);
         };
         let (verdict, method) = match &ro.client_initiated_verdict {
             RenegotiationVerdict::ClientInitiatedAccepted => {
@@ -1623,11 +1623,21 @@ fn build_renegotiation_behavior(results: &ScanResults) -> RenegotiationBehavior 
     }
 }
 
+#[cfg(not(feature = "legacy-probes"))]
 fn feature_disabled_reneg() -> RenegotiationBehavior {
+    not_probed_reneg("feature_disabled")
+}
+
+#[cfg(feature = "legacy-probes")]
+fn legacy_unavailable_reneg(results: &ScanResults) -> RenegotiationBehavior {
+    not_probed_reneg(legacy_probe_unavailable_reason(results))
+}
+
+fn not_probed_reneg(reason: &str) -> RenegotiationBehavior {
     RenegotiationBehavior {
         client_initiated_verdict: None,
         method: Method::NotProbed,
-        reason: Some("feature_disabled".to_string()),
+        reason: Some(reason.to_string()),
     }
 }
 
@@ -1640,10 +1650,10 @@ fn build_session_resumption(results: &ScanResults) -> crate::model::scan_result:
             if let Some(sr) = obs.session_resumption.as_ref() {
                 sr.clone()
             } else {
-                feature_disabled_session_resumption()
+                legacy_unavailable_session_resumption(results)
             }
         } else {
-            feature_disabled_session_resumption()
+            legacy_unavailable_session_resumption(results)
         }
     };
     #[cfg(not(feature = "legacy-probes"))]
@@ -1685,24 +1695,36 @@ fn build_session_resumption(results: &ScanResults) -> crate::model::scan_result:
     sr
 }
 
+#[cfg(not(feature = "legacy-probes"))]
 fn feature_disabled_session_resumption() -> crate::model::scan_result::SessionResumption {
+    not_probed_session_resumption("feature_disabled")
+}
+
+#[cfg(feature = "legacy-probes")]
+fn legacy_unavailable_session_resumption(
+    results: &ScanResults,
+) -> crate::model::scan_result::SessionResumption {
+    not_probed_session_resumption(legacy_probe_unavailable_reason(results))
+}
+
+fn not_probed_session_resumption(reason: &str) -> crate::model::scan_result::SessionResumption {
     use crate::model::scan_result::{
         ObservationBool, SessionResumption, Tls12Resumption, Tls13Resumption,
     };
     SessionResumption {
         tls1_2: Tls12Resumption {
-            session_ticket_issued: ObservationBool::not_probed("feature_disabled"),
+            session_ticket_issued: ObservationBool::not_probed(reason),
             ticket_lifetime_hint_secs: None,
-            session_id_issued: ObservationBool::not_probed("feature_disabled"),
-            ticket_rotated_across_connections: ObservationBool::not_probed("feature_disabled"),
-            session_ticket_resumption_accepted: ObservationBool::not_probed("feature_disabled"),
-            session_id_resumption_accepted: ObservationBool::not_probed("feature_disabled"),
+            session_id_issued: ObservationBool::not_probed(reason),
+            ticket_rotated_across_connections: ObservationBool::not_probed(reason),
+            session_ticket_resumption_accepted: ObservationBool::not_probed(reason),
+            session_id_resumption_accepted: ObservationBool::not_probed(reason),
         },
         tls1_3: Tls13Resumption {
             new_session_ticket_count: None,
             ticket_lifetime_secs: Vec::new(),
-            psk_resumption_accepted: ObservationBool::not_probed("feature_disabled"),
-            early_data_accepted: ObservationBool::not_probed("feature_disabled"),
+            psk_resumption_accepted: ObservationBool::not_probed(reason),
+            early_data_accepted: ObservationBool::not_probed(reason),
         },
     }
 }
@@ -1722,15 +1744,15 @@ fn build_sigalg_policy(
             }
         }
     }
-    let _ = results;
-    // feature_disabled fallback — stable shape with every slot
+    let reason = legacy_probe_unavailable_reason(results);
+    // unavailable fallback — stable shape with every slot
     // resolving to the same not_probed reason.
     let slot = || ConstrainedProbeResult {
         outcome: SigalgOutcome::NotProbed,
         selected_sigalg: None,
         alert: None,
         method: Method::NotProbed,
-        reason: Some("feature_disabled".to_string()),
+        reason: Some(reason.to_string()),
         leaf_fingerprint_sha256: None,
         leaf_subject_dn: None,
     };
@@ -1741,6 +1763,24 @@ fn build_sigalg_policy(
         rsa_pkcs1_only: slot(),
         eddsa_only: slot(),
     }
+}
+
+#[cfg(feature = "legacy-probes")]
+fn legacy_probe_unavailable_reason(results: &ScanResults) -> &'static str {
+    if results
+        .scan_errors
+        .iter()
+        .any(|e| e.category == "handshake_timeout" && e.context.starts_with("total_timeout "))
+    {
+        "total_timeout_exceeded"
+    } else {
+        "feature_disabled"
+    }
+}
+
+#[cfg(not(feature = "legacy-probes"))]
+fn legacy_probe_unavailable_reason(_results: &ScanResults) -> &'static str {
+    "feature_disabled"
 }
 
 fn build_client_auth_request(results: &ScanResults) -> Option<ClientAuthRequestEntry> {

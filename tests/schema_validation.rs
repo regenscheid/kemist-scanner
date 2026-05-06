@@ -992,6 +992,52 @@ fn legacy_probes_disabled_renders_empty_schema_sections() {
     }
 }
 
+#[cfg(feature = "legacy-probes")]
+#[test]
+fn legacy_probe_absence_after_total_timeout_uses_budget_reason() {
+    let mut results = fixture_results();
+    results.openssl_observations = None;
+    results.scan_errors.push(ScannerError::handshake_timeout(
+        "total_timeout 60s elapsed for www.amazon.com:443",
+    ));
+
+    let ctx = fixture_ctx();
+    let record = build_scan_result(&results, &ctx);
+    let value = serde_json::to_value(&record).expect("serialize");
+
+    let fallback = value
+        .pointer("/tls/downgrade_signaling/fallback_scsv_enforced")
+        .expect("fallback_scsv_enforced slot present");
+    assert_eq!(
+        fallback.get("reason").unwrap().as_str(),
+        Some("total_timeout_exceeded")
+    );
+
+    let reneg = value
+        .pointer("/tls/renegotiation_behavior")
+        .expect("renegotiation_behavior slot present");
+    assert_eq!(
+        reneg.get("reason").unwrap().as_str(),
+        Some("total_timeout_exceeded")
+    );
+
+    let session_ticket = value
+        .pointer("/tls/session_resumption/tls1_2/session_ticket_resumption_accepted")
+        .expect("session_ticket_resumption_accepted slot present");
+    assert_eq!(
+        session_ticket.get("reason").unwrap().as_str(),
+        Some("total_timeout_exceeded")
+    );
+
+    let sigalg = value
+        .pointer("/tls/signature_algorithm_policy_probe/sha256_plus_only")
+        .expect("sigalg probe slot present");
+    assert_eq!(
+        sigalg.get("reason").unwrap().as_str(),
+        Some("total_timeout_exceeded")
+    );
+}
+
 // --------------------------------------------------------------------
 // Schema ↔ Rust enum coverage.
 //
