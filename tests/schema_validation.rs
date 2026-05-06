@@ -284,12 +284,11 @@ fn fully_populated_openssl_observations_match_schema_v1() {
     // IgnoredGroupReturnedDifferentPrime, plus a non-FFDHE row demonstrating
     // an OpenSSL override of an aws-lc-rs `not_probed` slot.
     //
-    // The ffdhe2048 self-match here triggers the cross-codepoint
-    // coherence downgrade because the ffdhe3072 row carries
-    // `IgnoredGroupReturnedDifferentPrime` evidence — the JSON
-    // builder downgrades both rows to
-    // `reason: server_does_not_honor_supported_groups` with
-    // returned-prime evidence preserved.
+    // The ffdhe3072 mismatch here triggers the cross-codepoint
+    // coherence note. The ffdhe2048 self-match remains supported,
+    // but both rows carry `reason:
+    // server_does_not_honor_supported_groups` with returned-prime
+    // evidence preserved.
     let kx_group_probes = KxGroupProbeOutput {
         results: vec![
             KxGroupProbeResult {
@@ -776,15 +775,14 @@ fn ffdhe_cross_check_reason_surfaces_in_output() {
 }
 
 /// Cross-codepoint coherence: when one FFDHE row reports
-/// `IgnoredGroupReturnedDifferentPrime`, every FFDHE TLS 1.2 row
-/// (including a sibling that "matched" its own offer) gets downgraded
-/// to `supported: false` with the same explicit reason. The matched
-/// row's `returned_group` records the row's own group classification,
-/// since that is the prime the server returned in response to the
-/// offer.
+/// `IgnoredGroupReturnedDifferentPrime`, every FFDHE TLS 1.2 row gets
+/// the same explicit reason. A sibling that matched its own offer
+/// remains `supported: true`; its `returned_group` records the row's
+/// own group classification, since that is the prime the server
+/// returned in response to the offer.
 #[cfg(feature = "legacy-probes")]
 #[test]
-fn ffdhe_cross_codepoint_coherence_downgrades_self_match() {
+fn ffdhe_cross_codepoint_coherence_notes_self_match() {
     use kemist::scanner::backends::HandshakeOutcome;
     use kemist::scanner::openssl::{
         kx_groups::{KxGroupProbeOutput, KxGroupProbeResult},
@@ -828,12 +826,12 @@ fn ffdhe_cross_codepoint_coherence_downgrades_self_match() {
     let record = build_scan_result(&results, &ctx);
     let value = serde_json::to_value(&record).expect("serialize");
 
-    // ffdhe2048 self-match is downgraded; returned_group reflects the
-    // matching prime the server actually returned.
+    // ffdhe2048 self-match stays supported; returned_group reflects
+    // the matching prime the server actually returned.
     let two = value
         .pointer("/tls/groups/tls1_2/ffdhe2048")
         .expect("ffdhe2048 row present");
-    assert_eq!(two.get("supported").unwrap().as_bool(), Some(false));
+    assert_eq!(two.get("supported").unwrap().as_bool(), Some(true));
     assert_eq!(
         two.get("reason").unwrap().as_str(),
         Some("server_does_not_honor_supported_groups")

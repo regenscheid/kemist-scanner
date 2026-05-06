@@ -105,13 +105,14 @@ can key on alert categories without knowing which backend produced them.
 probe that completes a DHE handshake but returns a prime that doesn't
 match the advertised codepoint surfaces as
 `{supported: false, reason: "server_does_not_honor_supported_groups", returned_group, returned_prime_bits}`.
-When *any* FFDHE TLS 1.2 row reports a direct mismatch the verdict
-propagates to every FFDHE TLS 1.2 row — including ones whose returned
-prime "matched" the codepoint, since that match is also consistent
-with the server serving a static prime regardless of `supported_groups`
-(the common pattern: an RFC 7919 prime configured as the static
-`ssl_dhparam`). Distinct from a plain `supported: false` — the server
-ignored `supported_groups` entirely.
+When *any* FFDHE TLS 1.2 row reports a direct mismatch, the reason and
+returned-prime evidence propagate to every FFDHE TLS 1.2 row. Rows
+whose returned prime matched the offered codepoint remain
+`supported: true`, since that particular group completed, but the note
+warns that the host appears to serve a static prime regardless of
+`supported_groups` (the common pattern: an RFC 7919 prime configured
+as the static `ssl_dhparam`). Distinct from a plain
+`supported: false` — the server ignored `supported_groups` entirely.
 
 **CertificateRequest probe discipline.** The scanner never provisions
 a real client certificate. OpenSSL's default behavior with no cert

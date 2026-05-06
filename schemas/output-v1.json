@@ -701,7 +701,7 @@
         "provider": { "type": "string", "enum": ["aws_lc_rs", "openssl"] },
         "returned_group": {
           "type": "string",
-          "description": "FFDHE TLS 1.2 only. Classification of the prime the server actually returned when its behavior diverged from the codepoint we offered (or when cross-codepoint coherence determined the server isn't honoring `supported_groups`). Vocabulary mirrors `tls.dh_parameters[].classification`.",
+          "description": "FFDHE TLS 1.2 only. Classification of the prime the server actually returned when its behavior diverged from the codepoint we offered, or when cross-codepoint coherence attached the `server_does_not_honor_supported_groups` caveat to a matching row. Vocabulary mirrors `tls.dh_parameters[].classification`.",
           "enum": ["ffdhe2048", "ffdhe3072", "ffdhe4096", "ffdhe6144", "ffdhe8192", "modp1024", "modp1536", "modp2048", "modp3072", "custom"]
         },
         "returned_prime_bits": {

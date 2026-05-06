@@ -617,16 +617,15 @@ fn merge_openssl_kx_groups(results: &ScanResults, out: &mut TlsGroups) {
         // Cross-codepoint coherence: a server that completes a TLS 1.2
         // DHE handshake but returns a prime different from the FFDHE
         // codepoint we offered has demonstrably not honored
-        // `supported_groups`. When that evidence exists, downgrade
-        // every FFDHE TLS 1.2 row — including rows whose returned
-        // prime "matched" the codepoint, since the match is also
-        // consistent with the server returning its static prime
-        // regardless of offer (the fs.bbg.gov pattern: an RFC 7919
-        // prime configured as the static `ssl_dhparam`). Per-row
-        // `returned_group` + `returned_prime_bits` preserve the
-        // observed evidence even after the verdict flips. TLS 1.3
-        // FFDHE rows are wire-confirmed via `key_share` and not
-        // subject to the downgrade.
+        // `supported_groups`. When that evidence exists, attach the
+        // caveat to every FFDHE TLS 1.2 row. Rows whose returned
+        // prime matches their own offer remain supported, because the
+        // row-level question is still "did this codepoint complete
+        // with its matching group?" Mismatched rows stay unsupported,
+        // and per-row `returned_group` + `returned_prime_bits`
+        // preserve what the server actually sent. TLS 1.3 FFDHE rows
+        // are wire-confirmed via `key_share` and not subject to this
+        // coherence note.
         let host_ignores_supported_groups = probes.results.iter().any(|r| {
             ffdhe_bits_for_codepoint(r.iana_code).is_some()
                 && matches!(
@@ -647,12 +646,13 @@ fn merge_openssl_kx_groups(results: &ScanResults, out: &mut TlsGroups) {
                         ffdhe_self_group,
                         ffdhe_self_bits,
                     ) {
-                        // FFDHE TLS 1.2 self-match downgraded by
-                        // cross-codepoint evidence. The server
-                        // returned the codepoint's expected prime, so
-                        // that is what we record as returned_group.
+                        // FFDHE TLS 1.2 self-match with
+                        // cross-codepoint evidence. Keep the positive
+                        // verdict for this specific group, but attach
+                        // the host-level caveat and record the
+                        // matching prime that came back.
                         (true, Some(self_group), Some(self_bits)) => GroupObservation {
-                            supported: Some(false),
+                            supported: Some(true),
                             method: Method::Probe,
                             reason: Some("server_does_not_honor_supported_groups".to_string()),
                             iana_code: Some(iana.to_string()),
@@ -731,7 +731,7 @@ fn merge_openssl_kx_groups(results: &ScanResults, out: &mut TlsGroups) {
         };
         for r in &probes.results {
             let iana = format!("0x{:04X}", r.iana_code);
-            // Only TLS 1.2 FFDHE rows are subject to the downgrade —
+            // Only TLS 1.2 FFDHE rows are subject to the coherence note —
             // the row's own group classification + bit length describe
             // what the server returned when it matched its own offer.
             let ffdhe_self_bits = ffdhe_bits_for_codepoint(r.iana_code);

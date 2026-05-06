@@ -64,13 +64,14 @@ same behavior.
   description makes per-field polarity explicit.
 - **`returned_group` + `returned_prime_bits` on FFDHE TLS 1.2
   named-group rows.** When the cross-codepoint coherence pass
-  downgrades an FFDHE row to `supported: false`, the row records
-  what prime the server actually returned in response to the offer
+  attaches `reason: "server_does_not_honor_supported_groups"` to an
+  FFDHE row, the row records what prime the server actually returned
+  in response to the offer
   (`"ffdhe2048"`, `"modp3072"`, `"custom"`, etc., matching the
   `tls.dh_parameters[].classification` vocabulary, plus
   `returned_prime_bits` for size when classification is `custom`).
-  Both fields omitted when the row reflects an honest match or a
-  non-FFDHE codepoint.
+  Both fields omitted when the row has no cross-codepoint caveat or
+  direct mismatch, or when it reflects a non-FFDHE codepoint.
 
 ### Changed
 
@@ -81,19 +82,22 @@ same behavior.
   `supported: true` for the `ffdhe2048` codepoint even though it
   ignores `supported_groups` entirely. fs.bbg.gov is the
   motivating case: the server returns its 2048-bit prime regardless
-  of which FFDHE codepoint the client offers. ssllabs reads this
-  correctly as "no FFDHE named-group support"; kemist now matches.
+  of which FFDHE codepoint the client offers. kemist now records the
+  returned prime on every FFDHE TLS 1.2 row while preserving row-level
+  support for any codepoint whose own offer matched.
   Implementation: a new cross-codepoint coherence pass in
   [output/json.rs](src/output/json.rs) — when *any* FFDHE TLS 1.2
   probe returns a prime that doesn't match the offered codepoint
   (the `IgnoredGroupReturnedDifferentPrime` outcome), every FFDHE
-  TLS 1.2 row gets downgraded to
-  `supported: false, reason: "server_does_not_honor_supported_groups"`
-  with `returned_group` + `returned_prime_bits` preserving per-row
-  evidence. TLS 1.3 FFDHE rows are unaffected (wire-confirmed via
-  `key_share` rather than inferred from prime hashing). Old reason
-  string `server_ignored_group_offer_returned_custom_prime` is
-  removed; the new string is more honest about what was concluded.
+  TLS 1.2 row gets
+  `reason: "server_does_not_honor_supported_groups"` with
+  `returned_group` + `returned_prime_bits` preserving per-row evidence.
+  Direct mismatches remain `supported: false`; self-matches remain
+  `supported: true`. TLS 1.3 FFDHE rows are unaffected
+  (wire-confirmed via `key_share` rather than inferred from prime
+  hashing). Old reason string
+  `server_ignored_group_offer_returned_custom_prime` is removed; the
+  new string is more honest about what was concluded.
 - **ECDHE ephemeral-reuse probe handles X25519 / X448.** The probe
   previously rejected non-classical-EC curves with the misleading
   error `peer_tmp_key_not_ec:id=Id(1034)` whenever the server

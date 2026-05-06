@@ -223,22 +223,26 @@ backend produced the observation (`aws_lc_rs` vs `openssl`).
 
 **FFDHE cross-check + cross-codepoint coherence.** A TLS 1.2 FFDHE
 entry with
-`{supported: false, reason: "server_does_not_honor_supported_groups", returned_group, returned_prime_bits}`
+`{reason: "server_does_not_honor_supported_groups", returned_group, returned_prime_bits}`
 means the scanner has direct or cross-codepoint evidence that the
-server isn't honoring `supported_groups`:
+server isn't honoring `supported_groups`. The `supported` field still
+answers the row-level question: did this offered codepoint complete
+with its matching group?
 
 - Direct: the server completed a DHE handshake against this
   codepoint's offer but returned a prime that didn't match. The
   `returned_group` field carries the classification of the prime the
   server *actually* sent (`"ffdhe2048"`, `"modp3072"`, `"custom"`,
   etc., matching the `tls.dh_parameters[].classification` vocabulary);
-  `returned_prime_bits` carries its bit length.
+  `returned_prime_bits` carries its bit length. This row is
+  `supported: false`.
 - Cross-codepoint: any FFDHE codepoint probe at TLS 1.2 reported a
-  direct mismatch, so every FFDHE TLS 1.2 row gets downgraded — the
-  matched ones too, since the match is also consistent with the
-  server returning a static prime regardless of offer (e.g. an RFC
-  7919 `ssl_dhparam` that happens to coincide with the requested
-  codepoint).
+  direct mismatch, so every FFDHE TLS 1.2 row gets the same reason
+  and returned-prime evidence. Matched rows remain `supported: true`
+  because the specific offered group completed, but the reason warns
+  that the host appears to serve a static prime regardless of offer
+  (e.g. an RFC 7919 `ssl_dhparam` that happens to coincide with the
+  requested codepoint).
 
 Distinct from a plain `{supported: false}` (no `reason`,
 no `returned_group`), which means the server cleanly refused the
