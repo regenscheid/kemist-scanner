@@ -318,6 +318,9 @@ Notes:
 - **`ocsp_stapling.raw_hex`** — gated behind `--include-ocsp-raw` CLI
   flag. Off by default because the parsed `content` is what rule
   engines want and raw DER inflates output size noticeably.
+- **`dh_parameters[].prime_raw_hex`** — gated behind
+  `--include-dh-raw`. Off by default because FFDHE primes can add
+  kilobytes per DHE observation.
 - **`record_size_limit` / `compress_certificate_algorithms`** —
   captured via an OpenSSL msg-callback on the TLS 1.3
   EncryptedExtensions message. **Known limitation**: OpenSSL 3.5

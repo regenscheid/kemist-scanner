@@ -39,6 +39,11 @@ pub struct JsonEmitContext {
     /// `content`. Gated by the `--include-ocsp-raw` CLI flag so most
     /// scans produce compact output.
     pub include_ocsp_raw: bool,
+    /// Emit raw finite-field DH prime bytes as hex alongside
+    /// `tls.dh_parameters[].prime_sha256`. Gated by
+    /// `--include-dh-raw` because FFDHE primes can add kilobytes per
+    /// observation.
+    pub include_dh_raw: bool,
 }
 
 pub fn build_scan_result(results: &ScanResults, ctx: &JsonEmitContext) -> ScanResult {
@@ -201,7 +206,7 @@ fn build_tls(results: &ScanResults, ctx: &JsonEmitContext) -> Tls {
                 .and_then(|h| h.tls13_downgrade_sentinel.clone()),
         },
         sni_behavior: build_sni_behavior(results),
-        dh_parameters: build_dh_parameters(results),
+        dh_parameters: build_dh_parameters(results, ctx),
         server_key_exchange_signatures: build_ske_sigs(results),
         renegotiation_behavior: build_renegotiation_behavior(results),
         session_resumption: build_session_resumption(results),
@@ -1592,7 +1597,10 @@ fn build_fallback_scsv_enforced(results: &ScanResults) -> ObservationBool {
     }
 }
 
-fn build_dh_parameters(results: &ScanResults) -> Vec<DhParametersObservation> {
+fn build_dh_parameters(
+    results: &ScanResults,
+    ctx: &JsonEmitContext,
+) -> Vec<DhParametersObservation> {
     #[cfg(feature = "legacy-probes")]
     {
         let Some(obs) = results.openssl_observations.as_ref() else {
@@ -1612,7 +1620,7 @@ fn build_dh_parameters(results: &ScanResults) -> Vec<DhParametersObservation> {
                     classification: snap.classification.as_schema_str().to_string(),
                     generator: snap.generator,
                     prime_sha256: snap.prime_sha256_hex(),
-                    prime_raw_hex: None,
+                    prime_raw_hex: ctx.include_dh_raw.then(|| snap.prime_raw_hex()),
                     method: Method::Probe,
                     reason: None,
                 })
@@ -1622,6 +1630,7 @@ fn build_dh_parameters(results: &ScanResults) -> Vec<DhParametersObservation> {
     #[cfg(not(feature = "legacy-probes"))]
     {
         let _ = results;
+        let _ = ctx;
         Vec::new()
     }
 }

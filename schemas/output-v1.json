@@ -779,7 +779,11 @@
         },
         "generator": { "type": "integer", "minimum": 0 },
         "prime_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
-        "prime_raw_hex": { "type": "string", "pattern": "^[0-9a-f]+$" },
+        "prime_raw_hex": {
+          "type": "string",
+          "pattern": "^[0-9a-f]+$",
+          "description": "Big-endian DH prime bytes as lowercase hex. Omitted by default; present only when the CLI uses --include-dh-raw."
+        },
         "method": { "$ref": "#/$defs/method" },
         "reason": { "type": "string" }
       },

@@ -68,6 +68,11 @@ pub struct ScannerConfig {
     /// default — rule engines rarely need the raw bytes, and
     /// including them inflates per-scan JSON size noticeably.
     pub include_ocsp_raw: bool,
+    /// Emit `tls.dh_parameters[].prime_raw_hex` (hex of the
+    /// big-endian finite-field DH prime) alongside `prime_sha256`.
+    /// Off by default because FFDHE primes are large and the hash is
+    /// usually enough for classification/correlation.
+    pub include_dh_raw: bool,
     /// Canonical names of signature-algorithm policy probes the
     /// operator explicitly skipped (`--sigalg-probe-skip=...`).
     /// Recognized: `"sha256_plus_only"`, `"ecdsa_only"`,
@@ -100,6 +105,7 @@ impl Default for ScannerConfig {
             enable_http_checks: false,
             user_agent_info_url: "https://www.kemist-tls.net".to_string(),
             include_ocsp_raw: false,
+            include_dh_raw: false,
             sigalg_probe_skip: Vec::new(),
             enable_revocation_fetch: false,
         }
@@ -153,6 +159,7 @@ impl Scanner {
             enabled_features: self.config.enabled_features.clone(),
             config_paths: self.config.config_paths.clone(),
             include_ocsp_raw: self.config.include_ocsp_raw,
+            include_dh_raw: self.config.include_dh_raw,
         };
         build_scan_result(&probe_results, &ctx)
     }
@@ -316,6 +323,7 @@ impl Scanner {
             enabled_features: self.config.enabled_features.clone(),
             config_paths: self.config.config_paths.clone(),
             include_ocsp_raw: self.config.include_ocsp_raw,
+            include_dh_raw: self.config.include_dh_raw,
         };
         build_scan_result(&probe_results, &ctx)
     }

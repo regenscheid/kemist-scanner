@@ -87,6 +87,7 @@ fn fixture_ctx() -> JsonEmitContext {
         enabled_features: vec![],
         config_paths: vec![],
         include_ocsp_raw: false,
+        include_dh_raw: false,
     }
 }
 
@@ -334,6 +335,7 @@ fn fully_populated_openssl_observations_match_schema_v1() {
             0x98, 0x77, 0xa4, 0xd4, 0x40, 0x51, 0x2c, 0xda, 0x8d, 0x1c, 0x1c, 0xf0, 0xcd, 0x6e,
             0x33, 0x69, 0x89, 0x66,
         ],
+        prime_bytes: vec![0x01, 0x02, 0x03, 0x04],
         classification: DhClassification::Ffdhe2048,
     };
 
@@ -662,6 +664,25 @@ fn fully_populated_openssl_observations_match_schema_v1() {
     assert_eq!(
         tls.get("dh_parameters").unwrap().as_array().unwrap().len(),
         1
+    );
+    assert!(
+        tls.pointer("/dh_parameters/0/prime_raw_hex").is_none(),
+        "raw DH prime should be omitted by default"
+    );
+    let mut raw_ctx = fixture_ctx();
+    raw_ctx.include_dh_raw = true;
+    let raw_record = build_scan_result(&results, &raw_ctx);
+    let raw_record_value = serde_json::to_value(&raw_record).expect("serialize");
+    assert_eq!(
+        raw_record_value
+            .pointer("/tls/dh_parameters/0/prime_raw_hex")
+            .and_then(|v| v.as_str()),
+        Some("01020304")
+    );
+    let raw_errors: Vec<_> = validator.iter_errors(&raw_record_value).collect();
+    assert!(
+        raw_errors.is_empty(),
+        "raw-DH record should remain schema-valid"
     );
     let groups = tls.get("groups").unwrap();
     // Three FFDHE probe rows produce three tls1_2 + three tls1_3 entries.

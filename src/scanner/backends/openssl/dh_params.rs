@@ -85,6 +85,7 @@ pub struct DhSnapshot {
     pub prime_bits: u32,
     pub generator: u32,
     pub prime_sha256: [u8; 32],
+    pub prime_bytes: Vec<u8>,
     pub classification: DhClassification,
 }
 
@@ -92,6 +93,12 @@ impl DhSnapshot {
     /// Lowercase hex of `prime_sha256`, the form used in JSON output.
     pub fn prime_sha256_hex(&self) -> String {
         hex::encode(self.prime_sha256)
+    }
+
+    /// Lowercase hex of the big-endian prime bytes. Verbose, so the
+    /// JSON layer emits it only behind `--include-dh-raw`.
+    pub fn prime_raw_hex(&self) -> String {
+        hex::encode(&self.prime_bytes)
     }
 }
 
@@ -138,6 +145,7 @@ pub fn snapshot(ssl: &SslRef) -> Result<Option<DhSnapshot>, ErrorStack> {
         prime_bits,
         generator,
         prime_sha256,
+        prime_bytes,
         classification: classify_by_hash(&prime_sha256),
     }))
 }
@@ -410,6 +418,7 @@ C58EF1837D1683B2C6F34A26C1B2EFFA886B423861285C97FFFFFFFFFFFFFFFF";
             prime_bits: 2048,
             generator: 2,
             prime_sha256: FFDHE2048_SHA256,
+            prime_bytes: Vec::new(),
             classification: DhClassification::Ffdhe2048,
         };
         let h = snap.prime_sha256_hex();

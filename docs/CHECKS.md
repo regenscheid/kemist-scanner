@@ -317,6 +317,7 @@ byte-level TLS 1.2 probe.
 | `tls.extensions.ocsp_stapling.content` | Raw bytes parsed via [model/ocsp_response.rs](../src/model/ocsp_response.rs) (RFC 6960 BasicOCSPResponse). `cert_status`, timestamps, responder ID, serial, hash-algorithm OID |
 | `tls.extensions.ocsp_stapling.delivery_path` | Derived from negotiated version: `tls1_2` for CertificateStatus flight, `tls1_3` for EncryptedExtensions status_request response |
 | `tls.extensions.ocsp_stapling.raw_hex` | Gated behind `--include-ocsp-raw` CLI flag |
+| `tls.dh_parameters[].prime_raw_hex` | Gated behind `--include-dh-raw` CLI flag |
 | `tls.extensions.alpn_offered` | What kemist sent in ClientHello |
 
 ### From byte-level ServerHello probe ([scanner/hello.rs](../src/scanner/hello.rs))

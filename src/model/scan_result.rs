@@ -961,9 +961,9 @@ pub struct DhParametersObservation {
     pub generator: u32,
     /// Lowercase hex (64 chars).
     pub prime_sha256: String,
-    /// Optional raw prime, lowercase hex. Omitted by default (bandwidth);
-    /// populated when the CLI requests `--include-dh-raw` (flag not yet
-    /// wired).
+    /// Optional raw prime, lowercase hex. Omitted by default
+    /// (bandwidth); populated when the CLI requests
+    /// `--include-dh-raw`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prime_raw_hex: Option<String>,
     pub method: Method,
