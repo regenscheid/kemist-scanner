@@ -606,11 +606,11 @@ pub struct TlsExtensions {
     /// the extension.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub record_size_limit: Option<u16>,
-    /// RFC 8879 — algorithms listed in the server's
-    /// `compress_certificate` extension. Canonical names: `"zlib"`,
-    /// `"brotli"`, `"zstd"`; `"0xNNNN"` for unknown codepoints.
-    /// Populated by the OpenSSL-backed EncryptedExtensions probe;
-    /// empty otherwise.
+    /// RFC 8879 — certificate-compression algorithms observed when
+    /// the server sends a TLS 1.3 CompressedCertificate after kemist
+    /// offers support. Canonical names: `"zlib"`, `"brotli"`,
+    /// `"zstd"`; `"0xNNNN"` for unknown codepoints. This is
+    /// distinct from record-layer compression in `behavioral_probes`.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub compress_certificate_algorithms: Vec<String>,
     /// RFC 9345 delegated credentials observation. Offered in the
@@ -637,11 +637,11 @@ pub struct BehavioralProbes {
     /// `heartbeat_present` extension is recorded separately under
     /// `extensions`; this field is the *behavioral* signal.
     pub heartbeat_echoes_oversized_payload: ObservationBool,
-    /// Compression methods echoed back by the server in the
-    /// ServerHello `compression_methods` field (RFC 5246 §7.4.1.3).
-    /// Note: the field is in the ClientHello/ServerHello body proper,
-    /// not an extension. Non-empty list means CRIME-vulnerable
-    /// configuration (RFC 7457 §2.1).
+    /// Record-layer compression method selected by the server in the
+    /// ServerHello `compression_method` field (RFC 5246 §7.4.1.3).
+    /// Note: this is not RFC 8879 certificate compression. `"null"`
+    /// is the safe modern value; `"deflate"` is the CRIME-relevant
+    /// value (RFC 7457 §2.1).
     pub compression_offered: Vec<String>,
     /// RFC 8701 GREASE echo-detection. `true` = server echoed an
     /// unknown extension (protocol violation signal — the server's

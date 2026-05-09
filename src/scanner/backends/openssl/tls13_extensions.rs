@@ -3,8 +3,8 @@
 //! Despite the module name ("tls13_extensions"), this module captures
 //! observations from two TLS 1.3 handshake messages via
 //! `SSL_CTX_set_msg_callback`: EncryptedExtensions (RFC 8449
-//! record_size_limit, RFC 8879 compress_certificate) and Certificate
-//! (RFC 9345 delegated_credentials, carried in the leaf
+//! record_size_limit) and Certificate (RFC 9345 delegated_credentials,
+//! carried in the leaf
 //! CertificateEntry's extensions block).
 //!
 //! EncryptedExtensions is sent encrypted under the handshake traffic
@@ -25,7 +25,7 @@
 //! | Extension | IANA # | Field |
 //! |-----------|--------|-------|
 //! | RFC 8449 record_size_limit | 28 | [`Tls13EncryptedExtensions::record_size_limit`] |
-//! | RFC 8879 compress_certificate | 27 | [`Tls13EncryptedExtensions::compress_certificate_algorithms`] |
+//! | RFC 8879 compress_certificate | 27 | [`Tls13EncryptedExtensions::compress_certificate_algorithms`] (legacy parser only; normal support is observed by the rustls certificate-compression probe) |
 //!
 //! ## Known limitation: client-side offer gap
 //!
@@ -43,9 +43,9 @@
 //! unsolicited" rule. The probe still infrastructure-tests correctly
 //! (see unit tests in this file) and remains useful for servers that
 //! advertise these extensions unsolicited — rare but legal.
-//! Follow-up workstream: gain access to the native OpenSSL setters
-//! and wire them in, then the fields populate on every modern TLS
-//! 1.3 deployment.
+//! Normal RFC 8879 support is observed by
+//! `backends::rustls::cert_compression`, which offers Brotli and
+//! records when a server sends a CompressedCertificate handshake.
 //!
 //! Deliberately **not** observed here:
 //! - `early_data` (ext 42) — only populated in EncryptedExtensions on

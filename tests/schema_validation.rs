@@ -64,6 +64,7 @@ fn fixture_results() -> ScanResults {
         hrr_observed: None,
         sslv2_observation: None,
         alpn_matrix: None,
+        certificate_compression_algorithms: Vec::new(),
         #[cfg(all(feature = "http-checks", feature = "legacy-probes"))]
         ocsp_http_fetch: None,
         #[cfg(feature = "http-checks")]

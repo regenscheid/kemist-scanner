@@ -153,6 +153,11 @@ pub struct ScanResults {
     /// probe didn't run.
     #[serde(skip_serializing)]
     pub alpn_matrix: Option<crate::scanner::backends::rustls::alpn_matrix::AlpnMatrixOutput>,
+    /// TLS 1.3 certificate-compression algorithms actually selected
+    /// by the server when kemist offers RFC 8879 support. Feeds
+    /// `tls.extensions.compress_certificate_algorithms`.
+    #[serde(skip_serializing)]
+    pub certificate_compression_algorithms: Vec<String>,
     /// OCSP-over-HTTP fallback results — one fetch per AIA OCSP URL
     /// the leaf cert advertises. Populated only when
     /// `--enable-revocation-fetch` is set AND the characterization
@@ -232,6 +237,7 @@ impl SslScanner {
             hrr_observed: None,
             sslv2_observation: None,
             alpn_matrix: None,
+            certificate_compression_algorithms: Vec::new(),
             #[cfg(all(feature = "http-checks", feature = "legacy-probes"))]
             ocsp_http_fetch: None,
             #[cfg(feature = "http-checks")]
@@ -403,6 +409,16 @@ impl SslScanner {
             )
             .await,
         );
+        pause().await;
+
+        results.certificate_compression_algorithms =
+            crate::scanner::backends::rustls::cert_compression::probe(
+                self.config.target,
+                &self.config.hostname,
+                self.config.timeout,
+                self.config.timeout,
+            )
+            .await;
         pause().await;
 
         // OCSP-over-HTTP fallback. Only fires when the operator

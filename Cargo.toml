@@ -20,7 +20,7 @@ legacy-probes = ["dep:openssl", "dep:openssl-sys", "dep:openssl-src", "dep:forei
 
 [dependencies]
 # TLS implementation
-rustls = { version = "0.23", features = ["aws_lc_rs", "tls12", "std", "prefer-post-quantum"] }
+rustls = { version = "0.23", features = ["aws_lc_rs", "tls12", "std", "prefer-post-quantum", "brotli"] }
 rustls-native-certs = "0.8"
 webpki-roots = "0.26"
 rustls-pki-types = "1"

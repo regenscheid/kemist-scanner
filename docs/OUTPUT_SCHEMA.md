@@ -414,6 +414,11 @@ Notes:
   with the detail fields absent. The scanner does **not** verify
   the DC signature against the leaf pubkey and does **not**
   compare `valid_time` against the wall clock — observation only.
+- **`compress_certificate_algorithms`** — RFC 8879 certificate
+  compression observation. This is populated when kemist offers TLS
+  1.3 certificate decompression and the server responds with a
+  `CompressedCertificate` handshake message. It is distinct from
+  TLS record-layer compression under `behavioral_probes`.
 
 **Note on revocation.** `ocsp_stapling` is a TLS-handshake
 observation (server stapled or not). Out-of-band revocation

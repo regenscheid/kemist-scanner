@@ -27,7 +27,8 @@
 //! | 23    | extended_master_secret         | `ems.value` |
 //! | 0xff01| renegotiation_info             | `secure_renegotiation.value` |
 //!
-//! Plus the compression_method byte inside ServerHello → `compression_offered`.
+//! Plus the record-layer compression_method byte inside ServerHello
+//! → `compression_offered` (not RFC 8879 certificate compression).
 //!
 //! ## Failure modes
 //!

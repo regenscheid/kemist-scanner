@@ -1243,26 +1243,29 @@ fn build_ocsp_stapling(results: &ScanResults, ctx: &JsonEmitContext) -> OcspStap
 /// the probe didn't produce a parseable message — the fields are
 /// optional in the schema, so "absent" correctly means "not observed."
 fn build_tls13_ee_observations(results: &ScanResults) -> (Option<u16>, Vec<String>) {
+    let mut compress_certificate_algorithms = results.certificate_compression_algorithms.clone();
     #[cfg(feature = "legacy-probes")]
     {
         let Some(obs) = results.openssl_observations.as_ref() else {
-            return (None, Vec::new());
+            return (None, compress_certificate_algorithms);
         };
         let Some(ee) = obs.tls13_extensions.as_ref() else {
-            return (None, Vec::new());
+            return (None, compress_certificate_algorithms);
         };
         if !ee.parsed {
-            return (None, Vec::new());
+            return (None, compress_certificate_algorithms);
         }
-        (
-            ee.record_size_limit,
-            ee.compress_certificate_algorithms.clone(),
-        )
+        for alg in &ee.compress_certificate_algorithms {
+            if !compress_certificate_algorithms.contains(alg) {
+                compress_certificate_algorithms.push(alg.clone());
+            }
+        }
+        (ee.record_size_limit, compress_certificate_algorithms)
     }
     #[cfg(not(feature = "legacy-probes"))]
     {
         let _ = results;
-        (None, Vec::new())
+        (None, compress_certificate_algorithms)
     }
 }
 
