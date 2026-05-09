@@ -39,10 +39,13 @@
 //! rather than "definitely the same ticket." Functional resumption
 //! tests above are the authoritative signals.
 
+use std::cell::RefCell;
 use std::net::SocketAddr;
+use std::os::raw::{c_int, c_long, c_void};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use foreign_types::ForeignTypeRef;
 use openssl::ssl::{
     HandshakeError, Ssl, SslContext, SslMethod, SslOptions, SslSession, SslSessionCacheMode,
     SslVerifyMode, SslVersion,
@@ -50,6 +53,33 @@ use openssl::ssl::{
 use tracing::{debug, info};
 
 use crate::model::scan_result::{ObservationBool, SessionResumption, Tls12Resumption};
+
+const SSL_CTRL_SET_MSG_CALLBACK: c_int = 15;
+const CONTENT_TYPE_HANDSHAKE: c_int = 22;
+const HANDSHAKE_TYPE_NEW_SESSION_TICKET: u8 = 4;
+
+extern "C" {
+    #[link_name = "SSL_CTX_callback_ctrl"]
+    fn SSL_CTX_callback_ctrl(
+        ctx: *mut openssl_sys::SSL_CTX,
+        cmd: c_int,
+        fp: Option<unsafe extern "C" fn()>,
+    ) -> c_long;
+}
+
+type MsgCbFn = unsafe extern "C" fn(
+    write_p: c_int,
+    version: c_int,
+    content_type: c_int,
+    buf: *const c_void,
+    len: usize,
+    ssl: *mut openssl_sys::SSL,
+    arg: *mut c_void,
+);
+
+thread_local! {
+    static TLS12_NEW_SESSION_TICKET_SEEN: RefCell<bool> = const { RefCell::new(false) };
+}
 
 /// Run the probe. Always returns a populated [`SessionResumption`];
 /// slots that aren't observable fall back to `NotProbed` with a
@@ -210,6 +240,12 @@ fn probe_resumption_pair(
             return ObservationBool::not_probed(&format!("first_handshake:{reason}"));
         }
     };
+    if allow_tickets && !first.has_ticket_hint {
+        return ObservationBool::not_applicable("no_session_ticket_issued_in_first_handshake");
+    }
+    if !allow_tickets && !first.session_id_nonempty {
+        return ObservationBool::not_applicable("no_session_id_issued_in_first_handshake");
+    }
     let prev_session = captured_session
         .lock()
         .ok()
@@ -247,12 +283,8 @@ struct HandshakeSnapshot {
     /// servers that don't echo an ID.
     session_id: Vec<u8>,
     session_id_nonempty: bool,
-    /// Heuristic: we count the server as having issued a ticket when
-    /// `SSL_SESSION_get_timeout` reports a nonzero value. OpenSSL
-    /// populates this from the RFC 5077 lifetime hint for ticket-
-    /// issuing TLS 1.2 servers; non-ticket servers usually have a
-    /// cache-default timeout instead. Not fully precise but good
-    /// enough to distinguish "ticket path" from "no ticket."
+    /// True when OpenSSL's message callback observed a TLS 1.2
+    /// NewSessionTicket handshake message from the server.
     has_ticket_hint: bool,
     lifetime_hint_secs: Option<u32>,
     /// `SSL_session_reused` reading post-handshake — true only when
@@ -276,6 +308,7 @@ fn single_tls12_handshake(
 
     let mut ssl = Ssl::new(ctx).map_err(|e| format!("ssl_new:{e}"))?;
     let _ = ssl.set_hostname(hostname);
+    TLS12_NEW_SESSION_TICKET_SEEN.with(|seen| *seen.borrow_mut() = false);
 
     if let Some(prev) = prev_session {
         // SAFETY: `prev` is a borrowed `SslSessionRef` whose owning
@@ -287,7 +320,7 @@ fn single_tls12_handshake(
         }
     }
 
-    let stream = match ssl.connect(tcp) {
+    let mut stream = match ssl.connect(tcp) {
         Ok(s) => s,
         Err(HandshakeError::Failure(mid)) => {
             return Err(format!("tls_alert:{}", mid.error()));
@@ -305,11 +338,13 @@ fn single_tls12_handshake(
     let session: Option<SslSession> = session_ref.map(|s| s.to_owned());
     let session_id: Vec<u8> = session_ref.map(|s| s.id().to_vec()).unwrap_or_default();
     let timeout_secs: i64 = session_ref.map(|s| s.timeout()).unwrap_or(0) as i64;
-    let (has_ticket_hint, lifetime_hint_secs) = if timeout_secs > 0 {
+    let new_session_ticket_seen = TLS12_NEW_SESSION_TICKET_SEEN.with(|seen| *seen.borrow());
+    let (has_ticket_hint, lifetime_hint_secs) = if new_session_ticket_seen && timeout_secs > 0 {
         (true, Some(timeout_secs as u32))
     } else {
-        (false, None)
+        (new_session_ticket_seen, None)
     };
+    let _ = stream.shutdown();
 
     Ok(HandshakeSnapshot {
         session,
@@ -355,7 +390,40 @@ fn build_tls12_context_with_capture(
         // (caching)" probe.
         builder.set_options(SslOptions::NO_TICKET);
     }
-    Ok(builder.build())
+    let ctx = builder.build();
+    // SAFETY: `msg_callback` has the signature required by
+    // SSL_CTRL_SET_MSG_CALLBACK; OpenSSL invokes it synchronously
+    // during handshakes performed with this context.
+    unsafe {
+        SSL_CTX_callback_ctrl(
+            ctx.as_ptr(),
+            SSL_CTRL_SET_MSG_CALLBACK,
+            Some(std::mem::transmute::<MsgCbFn, unsafe extern "C" fn()>(
+                msg_callback,
+            )),
+        );
+    }
+    Ok(ctx)
+}
+
+unsafe extern "C" fn msg_callback(
+    write_p: c_int,
+    _version: c_int,
+    content_type: c_int,
+    buf: *const c_void,
+    len: usize,
+    _ssl: *mut openssl_sys::SSL,
+    _arg: *mut c_void,
+) {
+    if write_p != 0 || content_type != CONTENT_TYPE_HANDSHAKE || buf.is_null() || len == 0 {
+        return;
+    }
+    // SAFETY: OpenSSL passes a valid buffer for the lifetime of the
+    // callback invocation.
+    let slice = unsafe { std::slice::from_raw_parts(buf as *const u8, len) };
+    if slice.first() == Some(&HANDSHAKE_TYPE_NEW_SESSION_TICKET) {
+        TLS12_NEW_SESSION_TICKET_SEEN.with(|seen| *seen.borrow_mut() = true);
+    }
 }
 
 fn ctx_build_failure(reason: &str) -> Tls12Resumption {
@@ -387,6 +455,8 @@ mod tests {
 
     const FIXTURE_ADDR_ENV: &str = "KEMIST_LEGACY_FIXTURE_ADDR";
     const FIXTURE_HOSTNAME_ENV: &str = "KEMIST_LEGACY_FIXTURE_HOSTNAME";
+    const ID_FIXTURE_ADDR_ENV: &str = "KEMIST_LEGACY_ID_FIXTURE_ADDR";
+    const ID_FIXTURE_HOSTNAME_ENV: &str = "KEMIST_LEGACY_ID_FIXTURE_HOSTNAME";
 
     fn fixture() -> (SocketAddr, String) {
         let addr_s = std::env::var(FIXTURE_ADDR_ENV).unwrap_or_else(|_| {
@@ -398,6 +468,21 @@ mod tests {
             panic!("{FIXTURE_ADDR_ENV}={addr_s} is not a valid socket addr: {e}")
         });
         let hostname = std::env::var(FIXTURE_HOSTNAME_ENV).unwrap_or_else(|_| "localhost".into());
+        (addr, hostname)
+    }
+
+    fn id_fixture() -> (SocketAddr, String) {
+        let addr_s = std::env::var(ID_FIXTURE_ADDR_ENV).unwrap_or_else(|_| {
+            std::env::var(FIXTURE_ADDR_ENV).unwrap_or_else(|_| {
+                panic!("missing env {ID_FIXTURE_ADDR_ENV}; boot a TLS 1.2 -no_ticket fixture first")
+            })
+        });
+        let addr: SocketAddr = addr_s.parse().unwrap_or_else(|e| {
+            panic!("{ID_FIXTURE_ADDR_ENV}={addr_s} is not a valid socket addr: {e}")
+        });
+        let hostname = std::env::var(ID_FIXTURE_HOSTNAME_ENV)
+            .or_else(|_| std::env::var(FIXTURE_HOSTNAME_ENV))
+            .unwrap_or_else(|_| "localhost".into());
         (addr, hostname)
     }
 
@@ -458,6 +543,34 @@ mod tests {
             out.session_ticket_resumption_accepted.value,
             Some(true),
             "fixture accepts TLS 1.2 ticket resumption with openssl s_client; kemist should report accepted: {out:?}"
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn tls12_session_id_resumption_fixture_reports_accepted() {
+        let (addr, hostname) = id_fixture();
+        let out = probe_tls12_blocking(
+            addr,
+            &hostname,
+            Duration::from_secs(8),
+            Duration::from_secs(8),
+        );
+
+        assert_eq!(
+            out.session_ticket_issued.value,
+            Some(false),
+            "fixture should have tickets disabled so this test isolates session-ID resumption: {out:?}"
+        );
+        assert_eq!(
+            out.session_id_issued.value,
+            Some(true),
+            "fixture must issue a TLS 1.2 session ID for this regression test: {out:?}"
+        );
+        assert_eq!(
+            out.session_id_resumption_accepted.value,
+            Some(true),
+            "fixture accepts TLS 1.2 session-ID resumption with openssl s_client; kemist should report accepted: {out:?}"
         );
     }
 }
