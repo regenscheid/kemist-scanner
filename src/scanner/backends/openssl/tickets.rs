@@ -40,6 +40,7 @@
 //! tests above are the authoritative signals.
 
 use std::net::SocketAddr;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use openssl::ssl::{
@@ -189,7 +190,9 @@ fn probe_resumption_pair(
     connect_timeout: Duration,
     handshake_timeout: Duration,
 ) -> ObservationBool {
-    let ctx = match build_tls12_context(allow_tickets) {
+    let captured_session = Arc::new(Mutex::new(None));
+    let ctx = match build_tls12_context_with_capture(allow_tickets, Some(captured_session.clone()))
+    {
         Ok(c) => c,
         Err(e) => return ObservationBool::error(&format!("ctx_build:{e}")),
     };
@@ -207,9 +210,19 @@ fn probe_resumption_pair(
             return ObservationBool::not_probed(&format!("first_handshake:{reason}"));
         }
     };
-    let Some(prev_session) = first.session else {
+    let prev_session = captured_session
+        .lock()
+        .ok()
+        .and_then(|mut slot| slot.take())
+        .or(first.session);
+    let Some(prev_session) = prev_session else {
         return ObservationBool::not_applicable("no_session_issued_in_first_handshake");
     };
+    let prev_session = prev_session
+        .to_der()
+        .ok()
+        .and_then(|der| SslSession::from_der(&der).ok())
+        .unwrap_or(prev_session);
 
     match single_tls12_handshake(
         &ctx,
@@ -309,6 +322,13 @@ fn single_tls12_handshake(
 }
 
 fn build_tls12_context(allow_tickets: bool) -> Result<SslContext, openssl::error::ErrorStack> {
+    build_tls12_context_with_capture(allow_tickets, None)
+}
+
+fn build_tls12_context_with_capture(
+    allow_tickets: bool,
+    captured_session: Option<Arc<Mutex<Option<SslSession>>>>,
+) -> Result<SslContext, openssl::error::ErrorStack> {
     let mut builder = SslContext::builder(SslMethod::tls_client())?;
     builder.set_min_proto_version(Some(SslVersion::TLS1_2))?;
     builder.set_max_proto_version(Some(SslVersion::TLS1_2))?;
@@ -317,7 +337,16 @@ fn build_tls12_context(allow_tickets: bool) -> Result<SslContext, openssl::error
     // CLIENT cache mode is required for OpenSSL to populate the
     // SslSession fully on `ssl.session()` — applies to all our
     // handshakes whether we resume explicitly or not.
-    builder.set_session_cache_mode(SslSessionCacheMode::CLIENT);
+    if let Some(captured_session) = captured_session {
+        builder.set_session_cache_mode(SslSessionCacheMode::CLIENT);
+        builder.set_new_session_callback(move |_, session| {
+            if let Ok(mut slot) = captured_session.lock() {
+                *slot = Some(session);
+            }
+        });
+    } else {
+        builder.set_session_cache_mode(SslSessionCacheMode::CLIENT);
+    }
     if !allow_tickets {
         // SSL_OP_NO_TICKET: client doesn't include the SessionTicket
         // extension and won't process server-issued tickets. Forces
@@ -354,6 +383,23 @@ fn handshake_failure(reason: &str) -> Tls12Resumption {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::SocketAddr;
+
+    const FIXTURE_ADDR_ENV: &str = "KEMIST_LEGACY_FIXTURE_ADDR";
+    const FIXTURE_HOSTNAME_ENV: &str = "KEMIST_LEGACY_FIXTURE_HOSTNAME";
+
+    fn fixture() -> (SocketAddr, String) {
+        let addr_s = std::env::var(FIXTURE_ADDR_ENV).unwrap_or_else(|_| {
+            panic!(
+                "missing env {FIXTURE_ADDR_ENV}; boot a resumable TLS fixture first, e.g. openssl s_server"
+            )
+        });
+        let addr: SocketAddr = addr_s.parse().unwrap_or_else(|e| {
+            panic!("{FIXTURE_ADDR_ENV}={addr_s} is not a valid socket addr: {e}")
+        });
+        let hostname = std::env::var(FIXTURE_HOSTNAME_ENV).unwrap_or_else(|_| "localhost".into());
+        (addr, hostname)
+    }
 
     #[test]
     fn probe_tls12_blocking_surfaces_ctx_build_errors_cleanly() {
@@ -390,5 +436,28 @@ mod tests {
         // `set_options(NO_TICKET)` confirms wiring.
         assert!(build_tls12_context(true).is_ok());
         assert!(build_tls12_context(false).is_ok());
+    }
+
+    #[test]
+    #[ignore]
+    fn tls12_ticket_resumption_fixture_reports_accepted() {
+        let (addr, hostname) = fixture();
+        let out = probe_tls12_blocking(
+            addr,
+            &hostname,
+            Duration::from_secs(8),
+            Duration::from_secs(8),
+        );
+
+        assert_eq!(
+            out.session_ticket_issued.value,
+            Some(true),
+            "fixture must issue TLS 1.2 tickets for this regression test: {out:?}"
+        );
+        assert_eq!(
+            out.session_ticket_resumption_accepted.value,
+            Some(true),
+            "fixture accepts TLS 1.2 ticket resumption with openssl s_client; kemist should report accepted: {out:?}"
+        );
     }
 }
