@@ -251,7 +251,7 @@ group offer.
 Entries aws-lc-rs doesn't ship emit `not_probed` with
 a specific reason — never `supported: false` without a real probe.
 
-### `tls.extensions`
+### `tls.extensions` / `tls.behavioral_probes`
 ```
 {
   ems: ObservationBool,
@@ -267,7 +267,11 @@ a specific reason — never `supported: false` without a real probe.
   encrypt_then_mac: ObservationBool,
   heartbeat_present: ObservationBool,
   heartbeat_echoes_oversized_payload: ObservationBool,
-  compression_offered: [...],
+  compression_selected: string | null,
+  crime_vulnerable: ObservationBool,
+  record_compression_by_version: [
+    {version: "SSLv3" | "TLSv1.0" | "TLSv1.1" | "TLSv1.2", compression_selected: string | null, crime_vulnerable: ObservationBool}
+  ],
   truncated_hmac: ObservationBool,
   npn: ObservationBool,
   supported_point_formats_echoed: [...],

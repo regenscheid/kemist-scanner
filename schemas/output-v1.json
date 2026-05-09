@@ -246,10 +246,12 @@
         },
         "behavioral_probes": {
           "type": "object",
-          "description": "Non-extension handshake observations — active vulnerability probes (Heartbleed payload echo, ephemeral-key reuse / Raccoon, ROBOT) plus ClientHello-body / ServerHello-variant signals (`compression_offered`, `hello_retry_request`, `grease_echoed`). Schema v2.0 split these out of `extensions`. Polarity (whether `true` is good or bad) varies per field; the scanner records facts and downstream rule engines interpret.",
+          "description": "Non-extension handshake observations — active vulnerability probes (Heartbleed payload echo, ephemeral-key reuse / Raccoon, ROBOT) plus ClientHello-body / ServerHello-variant signals (`compression_selected`, `crime_vulnerable`, `hello_retry_request`, `grease_echoed`). Schema v2.0 split these out of `extensions`. Polarity (whether `true` is good or bad) varies per field; the scanner records facts and downstream rule engines interpret.",
           "required": [
             "heartbeat_echoes_oversized_payload",
-            "compression_offered",
+            "compression_selected",
+            "crime_vulnerable",
+            "record_compression_by_version",
             "grease_echoed",
             "hello_retry_request",
             "ephemeral_key_reuse",
@@ -260,10 +262,35 @@
               "$ref": "#/$defs/observationBool",
               "description": "Heartbleed (CVE-2014-0160) probe. `true` = server echoed our oversized-payload heartbeat back, leaking adjacent memory bytes. `false` = server correctly bounds-checked. Distinct from `extensions.heartbeat_present`, which records whether the *extension* itself is advertised."
             },
-            "compression_offered": {
+            "compression_selected": {
+              "type": ["string", "null"],
+              "description": "Record-layer compression method selected by the server in the primary ServerHello `compression_method` field (RFC 5246 §7.4.1.3 — body field, not an extension). `null` means the probe did not reach a parseable ServerHello; the string value `null` means the server selected no compression."
+            },
+            "crime_vulnerable": {
+              "$ref": "#/$defs/observationBool",
+              "description": "CRIME-style record-compression verdict derived from `compression_selected`. `true` means the server selected a non-null TLS record-compression method from the scanner's offer."
+            },
+            "record_compression_by_version": {
               "type": "array",
-              "items": { "type": "string" },
-              "description": "Compression methods echoed by the server in the ServerHello `compression_methods` field (RFC 5246 §7.4.1.3 — body field, not an extension). Non-empty list = CRIME-vulnerable configuration (RFC 7457 §2.1)."
+              "description": "Version-specific record-compression probes for supported SSLv3 through TLS 1.2 versions, so older-version compression is visible even when the primary TLS 1.2-style ClientHello negotiates a safer version.",
+              "items": {
+                "type": "object",
+                "required": ["version", "compression_selected", "crime_vulnerable"],
+                "properties": {
+                  "version": {
+                    "type": "string",
+                    "enum": ["SSLv3", "TLSv1.0", "TLSv1.1", "TLSv1.2"]
+                  },
+                  "compression_selected": {
+                    "type": ["string", "null"],
+                    "description": "Record-layer compression method selected by the server for this version, or null when the version-specific probe did not parse a ServerHello."
+                  },
+                  "crime_vulnerable": {
+                    "$ref": "#/$defs/observationBool"
+                  }
+                },
+                "additionalProperties": false
+              }
             },
             "grease_echoed": {
               "$ref": "#/$defs/observationBool",

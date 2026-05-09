@@ -48,8 +48,8 @@ use crate::scanner::backends::rustls::ciphers::{probe_cipher_suites, CipherProbe
 use crate::scanner::backends::rustls::groups::{probe_kx_groups, GroupProbeOutput};
 use crate::scanner::backends::rustls::sni::{probe_sni_omitted, SniBehaviorResult};
 use crate::scanner::hello::{
-    probe_hello_extensions, probe_hello_retry_request, HelloExtensionsObserved,
-    HelloRetryRequestObservation,
+    probe_hello_extensions, probe_hello_retry_request, probe_record_compression_versions,
+    HelloExtensionsObserved, HelloRetryRequestObservation, RecordCompressionProbeResult,
 };
 use crate::scanner::http::{probe_http, HttpObservations};
 use crate::scanner::probe::{characterize_connection, NegotiatedState, ValidationResult};
@@ -136,6 +136,11 @@ pub struct ScanResults {
     /// max_fragment_length, TLS 1.3 downgrade sentinel.
     #[serde(skip_serializing)]
     pub hello_observed: Option<HelloExtensionsObserved>,
+    /// Version-specific record-compression observations for SSLv3
+    /// through TLS 1.2. Feeds the CRIME-oriented behavioral probe
+    /// matrix.
+    #[serde(skip_serializing)]
+    pub record_compression_observed: Vec<RecordCompressionProbeResult>,
     /// TLS 1.3 HelloRetryRequest observation from a dedicated TLS 1.3
     /// ClientHello-with-empty-key_share probe. Feeds
     /// `tls.extensions.hello_retry_request` in schema.
@@ -234,6 +239,7 @@ impl SslScanner {
             group_probes: None,
             sni_behavior: None,
             hello_observed: None,
+            record_compression_observed: Vec::new(),
             hrr_observed: None,
             sslv2_observation: None,
             alpn_matrix: None,
@@ -380,6 +386,37 @@ impl SslScanner {
             .await,
         );
         pause().await;
+
+        let record_compression_versions: Vec<TlsVersion> = results
+            .protocol_support
+            .iter()
+            .filter_map(|support| {
+                if support.supported
+                    && matches!(
+                        support.version,
+                        TlsVersion::Ssl3
+                            | TlsVersion::Tls10
+                            | TlsVersion::Tls11
+                            | TlsVersion::Tls12
+                    )
+                {
+                    Some(support.version)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        if !record_compression_versions.is_empty() {
+            results.record_compression_observed = probe_record_compression_versions(
+                self.config.target,
+                &self.config.hostname,
+                &record_compression_versions,
+                self.config.timeout,
+                self.config.timeout,
+            )
+            .await;
+            pause().await;
+        }
 
         // TLS 1.3 HelloRetryRequest probe — separate handshake that
         // sends a TLS 1.3 ClientHello with an empty `key_share`,

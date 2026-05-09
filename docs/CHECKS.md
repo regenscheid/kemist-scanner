@@ -333,7 +333,7 @@ ServerHello bytes.
 | `tls.extensions.encrypt_then_mac` | 22 (RFC 7366) |
 | `tls.extensions.heartbeat_present` | 15 (RFC 6520) |
 | `tls.extensions.secure_renegotiation` | 0xff01 (RFC 5746 renegotiation_info) |
-| `tls.behavioral_probes.compression_offered` | compression_method byte in ServerHello |
+| `tls.behavioral_probes.compression_selected` / `crime_vulnerable` | compression_method byte in ServerHello |
 | `tls.extensions.sct.delivery_paths` (tls_extension) | 18 (signed_certificate_timestamp) |
 | `tls.extensions.truncated_hmac` | 4 (RFC 6066 §7 — deprecated) |
 | `tls.extensions.npn` | 13172 (Google pre-ALPN, deprecated) |

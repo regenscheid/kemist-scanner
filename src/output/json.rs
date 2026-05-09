@@ -15,10 +15,10 @@ use crate::model::protocol::TlsVersion;
 use crate::model::scan_result::{
     Capabilities, CertificateAlternate, CertificateFacts, Certificates, CipherSuiteEntry,
     ClientAuthRequestEntry, DhParametersObservation, DowngradeSignaling, GroupObservation, Hsts,
-    Http, Method, ObservationBool, OcspStapling, PublicKey, RenegotiationBehavior, ScanMetadata,
-    ScanResult, Scanner as ScannerMeta, SctObservation, SecurityTxt, SkeSigObservation,
-    SniBehavior, Tls, TlsCipherSuites, TlsExtensions, TlsGroups, TlsNegotiated, TlsVersionsOffered,
-    Validation, VersionOffered, SCHEMA_VERSION,
+    Http, Method, ObservationBool, OcspStapling, PublicKey, RecordCompressionObservation,
+    RenegotiationBehavior, ScanMetadata, ScanResult, Scanner as ScannerMeta, SctObservation,
+    SecurityTxt, SkeSigObservation, SniBehavior, Tls, TlsCipherSuites, TlsExtensions, TlsGroups,
+    TlsNegotiated, TlsVersionsOffered, Validation, VersionOffered, SCHEMA_VERSION,
 };
 #[cfg(feature = "legacy-probes")]
 use crate::model::scan_result::{ClientAuthCaDn, ClientAuthOidFilter};
@@ -892,13 +892,35 @@ fn build_behavioral_probes(results: &ScanResults) -> crate::model::scan_result::
         .and_then(|h| h.error.clone())
         .unwrap_or_else(|| "hello_probe_not_run".to_string());
 
-    // ClientHello/ServerHello body field — `compression_methods`
-    // (RFC 5246 §7.4.1.3), not an extension. Empty when the byte
-    // probe didn't succeed.
-    let compression_offered: Vec<String> = hello
-        .and_then(|h| h.compression_selected.clone())
-        .map(|c| vec![c])
-        .unwrap_or_default();
+    // ClientHello/ServerHello body field — `compression_method`
+    // (RFC 5246 §7.4.1.3), not an extension. `null` means no record
+    // compression; any non-null selection is the CRIME-relevant case.
+    let compression_selected = hello.and_then(|h| h.compression_selected.clone());
+    let crime_vulnerable = match compression_selected.as_deref() {
+        Some(method) => ObservationBool::probe(is_record_compression_vulnerable(method)),
+        None => ObservationBool::not_probed(&format!("hello_probe_failed:{hello_fail_reason}")),
+    };
+    let record_compression_by_version = results
+        .record_compression_observed
+        .iter()
+        .map(|obs| RecordCompressionObservation {
+            version: obs.version.as_str().to_string(),
+            compression_selected: obs.compression_selected.clone(),
+            crime_vulnerable: if obs.server_hello_parsed {
+                match obs.compression_selected.as_deref() {
+                    Some(method) => {
+                        ObservationBool::probe(is_record_compression_vulnerable(method))
+                    }
+                    None => ObservationBool::not_probed("compression_method_missing"),
+                }
+            } else {
+                ObservationBool::not_probed(&format!(
+                    "record_compression_probe_failed:{}",
+                    obs.error.as_deref().unwrap_or("server_hello_not_parsed")
+                ))
+            },
+        })
+        .collect();
 
     // RFC 8701 GREASE echo. `true` = server echoed an unknown
     // extension (protocol violation); `false` = server correctly
@@ -961,12 +983,18 @@ fn build_behavioral_probes(results: &ScanResults) -> crate::model::scan_result::
 
     BehavioralProbes {
         heartbeat_echoes_oversized_payload,
-        compression_offered,
+        compression_selected,
+        crime_vulnerable,
+        record_compression_by_version,
         grease_echoed,
         hello_retry_request,
         ephemeral_key_reuse: build_ephemeral_key_reuse(results),
         bleichenbacher_oracle_probe: build_bleichenbacher_oracle_probe(results),
     }
+}
+
+fn is_record_compression_vulnerable(method: &str) -> bool {
+    method != "null"
 }
 
 /// Merge the ROBOT probe observation from

@@ -61,6 +61,7 @@ fn fixture_results() -> ScanResults {
         group_probes: None,
         sni_behavior: None,
         hello_observed: None,
+        record_compression_observed: Vec::new(),
         hrr_observed: None,
         sslv2_observation: None,
         alpn_matrix: None,

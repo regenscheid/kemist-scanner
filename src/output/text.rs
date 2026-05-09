@@ -436,9 +436,10 @@ fn render_behavioral_probes(r: &ScanResult) {
     let bp = &r.tls.behavioral_probes;
     section("Behavioral probes");
     print_obs_bool("heartbleed_echo", &bp.heartbeat_echoes_oversized_payload);
-    if !bp.compression_offered.is_empty() {
-        kv("compression_methods", &bp.compression_offered.join(", "));
+    if let Some(selected) = &bp.compression_selected {
+        kv("compression_selected", selected);
     }
+    print_obs_bool("crime_vulnerable", &bp.crime_vulnerable);
     print_obs_bool("grease_echoed", &bp.grease_echoed);
     print_obs_bool("hello_retry_request", &bp.hello_retry_request);
     // ephemeral_key_reuse + bleichenbacher_oracle_probe are

@@ -169,7 +169,8 @@ pub struct Tls {
     /// Non-extension handshake observations: vulnerability probes
     /// (Heartbleed payload echo, ephemeral-key reuse / Raccoon, ROBOT)
     /// plus ClientHello-body / ServerHello-variant signals
-    /// (`compression_offered`, `hello_retry_request`, `grease_echoed`).
+    /// (`compression_selected`, `crime_vulnerable`,
+    /// `hello_retry_request`, `grease_echoed`).
     /// These were grouped under `extensions` in schema v1.0 because
     /// they're observed in the same handshake window, but none of
     /// them are TLS extensions in the RFC 5246 §7.4.1.4 / RFC 8446
@@ -626,7 +627,8 @@ pub struct TlsExtensions {
 /// Handshake-time observations that aren't TLS extensions: active
 /// vulnerability probes (Heartbleed payload echo, ephemeral-key reuse,
 /// ROBOT) plus ClientHello-body / ServerHello-variant signals
-/// (`compression_offered`, `hello_retry_request`, `grease_echoed`).
+/// (`compression_selected`, `crime_vulnerable`,
+/// `hello_retry_request`, `grease_echoed`).
 /// Schema v2.0 split these out of `tls.extensions` to make the
 /// distinction explicit; v1.0 grouped them all under `extensions`.
 #[derive(Serialize, Debug, Clone)]
@@ -642,7 +644,15 @@ pub struct BehavioralProbes {
     /// Note: this is not RFC 8879 certificate compression. `"null"`
     /// is the safe modern value; `"deflate"` is the CRIME-relevant
     /// value (RFC 7457 §2.1).
-    pub compression_offered: Vec<String>,
+    pub compression_selected: Option<String>,
+    /// Explicit CRIME-style record-compression verdict derived from
+    /// `compression_selected`. `true` means the server selected a
+    /// non-null TLS record-compression method from our offer.
+    pub crime_vulnerable: ObservationBool,
+    /// Per-protocol-version record-compression probes for SSLv3
+    /// through TLS 1.2. This catches servers that only negotiate
+    /// compression on older protocol versions.
+    pub record_compression_by_version: Vec<RecordCompressionObservation>,
     /// RFC 8701 GREASE echo-detection. `true` = server echoed an
     /// unknown extension (protocol violation signal — the server's
     /// ClientHello parser is non-conformant). `false` = server
@@ -674,6 +684,19 @@ pub struct BehavioralProbes {
     /// records the five-entry comparison table; downstream
     /// interprets.
     pub bleichenbacher_oracle_probe: BleichenbacherOracleProbe,
+}
+
+#[derive(Serialize, Debug, Clone)]
+pub struct RecordCompressionObservation {
+    /// Protocol version targeted by this ClientHello, rendered as
+    /// `"SSLv3"`, `"TLSv1.0"`, `"TLSv1.1"`, or `"TLSv1.2"`.
+    pub version: String,
+    /// Record-layer compression method selected by the server, when
+    /// the probe reached a parseable ServerHello.
+    pub compression_selected: Option<String>,
+    /// `true` when the server selected a non-null TLS
+    /// record-compression method.
+    pub crime_vulnerable: ObservationBool,
 }
 
 /// Per-variant record for the ROBOT differential probe.

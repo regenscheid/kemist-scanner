@@ -23,18 +23,15 @@ same behavior.
   additive new fields with default `not_probed: feature_disabled` /
   empty rendering on absent data.
 - **`tls.extensions` split into `tls.extensions` + `tls.behavioral_probes`.**
-  Six fields moved out of `tls.extensions` because they aren't TLS
-  extensions in the RFC 5246 §7.4.1.4 / RFC 8446 §4.2 sense:
-  `heartbeat_echoes_oversized_payload`, `compression_offered`,
+  The following observations live under `tls.behavioral_probes`
+  because they aren't TLS extensions in the RFC 5246 §7.4.1.4 /
+  RFC 8446 §4.2 sense:
+  `heartbeat_echoes_oversized_payload`, `compression_selected`,
+  `crime_vulnerable`, `record_compression_by_version`,
   `grease_echoed`, `hello_retry_request`, `ephemeral_key_reuse`,
-  `bleichenbacher_oracle_probe`. The first is a Heartbleed
-  vulnerability probe, the second is a ClientHello-body field
-  (RFC 5246 §7.4.1.3, predates extensions), the third is an RFC
-  8701 conformance check, the fourth is a ServerHello variant
-  (random == sentinel per RFC 8446 §4.1.3), and the last two are
-  active vulnerability probes (Raccoon CVE-2020-1968, ROBOT). True
-  extensions stay under `tls.extensions`. Polarity (`true` = good
-  vs bad) varies per field within `behavioral_probes` and is
+  `bleichenbacher_oracle_probe`. True extensions stay under
+  `tls.extensions`. Polarity (`true` = good vs bad) varies per field
+  within `behavioral_probes` and is
   documented per-field in the schema; the bucket is a structural
   grouping, not a polarity grouping. Dashboards reading
   `tls.extensions.{ephemeral_key_reuse,bleichenbacher_oracle_probe,...}`
