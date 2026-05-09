@@ -291,6 +291,31 @@ fn sigalg_policy_alternate_certificate_chains_surface_once() {
             "signature_algorithm_policy.rsa_pkcs1_only".to_string(),
         ]
     );
+    assert_eq!(record.certificates.observed_chains.len(), 2);
+    let primary_observed = &record.certificates.observed_chains[0];
+    assert_eq!(primary_observed.chain_id, "primary");
+    assert_eq!(primary_observed.role, "primary");
+    assert_eq!(
+        primary_observed.observed_via,
+        vec!["characterization_handshake".to_string()]
+    );
+    assert_eq!(
+        primary_observed.leaf_fingerprint_sha256.as_deref(),
+        Some(primary_fp.as_str())
+    );
+    let alternate_observed = &record.certificates.observed_chains[1];
+    assert_eq!(alternate_observed.role, "alternate");
+    assert_eq!(
+        alternate_observed.leaf_fingerprint_sha256.as_deref(),
+        Some(alternate_fp.as_str())
+    );
+    assert_eq!(
+        alternate_observed.observed_via,
+        vec![
+            "signature_algorithm_policy.rsa_pss_only".to_string(),
+            "signature_algorithm_policy.rsa_pkcs1_only".to_string(),
+        ]
+    );
 
     let record_value = serde_json::to_value(&record).expect("serialize");
     let schema_value = load_schema();
@@ -797,7 +822,31 @@ fn fully_populated_openssl_observations_match_current_schema() {
             .and_then(|v| v.as_str()),
         Some("passive_wait_timeout")
     );
-    assert!(tls.get("client_auth_request").is_some());
+    let client_auth = tls.get("client_auth_request").unwrap();
+    assert_eq!(
+        client_auth
+            .pointer("/ca_distinguished_names/0/raw_der_hex")
+            .and_then(|v| v.as_str()),
+        Some("3017310f300d06035504030c064b65696d737407")
+    );
+    assert_eq!(
+        client_auth
+            .pointer("/ca_distinguished_names/0/raw_der_b64")
+            .and_then(|v| v.as_str()),
+        Some("3017310f300d06035504030c064b65696d737407")
+    );
+    assert_eq!(
+        client_auth
+            .pointer("/oid_filters/0/values_hex/0")
+            .and_then(|v| v.as_str()),
+        Some("deadbeef")
+    );
+    assert_eq!(
+        client_auth
+            .pointer("/oid_filters/0/values_b64/0")
+            .and_then(|v| v.as_str()),
+        Some("deadbeef")
+    );
     // No more legacy_cipher_suites / ffdhe_support at top level.
     assert!(tls.get("legacy_cipher_suites").is_none());
     assert!(tls.get("ffdhe_support").is_none());

@@ -401,10 +401,20 @@
           "properties": {
             "omitted_probe": {
               "type": ["string", "null"],
-              "enum": ["same_cert", "different_cert", "rejected", "error", "not_probed", null]
+              "enum": ["same_cert", "different_cert", "rejected", "error", "not_probed", null],
+              "deprecated": true,
+              "description": "Deprecated compatibility field; prefer probes[] entry with variant=omitted. Planned removal in schema v3."
             },
-            "method": { "$ref": "#/$defs/method" },
-            "reason": { "type": "string" },
+            "method": {
+              "allOf": [{ "$ref": "#/$defs/method" }],
+              "deprecated": true,
+              "description": "Deprecated compatibility field for omitted_probe; prefer probes[] entry with variant=omitted. Planned removal in schema v3."
+            },
+            "reason": {
+              "type": "string",
+              "deprecated": true,
+              "description": "Deprecated compatibility field for omitted_probe; prefer probes[] entry with variant=omitted. Planned removal in schema v3."
+            },
             "probes": {
               "type": "array",
               "items": {
@@ -465,12 +475,30 @@
             },
             "client_initiated_verdict": {
               "type": ["string", "null"],
-              "enum": ["accepted", "rejected", "not_attempted", "error", null]
+              "enum": ["accepted", "rejected", "not_attempted", "error", null],
+              "deprecated": true,
+              "description": "Deprecated compatibility field; prefer client_initiated.accepted. Planned removal in schema v3."
             },
-            "method": { "$ref": "#/$defs/method" },
-            "reason": { "type": "string" },
-            "server_initiated_observed": { "$ref": "#/$defs/observationBool" },
-            "server_initiated_probe_reason": { "type": "string" }
+            "method": {
+              "allOf": [{ "$ref": "#/$defs/method" }],
+              "deprecated": true,
+              "description": "Deprecated compatibility field for client_initiated_verdict; prefer client_initiated.accepted.method. Planned removal in schema v3."
+            },
+            "reason": {
+              "type": "string",
+              "deprecated": true,
+              "description": "Deprecated compatibility field for client_initiated_verdict; prefer client_initiated.accepted.reason. Planned removal in schema v3."
+            },
+            "server_initiated_observed": {
+              "allOf": [{ "$ref": "#/$defs/observationBool" }],
+              "deprecated": true,
+              "description": "Deprecated compatibility field; prefer server_initiated.observed. Planned removal in schema v3."
+            },
+            "server_initiated_probe_reason": {
+              "type": "string",
+              "deprecated": true,
+              "description": "Deprecated compatibility field; prefer server_initiated.observed.reason. Planned removal in schema v3."
+            }
           },
           "additionalProperties": false
         },
@@ -492,7 +520,16 @@
                 "type": "object",
                 "required": ["raw_der_b64"],
                 "properties": {
-                  "raw_der_b64": { "type": "string" },
+                  "raw_der_hex": {
+                    "type": "string",
+                    "pattern": "^([0-9a-f]{2})*$",
+                    "description": "Preferred hex-encoded DER distinguished name bytes."
+                  },
+                  "raw_der_b64": {
+                    "type": "string",
+                    "deprecated": true,
+                    "description": "Deprecated misnamed compatibility field. It contains hex, not base64; prefer raw_der_hex. Planned removal in schema v3."
+                  },
                   "common_name": { "type": "string" },
                   "organization": { "type": "string" }
                 },
@@ -506,7 +543,17 @@
                 "required": ["oid", "values_b64"],
                 "properties": {
                   "oid": { "type": "string" },
-                  "values_b64": { "type": "array", "items": { "type": "string" } }
+                  "values_hex": {
+                    "type": "array",
+                    "items": { "type": "string", "pattern": "^([0-9a-f]{2})*$" },
+                    "description": "Preferred hex-encoded DER OID filter values."
+                  },
+                  "values_b64": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "deprecated": true,
+                    "description": "Deprecated misnamed compatibility field. Values contain hex, not base64; prefer values_hex. Planned removal in schema v3."
+                  }
                 },
                 "additionalProperties": false
               }
@@ -552,13 +599,33 @@
       "type": "object",
       "required": ["chain", "chain_length"],
       "properties": {
-        "leaf": { "$ref": "#/$defs/certificateFacts" },
-        "chain": { "type": "array", "items": { "$ref": "#/$defs/certificateFacts" } },
-        "chain_length": { "type": "integer", "minimum": 0 },
+        "observed_chains": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/certificateChainObservation" },
+          "description": "Preferred schema-2.1+ chain observation list. Contains the primary characterization chain and alternate chains observed by constrained probes. New consumers should prefer this over leaf/chain/chain_length/alternates."
+        },
+        "leaf": {
+          "allOf": [{ "$ref": "#/$defs/certificateFacts" }],
+          "deprecated": true,
+          "description": "Deprecated compatibility field; prefer observed_chains[] primary entry chain[0]. Planned removal in schema v3."
+        },
+        "chain": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/certificateFacts" },
+          "deprecated": true,
+          "description": "Deprecated compatibility field; prefer observed_chains[] primary entry chain. Planned removal in schema v3."
+        },
+        "chain_length": {
+          "type": "integer",
+          "minimum": 0,
+          "deprecated": true,
+          "description": "Deprecated compatibility field; prefer observed_chains[] primary entry chain.length. Planned removal in schema v3."
+        },
         "alternates": {
           "type": "array",
           "items": { "$ref": "#/$defs/certificateAlternate" },
-          "description": "Alternate certificate chains observed by constrained probe handshakes, deduplicated by leaf SHA-256 fingerprint. The primary characterization chain remains in leaf/chain; validation and revocation observations currently apply only to the primary chain."
+          "deprecated": true,
+          "description": "Deprecated compatibility field for alternate chains; prefer observed_chains[] entries with role=alternate. Planned removal in schema v3."
         }
       },
       "additionalProperties": false
@@ -585,7 +652,11 @@
           "additionalProperties": { "$ref": "#/$defs/observationBool" }
         },
         "name_matches_sni": { "$ref": "#/$defs/observationBool" },
-        "validation_error": { "type": ["string", "null"] },
+        "validation_error": {
+          "type": ["string", "null"],
+          "deprecated": true,
+          "description": "Deprecated compatibility field for webpki-roots only; prefer per_store_validation_errors. Planned removal in schema v3."
+        },
         "per_store_validation_errors": {
           "type": "object",
           "description": "Per-store error strings — populated only for stores whose chain-validation attempt failed. Keys are canonical store names.",
@@ -979,7 +1050,12 @@
           },
           "additionalProperties": false
         },
-        "embedded_scts": { "type": "integer", "minimum": 0 },
+        "embedded_scts": {
+          "type": "integer",
+          "minimum": 0,
+          "deprecated": true,
+          "description": "Deprecated compatibility count; prefer extensions.scts[]. Planned removal in schema v3."
+        },
         "fingerprint_sha256": { "type": "string" },
         "fingerprint_sha1": { "type": "string" },
         "wire_position": {
@@ -1035,6 +1111,36 @@
       },
       "additionalProperties": false
     },
+    "certificateChainObservation": {
+      "type": "object",
+      "required": ["chain_id", "role", "observed_via", "chain"],
+      "properties": {
+        "chain_id": {
+          "type": "string",
+          "description": "Stable local ID for this scan result, e.g. primary or alternate-<leaf-fingerprint-prefix>."
+        },
+        "role": {
+          "type": "string",
+          "enum": ["primary", "alternate"]
+        },
+        "observed_via": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Probe paths that observed this chain."
+        },
+        "leaf_fingerprint_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "chain_fingerprint_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "description": "SHA-256 over concatenated DER chain bytes when raw chain DER was available."
+        },
+        "chain": { "type": "array", "items": { "$ref": "#/$defs/certificateFacts" } }
+      },
+      "additionalProperties": false
+    },
     "certificateAlternate": {
       "type": "object",
       "required": ["observed_via", "chain", "chain_length"],
@@ -1043,6 +1149,14 @@
           "type": "array",
           "items": { "type": "string" },
           "description": "Probe paths that observed this alternate leaf/chain, for example signature_algorithm_policy.rsa_pss_only."
+        },
+        "leaf_fingerprint_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "chain_fingerprint_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
         },
         "leaf": { "$ref": "#/$defs/certificateFacts" },
         "chain": { "type": "array", "items": { "$ref": "#/$defs/certificateFacts" } },
@@ -1222,6 +1336,11 @@
           "type": "string",
           "pattern": "^[0-9a-f]{64}$",
           "description": "Lowercase hex SHA-256 of the DER of the leaf cert the server returned under this constraint. Populated only when the handshake completed. Two distinct values across the sigalg probe set signal a dual-cert deployment (e.g. RSA + ECDSA leaves)."
+        },
+        "chain_fingerprint_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "description": "Lowercase hex SHA-256 over concatenated DER chain bytes observed under this constraint. Populated only when the handshake completed and raw chain DER was available."
         },
         "leaf_subject_dn": {
           "type": "string",

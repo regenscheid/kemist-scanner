@@ -309,6 +309,11 @@ pub struct ConstrainedProbeResult {
     /// fingerprints; it does not compute the comparison.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub leaf_fingerprint_sha256: Option<String>,
+    /// SHA-256 over concatenated DER chain bytes. Populated only
+    /// when the constrained probe completed and raw chain DER was
+    /// available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chain_fingerprint_sha256: Option<String>,
     /// Subject DN of the leaf (same formatting as
     /// `certificates.leaf.subject_dn`). Convenience for downstream
     /// log correlation; the authoritative identifier is
@@ -332,6 +337,7 @@ impl Default for ConstrainedProbeResult {
             method: Method::NotProbed,
             reason: None,
             leaf_fingerprint_sha256: None,
+            chain_fingerprint_sha256: None,
             leaf_subject_dn: None,
             cert_chain: Vec::new(),
         }
@@ -1157,9 +1163,10 @@ pub struct ServerInitiatedRenegotiation {
 /// One distinguished-name entry in `tls.client_auth_request.ca_distinguished_names`.
 #[derive(Serialize, Debug, Clone)]
 pub struct ClientAuthCaDn {
-    /// Hex-encoded DER (schema field is nominally base64 — see
-    /// `client_auth.rs::base64_encode` for the shim, swappable to real
-    /// base64 without a schema rename).
+    /// Hex-encoded DER. Preferred field.
+    pub raw_der_hex: String,
+    /// Legacy misnamed field. Contains the same hex bytes as `raw_der_hex`
+    /// and is planned for removal in schema v3.
     pub raw_der_b64: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub common_name: Option<String>,
@@ -1171,6 +1178,10 @@ pub struct ClientAuthCaDn {
 #[derive(Serialize, Debug, Clone)]
 pub struct ClientAuthOidFilter {
     pub oid: String,
+    /// Hex-encoded DER values. Preferred field.
+    pub values_hex: Vec<String>,
+    /// Legacy misnamed field. Contains the same hex bytes as `values_hex`
+    /// and is planned for removal in schema v3.
     pub values_b64: Vec<String>,
 }
 
@@ -1191,12 +1202,42 @@ pub struct ClientAuthRequestEntry {
 
 #[derive(Serialize, Debug, Clone)]
 pub struct Certificates {
+    /// Preferred chain observation shape for schema 2.1+ consumers.
+    /// Includes the primary characterization chain and any alternate
+    /// chains observed by constrained handshakes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub observed_chains: Vec<CertificateChainObservation>,
+    /// Legacy compatibility field; prefer
+    /// `observed_chains[].chain[0]` on the primary chain. Planned for
+    /// removal in schema v3.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub leaf: Option<CertificateFacts>,
+    /// Legacy compatibility field; prefer the primary
+    /// `observed_chains[]` entry. Planned for removal in schema v3.
     pub chain: Vec<CertificateFacts>,
+    /// Legacy compatibility field; prefer `chain.len()` on the primary
+    /// chain. Planned for removal in schema v3.
     pub chain_length: usize,
+    /// Legacy compatibility field; prefer `observed_chains[]` entries
+    /// where `role == "alternate"`. Planned for removal in schema v3.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub alternates: Vec<CertificateAlternate>,
+}
+
+#[derive(Serialize, Debug, Clone)]
+pub struct CertificateChainObservation {
+    /// Stable local identifier: `primary` or `alternate-<leaf_fp_prefix>`.
+    pub chain_id: String,
+    /// `primary` for the characterization chain, `alternate` for chains
+    /// observed only under constrained probe paths.
+    pub role: String,
+    /// Probe paths that observed this chain.
+    pub observed_via: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub leaf_fingerprint_sha256: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chain_fingerprint_sha256: Option<String>,
+    pub chain: Vec<CertificateFacts>,
 }
 
 #[derive(Serialize, Debug, Clone)]
@@ -1204,6 +1245,10 @@ pub struct CertificateAlternate {
     /// Probe paths that observed this alternate leaf/chain. Stable
     /// strings such as `signature_algorithm_policy.rsa_pss_only`.
     pub observed_via: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub leaf_fingerprint_sha256: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chain_fingerprint_sha256: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub leaf: Option<CertificateFacts>,
     pub chain: Vec<CertificateFacts>,

@@ -6,6 +6,7 @@
 //! scanner measured" to "what the JSON contract says."
 
 use chrono::{DateTime, Utc};
+use sha2::{Digest, Sha256};
 #[cfg(feature = "legacy-probes")]
 use std::collections::BTreeMap;
 
@@ -13,14 +14,14 @@ use crate::model::cert::CertificateInfo;
 use crate::model::errors::ScannerError;
 use crate::model::protocol::TlsVersion;
 use crate::model::scan_result::{
-    Capabilities, CertificateAlternate, CertificateFacts, Certificates, CipherSuiteEntry,
-    ClientAuthRequestEntry, ClientInitiatedRenegotiation, DhParametersObservation,
-    DowngradeSignaling, GroupObservation, Hsts, Http, Method, ObservationBool, ObservationU16,
-    ObservedServerExtension, OcspStapling, PublicKey, RecordCompressionObservation,
-    RenegotiationBehavior, ScanMetadata, ScanResult, Scanner as ScannerMeta, SctObservation,
-    SecurityTxt, ServerInitiatedRenegotiation, SkeSigObservation, SniBehavior, SniProbeEntry, Tls,
-    TlsCipherSuites, TlsExtensions, TlsGroups, TlsNegotiated, TlsVersionsOffered, Validation,
-    VersionOffered, SCHEMA_VERSION,
+    Capabilities, CertificateAlternate, CertificateChainObservation, CertificateFacts,
+    Certificates, CipherSuiteEntry, ClientAuthRequestEntry, ClientInitiatedRenegotiation,
+    DhParametersObservation, DowngradeSignaling, GroupObservation, Hsts, Http, Method,
+    ObservationBool, ObservationU16, ObservedServerExtension, OcspStapling, PublicKey,
+    RecordCompressionObservation, RenegotiationBehavior, ScanMetadata, ScanResult,
+    Scanner as ScannerMeta, SctObservation, SecurityTxt, ServerInitiatedRenegotiation,
+    SkeSigObservation, SniBehavior, SniProbeEntry, Tls, TlsCipherSuites, TlsExtensions, TlsGroups,
+    TlsNegotiated, TlsVersionsOffered, Validation, VersionOffered, SCHEMA_VERSION,
 };
 #[cfg(feature = "legacy-probes")]
 use crate::model::scan_result::{ClientAuthCaDn, ClientAuthOidFilter};
@@ -1361,11 +1362,13 @@ fn build_certificates(results: &ScanResults) -> Certificates {
             leaf_facts.revocation = Some(rev);
         }
     }
+    let alternates = build_alternate_certificates(results);
     Certificates {
+        observed_chains: build_observed_certificate_chains(results, &facts, &alternates),
         leaf: facts.first().cloned(),
         chain: facts.clone(),
         chain_length: facts.len(),
-        alternates: build_alternate_certificates(results),
+        alternates,
     }
 }
 
@@ -1399,7 +1402,8 @@ fn build_alternate_certificates(results: &ScanResults) -> Vec<CertificateAlterna
         ("signature_algorithm_policy.eddsa_only", &policy.eddsa_only),
     ];
 
-    let mut by_leaf: BTreeMap<String, (Vec<String>, Vec<CertificateInfo>)> = BTreeMap::new();
+    let mut by_leaf: BTreeMap<String, (Vec<String>, Vec<CertificateInfo>, Option<String>)> =
+        BTreeMap::new();
     for (via, probe) in probes {
         let Some(leaf) = probe.cert_chain.first() else {
             continue;
@@ -1409,9 +1413,18 @@ fn build_alternate_certificates(results: &ScanResults) -> Vec<CertificateAlterna
         }
         let entry = by_leaf
             .entry(leaf.fingerprint_sha256.clone())
-            .or_insert_with(|| (Vec::new(), probe.cert_chain.clone()));
+            .or_insert_with(|| {
+                (
+                    Vec::new(),
+                    probe.cert_chain.clone(),
+                    probe.chain_fingerprint_sha256.clone(),
+                )
+            });
         if !entry.0.iter().any(|v| v == via) {
             entry.0.push(via.to_string());
+        }
+        if entry.2.is_none() {
+            entry.2 = probe.chain_fingerprint_sha256.clone();
         }
     }
 
@@ -1426,19 +1439,30 @@ fn build_alternate_certificates(results: &ScanResults) -> Vec<CertificateAlterna
             let via = format!("cipher_suite.{}", r.name);
             let entry = by_leaf
                 .entry(leaf.fingerprint_sha256.clone())
-                .or_insert_with(|| (Vec::new(), r.cert_chain.clone()));
+                .or_insert_with(|| {
+                    (
+                        Vec::new(),
+                        r.cert_chain.clone(),
+                        r.chain_fingerprint_sha256.clone(),
+                    )
+                });
             if !entry.0.iter().any(|v| v == &via) {
                 entry.0.push(via);
+            }
+            if entry.2.is_none() {
+                entry.2 = r.chain_fingerprint_sha256.clone();
             }
         }
     }
 
     by_leaf
         .into_values()
-        .map(|(observed_via, chain)| {
+        .map(|(observed_via, chain, chain_fingerprint_sha256)| {
             let facts: Vec<CertificateFacts> = chain.iter().map(cert_to_facts).collect();
             CertificateAlternate {
                 observed_via,
+                leaf_fingerprint_sha256: facts.first().map(|c| c.fingerprint_sha256.clone()),
+                chain_fingerprint_sha256,
                 leaf: facts.first().cloned(),
                 chain: facts.clone(),
                 chain_length: facts.len(),
@@ -1450,6 +1474,51 @@ fn build_alternate_certificates(results: &ScanResults) -> Vec<CertificateAlterna
 #[cfg(not(feature = "legacy-probes"))]
 fn build_alternate_certificates(_results: &ScanResults) -> Vec<CertificateAlternate> {
     Vec::new()
+}
+
+fn build_observed_certificate_chains(
+    results: &ScanResults,
+    primary_chain: &[CertificateFacts],
+    alternates: &[CertificateAlternate],
+) -> Vec<CertificateChainObservation> {
+    let mut chains = Vec::new();
+    if !primary_chain.is_empty() {
+        chains.push(CertificateChainObservation {
+            chain_id: "primary".to_string(),
+            role: "primary".to_string(),
+            observed_via: vec!["characterization_handshake".to_string()],
+            leaf_fingerprint_sha256: primary_chain.first().map(|c| c.fingerprint_sha256.clone()),
+            chain_fingerprint_sha256: fingerprint_der_chain(&results.cert_chain_der),
+            chain: primary_chain.to_vec(),
+        });
+    }
+    chains.extend(alternates.iter().map(|alternate| {
+        let suffix = alternate
+            .leaf_fingerprint_sha256
+            .as_deref()
+            .map(|fp| fp.chars().take(12).collect::<String>())
+            .unwrap_or_else(|| "unknown".to_string());
+        CertificateChainObservation {
+            chain_id: format!("alternate-{suffix}"),
+            role: "alternate".to_string(),
+            observed_via: alternate.observed_via.clone(),
+            leaf_fingerprint_sha256: alternate.leaf_fingerprint_sha256.clone(),
+            chain_fingerprint_sha256: alternate.chain_fingerprint_sha256.clone(),
+            chain: alternate.chain.clone(),
+        }
+    }));
+    chains
+}
+
+fn fingerprint_der_chain(raw_chain: &[Vec<u8>]) -> Option<String> {
+    if raw_chain.is_empty() {
+        return None;
+    }
+    let mut hasher = Sha256::new();
+    for der in raw_chain {
+        hasher.update(der);
+    }
+    Some(hex::encode(hasher.finalize()))
 }
 
 /// Assemble the leaf's out-of-band revocation observations:
@@ -2045,6 +2114,7 @@ fn build_client_auth_request(results: &ScanResults) -> Option<ClientAuthRequestE
                 .ca_distinguished_names
                 .iter()
                 .map(|d| ClientAuthCaDn {
+                    raw_der_hex: d.raw_der_b64.clone(),
                     raw_der_b64: d.raw_der_b64.clone(),
                     common_name: d.common_name.clone(),
                     organization: d.organization.clone(),
@@ -2055,6 +2125,7 @@ fn build_client_auth_request(results: &ScanResults) -> Option<ClientAuthRequestE
                 .iter()
                 .map(|f| ClientAuthOidFilter {
                     oid: f.oid.clone(),
+                    values_hex: f.values_b64.clone(),
                     values_b64: f.values_b64.clone(),
                 })
                 .collect(),

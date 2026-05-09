@@ -21,6 +21,34 @@ Schema versioning is semver over **shape only**, not semantic meaning.
 Consumers **MUST** ignore unknown fields — a scanner from a later minor
 may emit observations a consumer hasn't seen before.
 
+### Deprecation Policy
+
+Schema 2.x may emit both a preferred field and an older compatibility
+field when a name or shape turned out to be misleading. Deprecated
+fields stay populated through schema 2.x so existing consumers do not
+break, but new integrations should read the preferred fields. Deprecated
+compatibility fields are annotated with `"deprecated": true` in
+[`schemas/output-v1.json`](../schemas/output-v1.json) and are planned
+for removal in schema v3.
+
+Current schema-2.x compatibility fields:
+
+| Deprecated field | Prefer | Removal |
+|---|---|---|
+| `tls.sni_behavior.omitted_probe` | `tls.sni_behavior.probes[]` row where `variant == "omitted"` | schema v3 |
+| `tls.sni_behavior.method` / `reason` | same omitted-SNI row's `outcome` / `reason` | schema v3 |
+| `tls.renegotiation_behavior.client_initiated_verdict` | `tls.renegotiation_behavior.client_initiated.accepted` | schema v3 |
+| `tls.renegotiation_behavior.method` / `reason` | `tls.renegotiation_behavior.client_initiated.accepted.method` / `reason` | schema v3 |
+| `tls.renegotiation_behavior.server_initiated_observed` / `server_initiated_probe_reason` | `tls.renegotiation_behavior.server_initiated.observed` | schema v3 |
+| `tls.client_auth_request.ca_distinguished_names[].raw_der_b64` | `raw_der_hex` | schema v3 |
+| `tls.client_auth_request.oid_filters[].values_b64` | `values_hex` | schema v3 |
+| `certificates.leaf` | `certificates.observed_chains[]` primary entry's `chain[0]` | schema v3 |
+| `certificates.chain` | `certificates.observed_chains[]` primary entry's `chain` | schema v3 |
+| `certificates.chain_length` | primary observed chain's `chain.length` | schema v3 |
+| `certificates.alternates` | `certificates.observed_chains[]` entries where `role == "alternate"` | schema v3 |
+| `certificates.*.embedded_scts` | `certificates.*.extensions.scts[]` | schema v3 |
+| `validation.validation_error` | `validation.per_store_validation_errors["webpki-roots"]` | schema v3 |
+
 **What the scanner will never emit**, regardless of version:
 - Compliance verdicts, grades, severity rankings, pass/fail judgments
 - Fields named `weak`, `strong`, `compliant`, `recommended`, `insecure`, etc.
@@ -525,6 +553,7 @@ ConstrainedProbeResult = {
   method:                   Method,
   reason?:                  string,
   leaf_fingerprint_sha256?: string,   // SHA-256 (lowercase hex) of leaf DER on complete
+  chain_fingerprint_sha256?: string,  // SHA-256 over concatenated DER chain bytes
   leaf_subject_dn?:         string    // leaf subject DN on complete
 }
 ```
@@ -546,8 +575,10 @@ v1.5 signatures.
 
 **Differential cert-selection observation.** When the handshake
 completes, each constrained probe records `leaf_fingerprint_sha256`
-(SHA-256 of the leaf DER, lowercase hex) and `leaf_subject_dn` (same
-formatting as `certificates.leaf.subject_dn`). ≥2 distinct
+(SHA-256 of the leaf DER, lowercase hex),
+`chain_fingerprint_sha256` when raw chain DER was available, and
+`leaf_subject_dn` (same formatting as
+`certificates.observed_chains[].chain[].subject_dn`). ≥2 distinct
 fingerprints across the five probes signal a dual-cert deployment
 (e.g. RSA + ECDSA leaves on one endpoint); the scanner records the
 fingerprints, downstream rule engines compute the comparison.
@@ -589,9 +620,6 @@ cert verifier; no cert validation is performed.
 ### `tls.sni_behavior`
 ```
 {
-  omitted_probe: "same_cert" | "different_cert" | "rejected" | "error" | "not_probed" | null,
-  method: Method,
-  reason?: string,
   probes?: [
     {
       variant: "omitted" | "bogus_dns" | "ip_literal",
@@ -600,14 +628,21 @@ cert verifier; no cert validation is performed.
       leaf_fingerprint_sha256?: string,
       reason?: string
     }
-  ]
+  ],
+
+  // Deprecated compatibility fields; prefer probes[].
+  omitted_probe: "same_cert" | "different_cert" | "rejected" | "error" | "not_probed" | null,
+  method: Method,
+  reason?: string
 }
 ```
 Comparison of leaf cert fingerprints between the SNI-set characterization
-handshake and SNI-variant handshakes. `omitted_probe` is retained for
-compatibility and mirrors the `variant: "omitted"` row; `probes[]` also
-records a bogus-DNS SNI and an IP-literal attempt when the TLS backend can
-express it. rustls is used for the omitted and bogus-DNS rows; when
+handshake and SNI-variant handshakes. New consumers should read
+`probes[]`; the deprecated `omitted_probe`/`method`/`reason` fields
+mirror the `variant: "omitted"` row for schema-2.x compatibility.
+`probes[]` also records a bogus-DNS SNI and an IP-literal attempt when
+the TLS backend can express it. rustls is used for the omitted and
+bogus-DNS rows; when
 `legacy-probes` is enabled, the IP-literal row is attempted through OpenSSL
 because rustls correctly refuses to serialize IP literals as SNI. Without
 `legacy-probes`, the IP-literal row is emitted as `not_probed`.
@@ -664,8 +699,41 @@ Use the nested fields for new consumers:
 
 The older `client_initiated_verdict`, top-level `method`/`reason`,
 `server_initiated_observed`, and `server_initiated_probe_reason` fields
-remain for compatibility. Kemist does not fuzz application protocol
-triggers.
+remain for schema-2.x compatibility and are planned for removal in
+schema v3. Kemist does not fuzz application protocol triggers.
+
+### `tls.client_auth_request`
+```
+{
+  requested: bool,
+  certificate_types: [int, ...],
+  signature_algorithms: [string, ...],
+  ca_distinguished_names: [
+    {
+      raw_der_hex: string,
+      raw_der_b64: string,  // deprecated: misnamed, contains hex
+      common_name?: string,
+      organization?: string
+    }
+  ],
+  oid_filters: [
+    {
+      oid: string,
+      values_hex: [string, ...],
+      values_b64: [string, ...]  // deprecated: misnamed, contains hex
+    }
+  ],
+  alert_on_empty_cert?: string | null,
+  method: Method,
+  reason?: string
+}
+```
+
+OpenSSL-backed capture of the server's TLS 1.2 / TLS 1.3
+`CertificateRequest`. The preferred raw-byte encodings are
+`raw_der_hex` and `values_hex`. Schema 2.x also emits the older
+misnamed `_b64` fields with identical hex content for compatibility;
+those fields are planned for removal in schema v3.
 
 ### `tls.channel_binding`
 ```
@@ -704,6 +772,18 @@ RFC 7677 / RFC 5802 SCRAM channel-binding requirements.
 ### `certificates`
 ```
 {
+  observed_chains?: [
+    {
+      chain_id: string,
+      role: "primary" | "alternate",
+      observed_via: [string, ...],
+      leaf_fingerprint_sha256?: string,
+      chain_fingerprint_sha256?: string,
+      chain: [CertificateFacts...]
+    }
+  ],
+
+  // Deprecated compatibility fields; prefer observed_chains[].
   leaf?: CertificateFacts,
   chain: [CertificateFacts...],
   chain_length: int,
@@ -711,14 +791,19 @@ RFC 7677 / RFC 5802 SCRAM channel-binding requirements.
 }
 ```
 
-`alternates` contains full chains observed by constrained probe
-handshakes when they differ from the primary characterization leaf,
-deduplicated by leaf SHA-256 fingerprint. Today this is populated from
-the OpenSSL signature-algorithm policy probes, with `observed_via`
-values such as `signature_algorithm_policy.rsa_pss_only`. Validation
-and revocation fields still describe only the primary chain.
+`observed_chains[]` is the preferred shape for new consumers. It
+contains the primary characterization chain and any alternate chains
+observed by constrained probe handshakes, deduplicated by leaf SHA-256
+fingerprint. `observed_via` values include paths such as
+`characterization_handshake`, `signature_algorithm_policy.rsa_pss_only`,
+and `cipher_suite.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256`.
 
-`CertificateAlternate = {observed_via: string[], leaf?: CertificateFacts, chain: CertificateFacts[], chain_length: int}`.
+The older `leaf`, `chain`, `chain_length`, and `alternates` fields
+remain for schema-2.x compatibility and are planned for removal in
+schema v3. Validation and revocation fields still describe only the
+primary chain.
+
+`CertificateAlternate = {observed_via: string[], leaf_fingerprint_sha256?: string, chain_fingerprint_sha256?: string, leaf?: CertificateFacts, chain: CertificateFacts[], chain_length: int}`.
 
 `CertificateFacts`:
 
@@ -762,8 +847,9 @@ and revocation fields still describe only the primary chain.
 | `scts` | `[SctDetail, ...]` | Per-SCT detail from ext 1.3.6.1.4.1.11129.2.4.2 |
 
 `SctDetail = {log_id: hex, timestamp: RFC3339, signature_hash_algorithm: string, signature_algorithm: string, signature_hex: hex}`.
-The cert-level `embedded_scts` count remains for backwards
-compatibility and equals `scts.len()`.
+The cert-level `embedded_scts` count remains for schema-2.x
+compatibility and equals `scts.len()`; prefer `extensions.scts[]`.
+`embedded_scts` is planned for removal in schema v3.
 
 ### Revocation observations (`certificates.leaf.revocation`)
 
@@ -839,7 +925,7 @@ land in `chain_valid_to_custom_roots`.
 | `chain_valid_to_us_dod_roots` | `data/trust_stores/us_dod.pem`. DoD PKI (placeholder in current snapshot). |
 | `chain_valid_to_custom_roots.<name>` | Per-entry `--extra-trust-store` bundle. |
 | `name_matches_sni` | Store-agnostic SAN/CN match per RFC 6125. |
-| `validation_error` | **Legacy.** Error from webpki-roots validation only, kept for backwards-compatible consumers. New integrations should consume `per_store_validation_errors`. |
+| `validation_error` | **Deprecated compatibility field.** Error from webpki-roots validation only. New integrations should consume `per_store_validation_errors["webpki-roots"]`; planned for removal in schema v3. |
 | `per_store_validation_errors.<name>` | Per-store error category string. Populated only for stores whose chain validation failed. Same taxonomy as `validation_error`. |
 | `trust_store_sources.<name>` | Provenance: `"compiled_in"` / `"cache_refreshed:<path>"` (loaded from `kemist --update-trust-stores` output) / `"runtime_override:<path>"` (user-supplied via `--trust-store NAME:PATH`). |
 | `trust_store_bundle_metadata.<name>` | Per-bundle manifest: `source`, `fetched_at` (ISO 8601), `sha256`, `entry_count`, optional `upstream_version`. Populated only when the store was loaded from the refreshed cache — compile-time + runtime-override loads omit metadata. Lets rule engines pin observations to a specific snapshot. |
