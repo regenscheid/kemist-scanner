@@ -100,10 +100,10 @@ pub struct OpensslObservations {
     /// probe's outer setup failed; `Some(req)` with `req.requested: false`
     /// when the server did not request a client certificate.
     pub client_auth: Option<client_auth::ClientAuthRequest>,
-    /// TLS 1.3 EncryptedExtensions observation — `record_size_limit` +
-    /// `compress_certificate`. `None` when the handshake didn't reach
-    /// EncryptedExtensions (target doesn't speak TLS 1.3, or the
-    /// connection failed before the message arrived).
+    /// TLS 1.3 EncryptedExtensions observation — currently the
+    /// parser-only `record_size_limit` path plus legacy
+    /// `compress_certificate` parser coverage. Normal RFC 8879
+    /// certificate-compression support is observed by rustls.
     pub tls13_extensions: Option<tls13_extensions::Tls13EncryptedExtensions>,
     /// Session resumption observation — TLS 1.2 ticket + rotation
     /// today, TLS 1.3 PSK + 0-RTT stubbed for a future workstream.
@@ -175,8 +175,9 @@ pub async fn run_all_probes(cfg: &ScanConfig) -> Result<OpensslObservations, Sca
     let ca = client_auth::probe(cfg.target, &cfg.hostname, cfg.timeout, cfg.timeout).await;
     out.client_auth = ca;
 
-    // TLS 1.3 EncryptedExtensions capture (record_size_limit,
-    // compress_certificate). Same msg_callback pattern as client_auth.
+    // TLS 1.3 EncryptedExtensions capture (record_size_limit parser;
+    // legacy compress_certificate parser). Same msg_callback pattern
+    // as client_auth.
     let ee = tls13_extensions::probe(cfg.target, &cfg.hostname, cfg.timeout, cfg.timeout).await;
     out.tls13_extensions = Some(ee);
 

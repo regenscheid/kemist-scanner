@@ -31,12 +31,12 @@
 //!
 //! Both RFCs require the server to advertise these extensions *only
 //! in response to* a matching client offer. OpenSSL 3.5 reserves ext
-//! 27 and 28 for its own internal handlers, so `add_custom_ext`
-//! cannot inject a client-side offer — the call returns failure with
-//! an empty error stack. openssl-sys 0.9.109 doesn't expose the
-//! native high-level setters
-//! (`SSL_CTX_set1_cert_comp_preference`, etc.) that would let
-//! OpenSSL's built-in machinery emit the offer.
+//! 27 for its own internal certificate-compression handler, so
+//! `add_custom_ext` cannot inject that client-side offer; normal RFC
+//! 8879 support is observed by rustls instead. OpenSSL 3.5 does not
+//! appear to implement RFC 8449 `record_size_limit` at all, and rustls
+//! 0.23 only exposes local `max_fragment_size`, not the RFC 8449
+//! extension.
 //!
 //! Result: on real-world targets we typically observe `parsed: true`
 //! with empty fields because servers respect the "MUST NOT send
@@ -307,27 +307,13 @@ fn build_context_with_callback() -> Result<SslContext, openssl::error::ErrorStac
 
     // Client-side offer limitation:
     //
-    // Per RFC 8449 §4 and RFC 8879 §3, a TLS 1.3 server MUST NOT send
-    // record_size_limit or compress_certificate in EncryptedExtensions
-    // unless the client offered them in ClientHello. We'd normally use
-    // `SSL_CTX_add_custom_ext` (exposed via `add_custom_ext`) to inject
-    // both — but OpenSSL 3.5 reserves these specific extension codes
-    // for its own internal handlers, so the registration call returns
-    // failure with an empty ErrorStack. openssl-sys 0.9.109 doesn't
-    // expose the high-level native setters
-    // (`SSL_CTX_set1_cert_comp_preference` and friends) that would
-    // let us offer these through OpenSSL's built-in machinery.
-    //
-    // Net: the msg_callback below still fires on every TLS 1.3
-    // handshake and the parser handles any EncryptedExtensions bytes
-    // correctly (unit tests in this file pass). But on real servers
-    // we typically observe `parsed: true` with empty record_size_limit
-    // and compress_certificate fields, because servers respect the
-    // "MUST NOT advertise unsolicited" rule. That's the honest signal.
-    //
-    // Follow-up workstream: once openssl-sys gains bindings for the
-    // native preference setters, wire them in and these fields will
-    // populate on every modern TLS 1.3 deployment.
+    // Per RFC 8449 §4, a TLS 1.3 server MUST NOT send
+    // record_size_limit in EncryptedExtensions unless the client
+    // offered it in ClientHello. OpenSSL 3.5 does not expose or appear
+    // to implement that client offer, and rustls 0.23 has no RFC 8449
+    // client-offer API either. The msg_callback below still fires and
+    // the parser handles EncryptedExtensions correctly, but real
+    // servers normally leave record_size_limit absent.
 
     let ctx = builder.build();
 

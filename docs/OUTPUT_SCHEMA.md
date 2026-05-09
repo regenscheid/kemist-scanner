@@ -92,7 +92,7 @@ against what the scanner build was actually able to probe.
 | `probed_cipher_suites` | `string[]` | Cipher suite names the scanner probes — union across every backend compiled in. Per-suite `provider` tag under `tls.cipher_suites.*` identifies which backend ran each probe |
 | `probed_kx_groups` | `string[]` | KX group names the scanner probes — union across every backend |
 | `config_paths` | `string[]` | Config files consulted (reserved; currently always empty) |
-| `probe_limitations` | `string[]` | Runtime-detected probe gaps (reserved) |
+| `probe_limitations` | `string[]` | Reserved for build-level probe limitations; currently empty. Field-specific limitations are carried beside the affected observation. |
 
 ### `scan`
 ```
@@ -276,7 +276,11 @@ a specific reason — never `supported: false` without a real probe.
   npn: ObservationBool,
   supported_point_formats_echoed: [...],
   max_fragment_length?: string,             // "2^9".."2^12" or "0xNN"
-  record_size_limit?: int,                  // RFC 8449 (see caveat)
+  record_size_limit: {                      // RFC 8449 (see caveat)
+    value: int | null,
+    method: Method,
+    reason?: string
+  },
   compress_certificate_algorithms: [...],   // RFC 8879 (see caveat)
   grease_echoed: ObservationBool,           // RFC 8701
   delegated_credentials: {                  // RFC 9345
@@ -325,16 +329,14 @@ Notes:
 - **`dh_parameters[].prime_raw_hex`** — gated behind
   `--include-dh-raw`. Off by default because FFDHE primes can add
   kilobytes per DHE observation.
-- **`record_size_limit` / `compress_certificate_algorithms`** —
-  captured via an OpenSSL msg-callback on the TLS 1.3
-  EncryptedExtensions message. **Known limitation**: OpenSSL 3.5
-  reserves these extension codes for its own internal handlers so
-  we can't inject a matching client offer via `add_custom_ext`, and
-  openssl-sys 0.9.109 doesn't expose the native setters. Per RFC
-  8449 / 8879, servers MUST NOT advertise these unsolicited — so in
-  practice both fields are typically absent on real scans. A
-  future workstream will close this gap when native binding
-  coverage improves.
+- **`record_size_limit`** — parser support exists via an OpenSSL
+  msg-callback on TLS 1.3 EncryptedExtensions, but the current build
+  has no RFC 8449 client-offer path. OpenSSL 3.5 has no visible
+  `record_size_limit` implementation/API, and rustls 0.23 exposes
+  only local `max_fragment_size`, not the RFC 8449 extension. Per RFC
+  8449, conforming servers MUST NOT advertise this unsolicited. Real
+  scans therefore normally emit
+  `{value: null, method: "not_probed", reason: "client_offer_unsupported_in_current_build"}`.
 - **`truncated_hmac` / `npn`** — observed in plaintext TLS 1.2
   ServerHello via the byte-level hello probe. Client offers both
   extensions to elicit server echoes (without actually negotiating

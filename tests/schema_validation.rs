@@ -761,7 +761,9 @@ fn fully_populated_openssl_observations_match_schema_v1() {
     // tls.extensions.{record_size_limit, compress_certificate_algorithms}.
     let ext = tls.get("extensions").unwrap();
     assert_eq!(
-        ext.get("record_size_limit").and_then(|v| v.as_u64()),
+        ext.get("record_size_limit")
+            .and_then(|v| v.get("value"))
+            .and_then(|v| v.as_u64()),
         Some(16385)
     );
     let comp = ext

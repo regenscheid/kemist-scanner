@@ -152,6 +152,41 @@ impl ObservationBool {
     }
 }
 
+/// Generic `{value, method, reason?}` envelope for integer observations.
+#[derive(Serialize, Debug, Clone)]
+pub struct ObservationU16 {
+    pub value: Option<u16>,
+    pub method: Method,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+impl ObservationU16 {
+    pub fn probe(value: u16) -> Self {
+        Self {
+            value: Some(value),
+            method: Method::Probe,
+            reason: None,
+        }
+    }
+
+    pub fn not_probed(reason: &str) -> Self {
+        Self {
+            value: None,
+            method: Method::NotProbed,
+            reason: Some(reason.into()),
+        }
+    }
+
+    pub fn error(reason: &str) -> Self {
+        Self {
+            value: None,
+            method: Method::Error,
+            reason: Some(reason.into()),
+        }
+    }
+}
+
 #[derive(Serialize, Debug, Clone)]
 pub struct Tls {
     pub versions_offered: TlsVersionsOffered,
@@ -601,12 +636,9 @@ pub struct TlsExtensions {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_fragment_length: Option<String>,
     /// RFC 8449 — TLS 1.3 `record_size_limit` value observed in
-    /// EncryptedExtensions. Populated by the OpenSSL-backed
-    /// EncryptedExtensions probe (feature `legacy-probes`); absent
-    /// under other build configs or when the server did not send
-    /// the extension.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub record_size_limit: Option<u16>,
+    /// EncryptedExtensions, or a local `not_probed` reason when the
+    /// current build cannot emit the required client offer.
+    pub record_size_limit: ObservationU16,
     /// RFC 8879 — certificate-compression algorithms observed when
     /// the server sends a TLS 1.3 CompressedCertificate after kemist
     /// offers support. Canonical names: `"zlib"`, `"brotli"`,

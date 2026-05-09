@@ -15,7 +15,8 @@ use colored::Colorize;
 
 use crate::model::scan_result::{
     CipherSuiteEntry, ClientAuthRequestEntry, DhParametersObservation, GroupObservation, Method,
-    ObservationBool, RenegotiationBehavior, ScanResult, SkeSigObservation, TlsExtensions,
+    ObservationBool, ObservationU16, RenegotiationBehavior, ScanResult, SkeSigObservation,
+    TlsExtensions,
 };
 
 /// Render one scan record to stdout. Compact (~50 lines).
@@ -409,9 +410,7 @@ fn render_extensions(r: &ScanResult) {
     if let Some(v) = &ext.max_fragment_length {
         kv("max_fragment_length", v);
     }
-    if let Some(v) = ext.record_size_limit {
-        kv("record_size_limit", &v.to_string());
-    }
+    print_obs_u16("record_size_limit", &ext.record_size_limit);
     if !ext.compress_certificate_algorithms.is_empty() {
         kv(
             "compress_certificate",
@@ -852,6 +851,28 @@ fn print_obs_bool(label: &str, o: &ObservationBool) {
                 label_cell,
                 "—".yellow(),
                 method_label(m).yellow()
+            ),
+        },
+    }
+}
+
+fn print_obs_u16(label: &str, o: &ObservationU16) {
+    let label_cell = format!("{label}:");
+    match o.value {
+        Some(value) => println!("  {:<22} {}", label_cell, value.to_string().green()),
+        None => match &o.reason {
+            Some(reason) => println!(
+                "  {:<22} {} [{}: {}]",
+                label_cell,
+                "—".yellow(),
+                method_label(&o.method).yellow(),
+                reason.dimmed()
+            ),
+            None => println!(
+                "  {:<22} {} [{}]",
+                label_cell,
+                "—".yellow(),
+                method_label(&o.method).yellow()
             ),
         },
     }

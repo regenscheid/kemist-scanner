@@ -15,14 +15,18 @@ use crate::model::protocol::TlsVersion;
 use crate::model::scan_result::{
     Capabilities, CertificateAlternate, CertificateFacts, Certificates, CipherSuiteEntry,
     ClientAuthRequestEntry, DhParametersObservation, DowngradeSignaling, GroupObservation, Hsts,
-    Http, Method, ObservationBool, OcspStapling, PublicKey, RecordCompressionObservation,
-    RenegotiationBehavior, ScanMetadata, ScanResult, Scanner as ScannerMeta, SctObservation,
-    SecurityTxt, SkeSigObservation, SniBehavior, Tls, TlsCipherSuites, TlsExtensions, TlsGroups,
-    TlsNegotiated, TlsVersionsOffered, Validation, VersionOffered, SCHEMA_VERSION,
+    Http, Method, ObservationBool, ObservationU16, OcspStapling, PublicKey,
+    RecordCompressionObservation, RenegotiationBehavior, ScanMetadata, ScanResult,
+    Scanner as ScannerMeta, SctObservation, SecurityTxt, SkeSigObservation, SniBehavior, Tls,
+    TlsCipherSuites, TlsExtensions, TlsGroups, TlsNegotiated, TlsVersionsOffered, Validation,
+    VersionOffered, SCHEMA_VERSION,
 };
 #[cfg(feature = "legacy-probes")]
 use crate::model::scan_result::{ClientAuthCaDn, ClientAuthOidFilter};
 use crate::scanner::ScanResults;
+
+const RECORD_SIZE_LIMIT_CLIENT_OFFER_UNSUPPORTED: &str =
+    "client_offer_unsupported_in_current_build";
 
 /// Inputs that the scanner does not yet capture but that schema v2 requires.
 /// Supplied by `main.rs` around the `SslScanner::scan()` call.
@@ -1267,34 +1271,39 @@ fn build_ocsp_stapling(results: &ScanResults, ctx: &JsonEmitContext) -> OcspStap
 }
 
 /// Pull TLS 1.3 EncryptedExtensions observations from the OpenSSL probe
-/// subsystem. Returns `(None, [])` when `legacy-probes` is disabled or
-/// the probe didn't produce a parseable message — the fields are
-/// optional in the schema, so "absent" correctly means "not observed."
-fn build_tls13_ee_observations(results: &ScanResults) -> (Option<u16>, Vec<String>) {
+/// subsystem and merge the rustls certificate-compression observation.
+/// `record_size_limit` is currently parser-only because neither rustls
+/// nor our pinned OpenSSL stack can emit the RFC 8449 client offer.
+fn build_tls13_ee_observations(results: &ScanResults) -> (ObservationU16, Vec<String>) {
+    let mut record_size_limit =
+        ObservationU16::not_probed(RECORD_SIZE_LIMIT_CLIENT_OFFER_UNSUPPORTED);
     let mut compress_certificate_algorithms = results.certificate_compression_algorithms.clone();
     #[cfg(feature = "legacy-probes")]
     {
-        let Some(obs) = results.openssl_observations.as_ref() else {
-            return (None, compress_certificate_algorithms);
-        };
-        let Some(ee) = obs.tls13_extensions.as_ref() else {
-            return (None, compress_certificate_algorithms);
-        };
-        if !ee.parsed {
-            return (None, compress_certificate_algorithms);
-        }
-        for alg in &ee.compress_certificate_algorithms {
-            if !compress_certificate_algorithms.contains(alg) {
-                compress_certificate_algorithms.push(alg.clone());
+        if let Some(obs) = results.openssl_observations.as_ref() {
+            if let Some(ee) = obs.tls13_extensions.as_ref() {
+                if !ee.parsed {
+                    if let Some(error) = ee.error.as_deref() {
+                        record_size_limit = ObservationU16::error(error);
+                    }
+                } else {
+                    if let Some(value) = ee.record_size_limit {
+                        record_size_limit = ObservationU16::probe(value);
+                    }
+                    for alg in &ee.compress_certificate_algorithms {
+                        if !compress_certificate_algorithms.contains(alg) {
+                            compress_certificate_algorithms.push(alg.clone());
+                        }
+                    }
+                }
             }
         }
-        (ee.record_size_limit, compress_certificate_algorithms)
     }
     #[cfg(not(feature = "legacy-probes"))]
     {
         let _ = results;
-        (None, compress_certificate_algorithms)
     }
+    (record_size_limit, compress_certificate_algorithms)
 }
 
 fn build_certificates(results: &ScanResults) -> Certificates {
