@@ -14,12 +14,13 @@ use crate::model::errors::ScannerError;
 use crate::model::protocol::TlsVersion;
 use crate::model::scan_result::{
     Capabilities, CertificateAlternate, CertificateFacts, Certificates, CipherSuiteEntry,
-    ClientAuthRequestEntry, DhParametersObservation, DowngradeSignaling, GroupObservation, Hsts,
-    Http, Method, ObservationBool, ObservationU16, ObservedServerExtension, OcspStapling,
-    PublicKey, RecordCompressionObservation, RenegotiationBehavior, ScanMetadata, ScanResult,
-    Scanner as ScannerMeta, SctObservation, SecurityTxt, SkeSigObservation, SniBehavior,
-    SniProbeEntry, Tls, TlsCipherSuites, TlsExtensions, TlsGroups, TlsNegotiated,
-    TlsVersionsOffered, Validation, VersionOffered, SCHEMA_VERSION,
+    ClientAuthRequestEntry, ClientInitiatedRenegotiation, DhParametersObservation,
+    DowngradeSignaling, GroupObservation, Hsts, Http, Method, ObservationBool, ObservationU16,
+    ObservedServerExtension, OcspStapling, PublicKey, RecordCompressionObservation,
+    RenegotiationBehavior, ScanMetadata, ScanResult, Scanner as ScannerMeta, SctObservation,
+    SecurityTxt, ServerInitiatedRenegotiation, SkeSigObservation, SniBehavior, SniProbeEntry, Tls,
+    TlsCipherSuites, TlsExtensions, TlsGroups, TlsNegotiated, TlsVersionsOffered, Validation,
+    VersionOffered, SCHEMA_VERSION,
 };
 #[cfg(feature = "legacy-probes")]
 use crate::model::scan_result::{ClientAuthCaDn, ClientAuthOidFilter};
@@ -1801,12 +1802,26 @@ fn build_renegotiation_behavior(results: &ScanResults) -> RenegotiationBehavior 
             }
             RenegotiationVerdict::Error(_) => (Some("error".to_string()), Method::Error),
         };
+        let server_initiated_observed = ro.server_initiated_observed.clone();
+        let server_initiated_reason = ro.server_initiated_probe_reason.clone();
         RenegotiationBehavior {
+            client_initiated: ClientInitiatedRenegotiation {
+                accepted: client_initiated_renegotiation_accepted(
+                    &ro.client_initiated_verdict,
+                    ro.reason.as_deref(),
+                ),
+            },
+            server_initiated: ServerInitiatedRenegotiation {
+                observed: observation_with_reason(
+                    server_initiated_observed.clone(),
+                    server_initiated_reason.as_deref(),
+                ),
+            },
             client_initiated_verdict: verdict,
             method,
             reason: ro.reason.clone(),
-            server_initiated_observed: ro.server_initiated_observed.clone(),
-            server_initiated_probe_reason: ro.server_initiated_probe_reason.clone(),
+            server_initiated_observed,
+            server_initiated_probe_reason: server_initiated_reason,
         }
     }
     #[cfg(not(feature = "legacy-probes"))]
@@ -1828,12 +1843,54 @@ fn legacy_unavailable_reneg(results: &ScanResults) -> RenegotiationBehavior {
 
 fn not_probed_reneg(reason: &str) -> RenegotiationBehavior {
     RenegotiationBehavior {
+        client_initiated: ClientInitiatedRenegotiation {
+            accepted: ObservationBool::not_probed(reason),
+        },
+        server_initiated: ServerInitiatedRenegotiation {
+            observed: ObservationBool::not_probed(reason),
+        },
         client_initiated_verdict: None,
         method: Method::NotProbed,
         reason: Some(reason.to_string()),
         server_initiated_observed: ObservationBool::not_probed(reason),
         server_initiated_probe_reason: Some(reason.to_string()),
     }
+}
+
+#[cfg(feature = "legacy-probes")]
+fn client_initiated_renegotiation_accepted(
+    verdict: &crate::scanner::openssl::renegotiation::RenegotiationVerdict,
+    reason: Option<&str>,
+) -> ObservationBool {
+    use crate::scanner::openssl::renegotiation::RenegotiationVerdict;
+
+    match verdict {
+        RenegotiationVerdict::ClientInitiatedAccepted => ObservationBool {
+            value: Some(true),
+            method: Method::Probe,
+            reason: reason.map(str::to_string),
+        },
+        RenegotiationVerdict::ClientInitiatedRejected => ObservationBool {
+            value: Some(false),
+            method: Method::Probe,
+            reason: reason.map(str::to_string),
+        },
+        RenegotiationVerdict::NotAttempted => {
+            ObservationBool::not_applicable(reason.unwrap_or("client_initiated_not_attempted"))
+        }
+        RenegotiationVerdict::Error(err) => ObservationBool::error(reason.unwrap_or(err)),
+    }
+}
+
+#[cfg(feature = "legacy-probes")]
+fn observation_with_reason(
+    mut observation: ObservationBool,
+    reason: Option<&str>,
+) -> ObservationBool {
+    if observation.reason.is_none() {
+        observation.reason = reason.map(str::to_string);
+    }
+    observation
 }
 
 fn build_session_resumption(results: &ScanResults) -> crate::model::scan_result::SessionResumption {

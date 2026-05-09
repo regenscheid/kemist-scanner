@@ -763,6 +763,30 @@ fn fully_populated_openssl_observations_match_current_schema() {
     let reneg = tls.get("renegotiation_behavior").unwrap();
     assert_eq!(
         reneg
+            .pointer("/client_initiated/accepted/value")
+            .and_then(|v| v.as_bool()),
+        Some(false)
+    );
+    assert_eq!(
+        reneg
+            .pointer("/client_initiated/accepted/reason")
+            .and_then(|v| v.as_str()),
+        Some("tls_alert_no_renegotiation")
+    );
+    assert_eq!(
+        reneg
+            .pointer("/server_initiated/observed/value")
+            .and_then(|v| v.as_bool()),
+        Some(false)
+    );
+    assert_eq!(
+        reneg
+            .pointer("/server_initiated/observed/reason")
+            .and_then(|v| v.as_str()),
+        Some("passive_wait_timeout")
+    );
+    assert_eq!(
+        reneg
             .pointer("/server_initiated_observed/value")
             .and_then(|v| v.as_bool()),
         Some(false)

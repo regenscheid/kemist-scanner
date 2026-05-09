@@ -1119,15 +1119,39 @@ pub struct SkeSigObservation {
 /// Shape of `tls.renegotiation_behavior`.
 #[derive(Serialize, Debug, Clone)]
 pub struct RenegotiationBehavior {
+    /// Preferred direction-specific shape. `accepted.value == true` means the
+    /// server completed a client-triggered TLS 1.2 renegotiation handshake.
+    pub client_initiated: ClientInitiatedRenegotiation,
+    /// Preferred direction-specific shape. `observed.value == true` means the
+    /// server initiated TLS 1.2 renegotiation during the passive wait window.
+    pub server_initiated: ServerInitiatedRenegotiation,
     /// `"accepted"` / `"rejected"` / `"not_attempted"` / `"error"` — or
-    /// `None` when no probe ran.
+    /// `None` when no probe ran. Legacy compatibility field; prefer
+    /// `client_initiated.accepted`.
     pub client_initiated_verdict: Option<String>,
+    /// Legacy compatibility field for `client_initiated_verdict`; prefer the
+    /// method embedded in `client_initiated.accepted`.
     pub method: Method,
+    /// Legacy compatibility field for `client_initiated_verdict`; prefer the
+    /// reason embedded in `client_initiated.accepted`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// Legacy compatibility field; prefer `server_initiated.observed`.
     pub server_initiated_observed: ObservationBool,
+    /// Legacy compatibility field; prefer the reason embedded in
+    /// `server_initiated.observed`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub server_initiated_probe_reason: Option<String>,
+}
+
+#[derive(Serialize, Debug, Clone)]
+pub struct ClientInitiatedRenegotiation {
+    pub accepted: ObservationBool,
+}
+
+#[derive(Serialize, Debug, Clone)]
+pub struct ServerInitiatedRenegotiation {
+    pub observed: ObservationBool,
 }
 
 /// One distinguished-name entry in `tls.client_auth_request.ca_distinguished_names`.

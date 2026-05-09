@@ -445,6 +445,24 @@
           "description": "OpenSSL-backed TLS 1.2 renegotiation observations. Client-initiated probe actively requests renegotiation; server-initiated observation passively waits after a minimal HTTP request and does not force application-specific triggers.",
           "required": ["method", "server_initiated_observed"],
           "properties": {
+            "client_initiated": {
+              "type": "object",
+              "description": "Preferred client-initiated renegotiation observation. This replaces the older client_initiated_verdict/method/reason trio for new consumers.",
+              "required": ["accepted"],
+              "properties": {
+                "accepted": { "$ref": "#/$defs/observationBool" }
+              },
+              "additionalProperties": false
+            },
+            "server_initiated": {
+              "type": "object",
+              "description": "Preferred server-initiated renegotiation observation. This replaces the older server_initiated_observed/server_initiated_probe_reason pair for new consumers.",
+              "required": ["observed"],
+              "properties": {
+                "observed": { "$ref": "#/$defs/observationBool" }
+              },
+              "additionalProperties": false
+            },
             "client_initiated_verdict": {
               "type": ["string", "null"],
               "enum": ["accepted", "rejected", "not_attempted", "error", null]

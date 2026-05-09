@@ -499,10 +499,14 @@ openssl-sys 0.9.109 doesn't expose `SSL_SESSION_get0_ticket`. Treat
 `false` as "likely stable ticket" rather than "definitely same
 ticket bytes."
 
-The TLS 1.3 slots currently emit `method: not_probed` with reasons
-`tls13_resumption_probe_not_implemented` and
-`early_data_probe_not_implemented`. A follow-up workstream will
-implement them.
+The TLS 1.3 PSK slot reports whether the second handshake resumed from
+a ticket captured during the first handshake. The 0-RTT slot reports
+`probe(true|false)` only when a 0-RTT-capable ticket was available and
+the scanner could observe whether the second handshake accepted early
+data. If the server issued tickets but set `max_early_data_size == 0`,
+`early_data_accepted` is `method: not_applicable` with reason
+`ticket_max_early_data_size_zero`: no 0-RTT was offered, so this is not
+the same thing as a probed rejection.
 
 ### `tls.signature_algorithm_policy_probe`
 ```
@@ -632,6 +636,14 @@ concatenated DER chain bytes.
 ### `tls.renegotiation_behavior`
 ```
 {
+  client_initiated: {
+    accepted: ObservationBool
+  },
+  server_initiated: {
+    observed: ObservationBool
+  },
+
+  // Legacy compatibility fields; prefer the nested shape above.
   client_initiated_verdict?: "accepted" | "rejected" | "not_attempted" | "error" | null,
   method: Method,
   reason?: string,
@@ -640,11 +652,20 @@ concatenated DER chain bytes.
 }
 ```
 
-The client-initiated verdict actively requests TLS 1.2 renegotiation.
-The server-initiated observation is passive: kemist completes a TLS 1.2
-handshake, sends a minimal HTTP request, then waits briefly for a
-server-initiated renegotiation signal. It does not fuzz application
-protocol triggers.
+Use the nested fields for new consumers:
+
+- `client_initiated.accepted` actively requests TLS 1.2 renegotiation.
+  `value: true` means the server completed a second handshake on the
+  same connection; `value: false` means the server rejected the attempt.
+- `server_initiated.observed` is passive: kemist completes a TLS 1.2
+  handshake, sends a minimal HTTP request, then waits briefly for a
+  server-initiated renegotiation signal. `value: false` means no such
+  renegotiation was seen in that passive window.
+
+The older `client_initiated_verdict`, top-level `method`/`reason`,
+`server_initiated_observed`, and `server_initiated_probe_reason` fields
+remain for compatibility. Kemist does not fuzz application protocol
+triggers.
 
 ### `tls.channel_binding`
 ```
