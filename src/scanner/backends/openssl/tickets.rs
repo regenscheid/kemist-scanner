@@ -28,13 +28,13 @@
 //! ## Implementation notes
 //!
 //! Ticket-bytes access: openssl-sys 0.9.109 doesn't expose
-//! `SSL_SESSION_get0_ticket`. We use [`SslSessionRef::id`] +
-//! `SSL_SESSION_get_timeout` via the openssl 0.10 bindings. For
-//! rotation detection we diff the first 32 bytes of the session ID
-//! across two handshakes — when tickets are issued most servers
-//! include ticket-dependent bytes in the session ID, so a bytewise
-//! diff is a reasonable rotation proxy. This is best-effort; the
-//! rule-engine consumer should treat
+//! `SSL_SESSION_get0_ticket`. We parse the RFC 5077 lifetime hint
+//! from the TLS 1.2 `NewSessionTicket` handshake message observed by
+//! OpenSSL's message callback. For rotation detection we diff the
+//! first 32 bytes of the session ID across two handshakes — when
+//! tickets are issued most servers include ticket-dependent bytes in
+//! the session ID, so a bytewise diff is a reasonable rotation proxy.
+//! This is best-effort; the rule-engine consumer should treat
 //! `ticket_rotated_across_connections == false` as "likely stable"
 //! rather than "definitely the same ticket." Functional resumption
 //! tests above are the authoritative signals.
@@ -79,6 +79,7 @@ type MsgCbFn = unsafe extern "C" fn(
 
 thread_local! {
     static TLS12_NEW_SESSION_TICKET_SEEN: RefCell<bool> = const { RefCell::new(false) };
+    static TLS12_NEW_SESSION_TICKET_LIFETIME_HINT_SECS: RefCell<Option<u32>> = const { RefCell::new(None) };
 }
 
 /// Run the probe. Always returns a populated [`SessionResumption`];
@@ -309,6 +310,7 @@ fn single_tls12_handshake(
     let mut ssl = Ssl::new(ctx).map_err(|e| format!("ssl_new:{e}"))?;
     let _ = ssl.set_hostname(hostname);
     TLS12_NEW_SESSION_TICKET_SEEN.with(|seen| *seen.borrow_mut() = false);
+    TLS12_NEW_SESSION_TICKET_LIFETIME_HINT_SECS.with(|hint| *hint.borrow_mut() = None);
 
     if let Some(prev) = prev_session {
         // SAFETY: `prev` is a borrowed `SslSessionRef` whose owning
@@ -337,20 +339,16 @@ fn single_tls12_handshake(
     let session_ref = stream.ssl().session();
     let session: Option<SslSession> = session_ref.map(|s| s.to_owned());
     let session_id: Vec<u8> = session_ref.map(|s| s.id().to_vec()).unwrap_or_default();
-    let timeout_secs: i64 = session_ref.map(|s| s.timeout()).unwrap_or(0) as i64;
     let new_session_ticket_seen = TLS12_NEW_SESSION_TICKET_SEEN.with(|seen| *seen.borrow());
-    let (has_ticket_hint, lifetime_hint_secs) = if new_session_ticket_seen && timeout_secs > 0 {
-        (true, Some(timeout_secs as u32))
-    } else {
-        (new_session_ticket_seen, None)
-    };
+    let lifetime_hint_secs =
+        TLS12_NEW_SESSION_TICKET_LIFETIME_HINT_SECS.with(|hint| *hint.borrow());
     let _ = stream.shutdown();
 
     Ok(HandshakeSnapshot {
         session,
         session_id_nonempty: !session_id.is_empty(),
         session_id,
-        has_ticket_hint,
+        has_ticket_hint: new_session_ticket_seen,
         lifetime_hint_secs,
         resumed,
     })
@@ -423,7 +421,23 @@ unsafe extern "C" fn msg_callback(
     let slice = unsafe { std::slice::from_raw_parts(buf as *const u8, len) };
     if slice.first() == Some(&HANDSHAKE_TYPE_NEW_SESSION_TICKET) {
         TLS12_NEW_SESSION_TICKET_SEEN.with(|seen| *seen.borrow_mut() = true);
+        if let Some(lifetime_hint_secs) = parse_tls12_new_session_ticket_lifetime(slice) {
+            TLS12_NEW_SESSION_TICKET_LIFETIME_HINT_SECS
+                .with(|hint| *hint.borrow_mut() = Some(lifetime_hint_secs));
+        }
     }
+}
+
+fn parse_tls12_new_session_ticket_lifetime(handshake: &[u8]) -> Option<u32> {
+    if handshake.len() < 8 || handshake.first() != Some(&HANDSHAKE_TYPE_NEW_SESSION_TICKET) {
+        return None;
+    }
+    Some(u32::from_be_bytes([
+        handshake[4],
+        handshake[5],
+        handshake[6],
+        handshake[7],
+    ]))
 }
 
 fn ctx_build_failure(reason: &str) -> Tls12Resumption {
@@ -521,6 +535,32 @@ mod tests {
         // `set_options(NO_TICKET)` confirms wiring.
         assert!(build_tls12_context(true).is_ok());
         assert!(build_tls12_context(false).is_ok());
+    }
+
+    #[test]
+    fn parses_tls12_new_session_ticket_lifetime_hint() {
+        let handshake = [
+            HANDSHAKE_TYPE_NEW_SESSION_TICKET,
+            0x00,
+            0x00,
+            0x06,
+            0x00,
+            0x00,
+            0xfd,
+            0x20,
+            0x00,
+            0x00,
+        ];
+
+        assert_eq!(
+            parse_tls12_new_session_ticket_lifetime(&handshake),
+            Some(64800)
+        );
+        assert_eq!(
+            parse_tls12_new_session_ticket_lifetime(&handshake[..7]),
+            None
+        );
+        assert_eq!(parse_tls12_new_session_ticket_lifetime(&[]), None);
     }
 
     #[test]

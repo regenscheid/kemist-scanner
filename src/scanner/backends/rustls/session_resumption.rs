@@ -28,6 +28,7 @@
 //! OpenSSL-side `tickets::probe` aggregates the result into the
 //! combined [`SessionResumption`] output.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -215,24 +216,24 @@ fn build_config(store: Arc<dyn ClientSessionStore>) -> ClientConfig {
 }
 
 /// Wraps [`ClientSessionMemoryCache`] to count `insert_tls13_ticket`
-/// calls and record the max `max_early_data_size` across tickets. All
-/// other trait methods delegate to the inner cache unchanged.
+/// calls and record the max `max_early_data_size` across tickets.
+/// TLS 1.3 tickets are kept in an explicit per-server queue so this
+/// probe can reliably offer the ticket it just captured.
 #[derive(Debug)]
 struct TicketCountingStore {
     inner: ClientSessionMemoryCache,
+    tls13_tickets: Mutex<HashMap<ServerName<'static>, Vec<Tls13ClientSessionValue>>>,
     ticket_count: AtomicU32,
     max_early_data: AtomicU32,
-    #[allow(dead_code)]
-    lifetimes: Mutex<Vec<u32>>,
 }
 
 impl TicketCountingStore {
     fn new() -> Self {
         Self {
-            inner: ClientSessionMemoryCache::new(4),
+            inner: ClientSessionMemoryCache::new(16),
+            tls13_tickets: Mutex::new(HashMap::new()),
             ticket_count: AtomicU32::new(0),
             max_early_data: AtomicU32::new(0),
-            lifetimes: Mutex::new(Vec::new()),
         }
     }
 }
@@ -269,14 +270,25 @@ impl ClientSessionStore for TicketCountingStore {
         if mx > prev {
             self.max_early_data.store(mx, Ordering::Relaxed);
         }
-        self.inner.insert_tls13_ticket(server_name, value);
+        if let Ok(mut tickets_by_server) = self.tls13_tickets.lock() {
+            let tickets = tickets_by_server.entry(server_name).or_default();
+            if tickets.len() == 8 {
+                tickets.remove(0);
+            }
+            tickets.push(value);
+        }
     }
 
     fn take_tls13_ticket(
         &self,
         server_name: &ServerName<'static>,
     ) -> Option<Tls13ClientSessionValue> {
-        self.inner.take_tls13_ticket(server_name)
+        self.tls13_tickets
+            .lock()
+            .ok()
+            .and_then(|mut tickets_by_server| {
+                tickets_by_server.get_mut(server_name).and_then(Vec::pop)
+            })
     }
 }
 

@@ -335,8 +335,7 @@ pub struct Tls12Resumption {
     /// during the TLS 1.2 handshake?
     pub session_ticket_issued: ObservationBool,
     /// RFC 5077 ticket lifetime hint in seconds, if the server sent a
-    /// ticket. Taken from `SSL_SESSION_get_timeout` (OpenSSL's closest
-    /// proxy for the server-advertised lifetime).
+    /// TLS 1.2 NewSessionTicket message.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ticket_lifetime_hint_secs: Option<u32>,
     /// Did the server issue a (non-empty) session ID? On ticket-using
@@ -378,8 +377,8 @@ pub struct Tls13Resumption {
     /// operators often configure 1 or 2.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub new_session_ticket_count: Option<u32>,
-    /// Per-ticket lifetime from `SSL_SESSION_get_timeout`. Empty
-    /// when no tickets were observed.
+    /// Per-ticket TLS 1.3 lifetime hints when exposed by the backend.
+    /// Empty when no lifetimes were observed.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub ticket_lifetime_secs: Vec<u32>,
     /// Did a second handshake, using the saved session from the first,
