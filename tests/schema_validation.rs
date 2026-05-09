@@ -138,7 +138,7 @@ fn load_schema() -> serde_json::Value {
 }
 
 #[test]
-fn empty_fixture_record_matches_schema_v1() {
+fn empty_fixture_record_matches_current_schema() {
     let results = fixture_results();
     let ctx = fixture_ctx();
     let record = build_scan_result(&results, &ctx);
@@ -160,11 +160,11 @@ fn empty_fixture_record_matches_schema_v1() {
 }
 
 #[test]
-fn schema_version_is_pinned_to_2_0_0() {
+fn schema_version_is_pinned_to_2_1_0() {
     let results = fixture_results();
     let ctx = fixture_ctx();
     let record = build_scan_result(&results, &ctx);
-    assert_eq!(record.schema_version, "2.0.0");
+    assert_eq!(record.schema_version, "2.1.0");
 }
 
 #[test]
@@ -309,7 +309,7 @@ fn sigalg_policy_alternate_certificate_chains_surface_once() {
 
 #[cfg(feature = "legacy-probes")]
 #[test]
-fn fully_populated_openssl_observations_match_schema_v1() {
+fn fully_populated_openssl_observations_match_current_schema() {
     use kemist::model::protocol::TlsVersion;
     use kemist::model::scan_result::{
         ConstrainedProbeResult, Method as ScanMethod, ObservationBool, SessionResumption,
@@ -353,6 +353,10 @@ fn fully_populated_openssl_observations_match_schema_v1() {
                 outcome: HandshakeOutcome::Supported,
                 dh_snapshot: None,
                 ske_sig: None,
+                cert_chain: Vec::new(),
+                leaf_fingerprint_sha256: None,
+                chain_fingerprint_sha256: None,
+                group: None,
             },
             LegacyCipherResult {
                 name: "TLS_DHE_RSA_WITH_AES_128_CBC_SHA".to_string(),
@@ -362,6 +366,10 @@ fn fully_populated_openssl_observations_match_schema_v1() {
                 outcome: HandshakeOutcome::Supported,
                 dh_snapshot: Some(dh.clone()),
                 ske_sig: Some("rsa_pkcs1_sha1".to_string()),
+                cert_chain: Vec::new(),
+                leaf_fingerprint_sha256: Some("a".repeat(64)),
+                chain_fingerprint_sha256: Some("b".repeat(64)),
+                group: Some("ffdhe2048".to_string()),
             },
             LegacyCipherResult {
                 name: "TLS_RSA_WITH_NULL_SHA".to_string(),
@@ -371,6 +379,10 @@ fn fully_populated_openssl_observations_match_schema_v1() {
                 outcome: HandshakeOutcome::NotSupported,
                 dh_snapshot: None,
                 ske_sig: None,
+                cert_chain: Vec::new(),
+                leaf_fingerprint_sha256: None,
+                chain_fingerprint_sha256: None,
+                group: None,
             },
             LegacyCipherResult {
                 name: "TLS_RSA_WITH_RC4_128_SHA".to_string(),
@@ -380,6 +392,10 @@ fn fully_populated_openssl_observations_match_schema_v1() {
                 outcome: HandshakeOutcome::Error("connection_timeout".to_string()),
                 dh_snapshot: None,
                 ske_sig: None,
+                cert_chain: Vec::new(),
+                leaf_fingerprint_sha256: None,
+                chain_fingerprint_sha256: None,
+                group: None,
             },
             // Static-DH raw probe variant: server tore the connection
             // down with a TCP RST after our minimal ClientHello.
@@ -395,6 +411,10 @@ fn fully_populated_openssl_observations_match_schema_v1() {
                 },
                 dh_snapshot: None,
                 ske_sig: None,
+                cert_chain: Vec::new(),
+                leaf_fingerprint_sha256: None,
+                chain_fingerprint_sha256: None,
+                group: None,
             },
         ],
     };
@@ -449,6 +469,8 @@ fn fully_populated_openssl_observations_match_schema_v1() {
         secure_renegotiation_advertised: None,
         client_initiated_verdict: RenegotiationVerdict::ClientInitiatedRejected,
         reason: Some("tls_alert_no_renegotiation".to_string()),
+        server_initiated_observed: ObservationBool::probe(false),
+        server_initiated_probe_reason: Some("passive_wait_timeout".to_string()),
     };
 
     let client_auth = ClientAuthRequest {
@@ -467,6 +489,7 @@ fn fully_populated_openssl_observations_match_schema_v1() {
             oid: "1.3.6.1.5.5.7.3.2".to_string(),
             values_b64: vec!["deadbeef".to_string()],
         }],
+        observed_extensions: vec![0x000d, 0x002f],
         alert_on_empty_cert: Some("tls_alert_certificate_required".to_string()),
         negotiated_version: Some("tls1_3".to_string()),
     };
@@ -483,6 +506,10 @@ fn fully_populated_openssl_observations_match_schema_v1() {
             expected_cert_verify_algorithm: "ecdsa_secp256r1_sha256".to_string(),
         }),
         error: None,
+        observed_extensions: vec![kemist::model::scan_result::ObservedServerExtension::new(
+            "tls1_3_encrypted_extensions",
+            0x001c,
+        )],
     };
 
     // Session resumption. TLS 1.2 fully populated via the two-connection
@@ -700,15 +727,52 @@ fn fully_populated_openssl_observations_match_schema_v1() {
         .expect("secp521r1 override lands in tls1_3");
     assert_eq!(s521.get("supported").unwrap().as_bool(), Some(false));
     assert_eq!(s521.get("provider").unwrap().as_str(), Some("openssl"));
+    let observed_extensions = tls
+        .pointer("/extensions/observed_server_extensions")
+        .unwrap()
+        .as_array()
+        .unwrap();
+    assert!(observed_extensions.iter().any(|e| {
+        e.get("protocol_phase").and_then(|v| v.as_str()) == Some("tls1_3_encrypted_extensions")
+            && e.get("extension_id").and_then(|v| v.as_str()) == Some("0x001C")
+            && e.get("extension_name").and_then(|v| v.as_str()) == Some("record_size_limit")
+    }));
+    assert!(observed_extensions.iter().any(|e| {
+        e.get("protocol_phase").and_then(|v| v.as_str()) == Some("tls1_3_certificate_request")
+            && e.get("extension_id").and_then(|v| v.as_str()) == Some("0x000D")
+            && e.get("extension_name").and_then(|v| v.as_str()) == Some("signature_algorithms")
+    }));
+
+    let ske = tls
+        .get("server_key_exchange_signatures")
+        .unwrap()
+        .as_array()
+        .unwrap();
+    assert_eq!(ske.len(), 1);
     assert_eq!(
-        tls.get("server_key_exchange_signatures")
-            .unwrap()
-            .as_array()
-            .unwrap()
-            .len(),
-        1
+        ske[0]
+            .get("leaf_fingerprint_sha256")
+            .and_then(|v| v.as_str()),
+        Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
     );
-    assert!(tls.get("renegotiation_behavior").is_some());
+    assert_eq!(
+        ske[0].get("group").and_then(|v| v.as_str()),
+        Some("ffdhe2048")
+    );
+
+    let reneg = tls.get("renegotiation_behavior").unwrap();
+    assert_eq!(
+        reneg
+            .pointer("/server_initiated_observed/value")
+            .and_then(|v| v.as_bool()),
+        Some(false)
+    );
+    assert_eq!(
+        reneg
+            .get("server_initiated_probe_reason")
+            .and_then(|v| v.as_str()),
+        Some("passive_wait_timeout")
+    );
     assert!(tls.get("client_auth_request").is_some());
     // No more legacy_cipher_suites / ffdhe_support at top level.
     assert!(tls.get("legacy_cipher_suites").is_none());
@@ -1713,6 +1777,10 @@ fn wire_rejected_cipher_renders_as_supported_false_with_reason() {
                 },
                 dh_snapshot: None,
                 ske_sig: None,
+                cert_chain: Vec::new(),
+                leaf_fingerprint_sha256: None,
+                chain_fingerprint_sha256: None,
+                group: None,
             }],
         }),
         kx_group_probes: None,

@@ -34,7 +34,7 @@ Extended Master Secret, secure renegotiation, OCSP stapling, SCT delivery path, 
 
 ### Active vulnerability / misconfiguration probes
 - Heartbleed (CVE-2014-0160) via the pre-handshake heartbeat technique
-- SNI omission comparison (IP-literal handshake vs SNI-bearing)
+- SNI variant comparison (omitted, bogus DNS, and OpenSSL-backed IP-literal probes)
 - Chain validation to webpki-roots
 
 ### HTTP-layer observations (optional, `--enable-http-checks`)
@@ -96,7 +96,7 @@ JSON output validates against [`schemas/output-v1.json`](schemas/output-v1.json)
 Example record shape (abridged):
 ```jsonc
 {
-  "schema_version": "2.0.0",
+  "schema_version": "2.1.0",
   "scanner": { "name": "kemist", "version": "0.4.0" },
   "capabilities": {
     "rustls_version": "0.23",

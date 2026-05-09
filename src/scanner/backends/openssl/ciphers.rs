@@ -18,9 +18,12 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use openssl::ssl::{HandshakeError, Ssl, SslContext, SslMethod, SslVerifyMode, SslVersion};
+use openssl::pkey::Id;
+use openssl::ssl::{HandshakeError, Ssl, SslContext, SslMethod, SslRef, SslVerifyMode, SslVersion};
+use sha2::{Digest, Sha256};
 use tracing::{debug, info};
 
+use crate::model::cert::CertificateInfo;
 use crate::model::errors::ScannerError;
 use crate::model::protocol::TlsVersion;
 use crate::scanner::backends::{is_wire_rejection, HandshakeOutcome};
@@ -50,6 +53,17 @@ pub struct LegacyCipherResult {
     /// TLS 1.2 ServerKeyExchange (or TLS 1.3 CertificateVerify)
     /// signature algorithm name.
     pub ske_sig: Option<String>,
+    /// Parsed peer certificate chain observed during this particular
+    /// per-cipher handshake. Empty when the handshake failed or the
+    /// chain could not be parsed.
+    pub cert_chain: Vec<CertificateInfo>,
+    /// Leaf certificate SHA-256 fingerprint for joining this per-cipher
+    /// observation back to the exact certificate chain the server chose.
+    pub leaf_fingerprint_sha256: Option<String>,
+    /// SHA-256 over concatenated DER certificates in the observed chain.
+    pub chain_fingerprint_sha256: Option<String>,
+    /// Ephemeral group observed in the handshake, when OpenSSL exposes it.
+    pub group: Option<String>,
 }
 
 /// Aggregate output of the legacy cipher probe pass.
@@ -571,6 +585,10 @@ pub(crate) async fn probe_single_by_code(
             outcome,
             dh_snapshot: None,
             ske_sig: None,
+            cert_chain: Vec::new(),
+            leaf_fingerprint_sha256: None,
+            chain_fingerprint_sha256: None,
+            group: None,
         };
     }
 
@@ -585,6 +603,10 @@ pub(crate) async fn probe_single_by_code(
             )),
             dh_snapshot: None,
             ske_sig: None,
+            cert_chain: Vec::new(),
+            leaf_fingerprint_sha256: None,
+            chain_fingerprint_sha256: None,
+            group: None,
         };
     };
     let hostname_owned = hostname.to_string();
@@ -606,6 +628,10 @@ pub(crate) async fn probe_single_by_code(
         outcome: HandshakeOutcome::Error(format!("spawn_blocking_panic: {join_err}")),
         dh_snapshot: None,
         ske_sig: None,
+        cert_chain: Vec::new(),
+        leaf_fingerprint_sha256: None,
+        chain_fingerprint_sha256: None,
+        group: None,
     })
 }
 
@@ -627,45 +653,23 @@ pub async fn probe_legacy_suites(
     let mut results = Vec::with_capacity(TARGETS.len());
     let last = TARGETS.len().saturating_sub(1);
 
-    // Registry-driven per-suite probing through `OpensslBackend::handshake()`.
-    // Every `TARGETS` codepoint routes back to this backend (OpenSSL
-    // claims the full legacy cipher inventory today), so the
-    // indirection is semantically a no-op — going through the
-    // registry keeps all cipher-probe dispatch on one path regardless
-    // of which backend ultimately runs the handshake.
-    let registry = crate::scanner::backends::BackendRegistry::new();
-    let ctx = crate::scanner::backends::ProbeContext {
-        target,
-        hostname: hostname.to_string(),
-        connect_timeout,
-        handshake_timeout,
-    };
-
     for (i, t) in TARGETS.iter().enumerate() {
-        let constraint =
-            crate::scanner::backends::HandshakeConstraint::single_cipher_at(t.iana_code, t.version);
-        let (outcome, dh_snapshot, ske_sig) = match registry.route_cipher(t.iana_code) {
-            Some(backend) => match backend.handshake(constraint, &ctx).await {
-                Ok(r) => (r.outcome, r.dh_parameters, r.ske_signature_name),
-                Err(u) => (
-                    HandshakeOutcome::Error(format!("unsatisfiable_constraint:{}", u.reason)),
-                    None,
-                    None,
-                ),
-            },
-            None => (
-                HandshakeOutcome::Error(format!("no_backend_routes_cipher:0x{:04X}", t.iana_code)),
-                None,
-                None,
-            ),
-        };
+        let run = probe_single_by_code(
+            target,
+            hostname,
+            t.iana_code,
+            t.version,
+            connect_timeout,
+            handshake_timeout,
+        )
+        .await;
 
         debug!(
             suite = %t.openssl_name,
             version = ?t.version,
-            outcome = ?outcome,
-            dh_captured = dh_snapshot.is_some(),
-            ske_sig = ?ske_sig,
+            outcome = ?run.outcome,
+            dh_captured = run.dh_snapshot.is_some(),
+            ske_sig = ?run.ske_sig,
             "legacy probe result"
         );
 
@@ -674,9 +678,13 @@ pub async fn probe_legacy_suites(
             openssl_name: t.openssl_name.to_string(),
             iana_code: t.iana_code,
             version: t.version,
-            outcome,
-            dh_snapshot,
-            ske_sig,
+            outcome: run.outcome,
+            dh_snapshot: run.dh_snapshot,
+            ske_sig: run.ske_sig,
+            cert_chain: run.cert_chain,
+            leaf_fingerprint_sha256: run.leaf_fingerprint_sha256,
+            chain_fingerprint_sha256: run.chain_fingerprint_sha256,
+            group: run.group,
         });
 
         if i < last && !per_probe_delay.is_zero() {
@@ -695,6 +703,10 @@ pub(crate) struct ProbeRun {
     pub(crate) outcome: HandshakeOutcome,
     pub(crate) dh_snapshot: Option<DhSnapshot>,
     pub(crate) ske_sig: Option<String>,
+    pub(crate) cert_chain: Vec<CertificateInfo>,
+    pub(crate) leaf_fingerprint_sha256: Option<String>,
+    pub(crate) chain_fingerprint_sha256: Option<String>,
+    pub(crate) group: Option<String>,
 }
 
 /// Synchronous single-suite probe. Called inside `spawn_blocking`. Never
@@ -716,6 +728,10 @@ fn probe_single_suite_blocking(
             )),
             dh_snapshot: None,
             ske_sig: None,
+            cert_chain: Vec::new(),
+            leaf_fingerprint_sha256: None,
+            chain_fingerprint_sha256: None,
+            group: None,
         };
     };
 
@@ -730,6 +746,10 @@ fn probe_single_suite_blocking(
                 outcome: classify_scanner_error(se),
                 dh_snapshot: None,
                 ske_sig: None,
+                cert_chain: Vec::new(),
+                leaf_fingerprint_sha256: None,
+                chain_fingerprint_sha256: None,
+                group: None,
             };
         }
     };
@@ -761,6 +781,10 @@ fn probe_single_suite_blocking(
                 outcome,
                 dh_snapshot: None,
                 ske_sig: None,
+                cert_chain: Vec::new(),
+                leaf_fingerprint_sha256: None,
+                chain_fingerprint_sha256: None,
+                group: None,
             };
         }
     };
@@ -772,6 +796,10 @@ fn probe_single_suite_blocking(
                 outcome: HandshakeOutcome::Error(format!("openssl_ssl_new: {stack}")),
                 dh_snapshot: None,
                 ske_sig: None,
+                cert_chain: Vec::new(),
+                leaf_fingerprint_sha256: None,
+                chain_fingerprint_sha256: None,
+                group: None,
             }
         }
     };
@@ -788,10 +816,16 @@ fn probe_single_suite_blocking(
             // Supported outcome is the primary signal.
             let dh_snapshot = dh_params::snapshot(stream.ssl()).unwrap_or(None);
             let ske_sig = ske_sig::snapshot(stream.ssl());
+            let cert_snapshot = cert_chain_observation(stream.ssl());
+            let group = negotiated_group(stream.ssl(), dh_snapshot.as_ref());
             ProbeRun {
                 outcome: HandshakeOutcome::Supported,
                 dh_snapshot,
                 ske_sig,
+                cert_chain: cert_snapshot.cert_chain,
+                leaf_fingerprint_sha256: cert_snapshot.leaf_fingerprint_sha256,
+                chain_fingerprint_sha256: cert_snapshot.chain_fingerprint_sha256,
+                group,
             }
         }
         Err(HandshakeError::Failure(mid)) => {
@@ -800,12 +834,20 @@ fn probe_single_suite_blocking(
                 outcome: classify_scanner_error(se),
                 dh_snapshot: None,
                 ske_sig: None,
+                cert_chain: Vec::new(),
+                leaf_fingerprint_sha256: None,
+                chain_fingerprint_sha256: None,
+                group: None,
             }
         }
         Err(HandshakeError::SetupFailure(stack)) => ProbeRun {
             outcome: HandshakeOutcome::Error(format!("openssl_setup: {stack}")),
             dh_snapshot: None,
             ske_sig: None,
+            cert_chain: Vec::new(),
+            leaf_fingerprint_sha256: None,
+            chain_fingerprint_sha256: None,
+            group: None,
         },
         Err(HandshakeError::WouldBlock(_)) => {
             // Shouldn't happen with blocking socket + set_*_timeout; if it
@@ -815,8 +857,91 @@ fn probe_single_suite_blocking(
                 outcome: HandshakeOutcome::Error("openssl_would_block".to_string()),
                 dh_snapshot: None,
                 ske_sig: None,
+                cert_chain: Vec::new(),
+                leaf_fingerprint_sha256: None,
+                chain_fingerprint_sha256: None,
+                group: None,
             }
         }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct CertChainSnapshot {
+    cert_chain: Vec<CertificateInfo>,
+    leaf_fingerprint_sha256: Option<String>,
+    chain_fingerprint_sha256: Option<String>,
+}
+
+fn cert_chain_observation(ssl: &SslRef) -> CertChainSnapshot {
+    let mut raw_chain = Vec::new();
+    if let Some(cert) = ssl.peer_certificate() {
+        if let Ok(der) = cert.to_der() {
+            raw_chain.push(der);
+        }
+    }
+    if let Some(chain) = ssl.peer_cert_chain() {
+        for cert in chain {
+            if let Ok(der) = cert.to_der() {
+                if raw_chain.first() != Some(&der) {
+                    raw_chain.push(der);
+                }
+            }
+        }
+    }
+
+    let cert_chain: Vec<CertificateInfo> = raw_chain
+        .iter()
+        .enumerate()
+        .filter_map(|(i, der)| {
+            CertificateInfo::from_der(der).ok().map(|mut c| {
+                c.wire_position = i as u32;
+                c
+            })
+        })
+        .collect();
+    let leaf_fingerprint_sha256 = cert_chain
+        .first()
+        .map(|c| c.fingerprint_sha256.clone())
+        .or_else(|| raw_chain.first().map(|der| fingerprint_der(der)));
+    let chain_fingerprint_sha256 = (!raw_chain.is_empty()).then(|| fingerprint_chain(&raw_chain));
+
+    CertChainSnapshot {
+        cert_chain,
+        leaf_fingerprint_sha256,
+        chain_fingerprint_sha256,
+    }
+}
+
+fn fingerprint_der(der: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(der);
+    hex::encode(hasher.finalize())
+}
+
+fn fingerprint_chain(raw_chain: &[Vec<u8>]) -> String {
+    let mut hasher = Sha256::new();
+    for der in raw_chain {
+        hasher.update(der);
+    }
+    hex::encode(hasher.finalize())
+}
+
+fn negotiated_group(ssl: &SslRef, dh_snapshot: Option<&DhSnapshot>) -> Option<String> {
+    if let Some(snapshot) = dh_snapshot {
+        return Some(snapshot.classification.as_schema_str().to_string());
+    }
+    let pkey = ssl.peer_tmp_key().ok()?;
+    match pkey.id() {
+        Id::EC => {
+            let ec = pkey.ec_key().ok()?;
+            ec.group()
+                .curve_name()
+                .and_then(|nid| nid.short_name().ok().map(str::to_string))
+        }
+        Id::X25519 => Some("X25519".to_string()),
+        Id::X448 => Some("X448".to_string()),
+        _ => None,
     }
 }
 

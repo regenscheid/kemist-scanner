@@ -15,7 +15,7 @@ use std::collections::BTreeMap;
 use crate::model::cert::CertificateInfo;
 pub use crate::model::errors::ScannerError;
 
-pub const SCHEMA_VERSION: &str = "2.0.0";
+pub const SCHEMA_VERSION: &str = "2.1.0";
 
 /// Top-level scan record. Every emitted JSON document is a `ScanResult`.
 #[derive(Serialize, Debug, Clone)]
@@ -635,6 +635,13 @@ pub struct TlsExtensions {
     /// extension.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_fragment_length: Option<String>,
+    /// Generic inventory of server-side TLS extensions observed in
+    /// ServerHello / EncryptedExtensions / CertificateEntry /
+    /// CertificateRequest messages. Specific extension facts remain
+    /// surfaced in the named fields above; this array preserves raw
+    /// extension coverage for newer or less-common codepoints.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub observed_server_extensions: Vec<ObservedServerExtension>,
     /// RFC 8449 — TLS 1.3 `record_size_limit` value observed in
     /// EncryptedExtensions, or a local `not_probed` reason when the
     /// current build cannot emit the required client offer.
@@ -654,6 +661,60 @@ pub struct TlsExtensions {
     /// signature over the leaf pubkey and never compares `valid_time`
     /// against the wall clock — observation only.
     pub delegated_credentials: DelegatedCredentialsObservation,
+}
+
+#[derive(Serialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ObservedServerExtension {
+    pub protocol_phase: String,
+    /// IANA extension codepoint rendered as `0xNNNN`.
+    pub extension_id: String,
+    /// Canonical short name for known codepoints; `unknown_0xNNNN`
+    /// for unrecognized values.
+    pub extension_name: String,
+}
+
+impl ObservedServerExtension {
+    pub fn new(protocol_phase: impl Into<String>, codepoint: u16) -> Self {
+        let extension_name = tls_extension_name(codepoint)
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("unknown_0x{codepoint:04X}"));
+        Self {
+            protocol_phase: protocol_phase.into(),
+            extension_id: format!("0x{codepoint:04X}"),
+            extension_name,
+        }
+    }
+}
+
+pub fn tls_extension_name(codepoint: u16) -> Option<&'static str> {
+    Some(match codepoint {
+        0x0000 => "server_name",
+        0x0001 => "max_fragment_length",
+        0x0004 => "truncated_hmac",
+        0x0005 => "status_request",
+        0x000A => "supported_groups",
+        0x000B => "ec_point_formats",
+        0x000D => "signature_algorithms",
+        0x000F => "heartbeat",
+        0x0010 => "application_layer_protocol_negotiation",
+        0x0012 => "signed_certificate_timestamp",
+        0x0015 => "padding",
+        0x0016 => "encrypt_then_mac",
+        0x0017 => "extended_master_secret",
+        0x0018 => "token_binding",
+        0x001B => "compress_certificate",
+        0x001C => "record_size_limit",
+        0x0022 => "delegated_credential",
+        0x002B => "supported_versions",
+        0x002D => "psk_key_exchange_modes",
+        0x0031 => "post_handshake_auth",
+        0x0033 => "key_share",
+        0x4469 => "application_settings",
+        0xFE0D => "encrypted_client_hello",
+        0x3374 => "next_protocol_negotiation",
+        0xFF01 => "renegotiation_info",
+        _ => return None,
+    })
 }
 
 /// Handshake-time observations that aren't TLS extensions: active
@@ -951,6 +1012,20 @@ pub struct SniBehavior {
     pub method: Method,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub probes: Vec<SniProbeEntry>,
+}
+
+#[derive(Serialize, Debug, Clone)]
+pub struct SniProbeEntry {
+    pub variant: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sni_sent: Option<String>,
+    pub outcome: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub leaf_fingerprint_sha256: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 /// Channel-binding observations per RFC 9266 (`tls-exporter`) and
@@ -1033,6 +1108,12 @@ pub struct SkeSigObservation {
     pub method: Method,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub leaf_fingerprint_sha256: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chain_fingerprint_sha256: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
 }
 
 /// Shape of `tls.renegotiation_behavior`.
@@ -1044,6 +1125,9 @@ pub struct RenegotiationBehavior {
     pub method: Method,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    pub server_initiated_observed: ObservationBool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server_initiated_probe_reason: Option<String>,
 }
 
 /// One distinguished-name entry in `tls.client_auth_request.ca_distinguished_names`.
@@ -1415,4 +1499,30 @@ pub struct RedirectHopOutput {
     pub status: u16,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub location: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tls_extension_name_covers_newer_and_less_common_codepoints() {
+        assert_eq!(tls_extension_name(0xFE0D), Some("encrypted_client_hello"));
+        assert_eq!(tls_extension_name(0x4469), Some("application_settings"));
+        assert_eq!(tls_extension_name(0x0015), Some("padding"));
+        assert_eq!(tls_extension_name(0x0018), Some("token_binding"));
+        assert_eq!(tls_extension_name(0x002D), Some("psk_key_exchange_modes"));
+        assert_eq!(tls_extension_name(0x0031), Some("post_handshake_auth"));
+    }
+
+    #[test]
+    fn observed_server_extension_formats_known_and_unknown_ids() {
+        let known = ObservedServerExtension::new("tls1_2_server_hello", 0x0017);
+        assert_eq!(known.extension_id, "0x0017");
+        assert_eq!(known.extension_name, "extended_master_secret");
+
+        let unknown = ObservedServerExtension::new("tls1_3_encrypted_extensions", 0x1234);
+        assert_eq!(unknown.extension_id, "0x1234");
+        assert_eq!(unknown.extension_name, "unknown_0x1234");
+    }
 }

@@ -2,7 +2,7 @@
 
 Formal contract: [`schemas/output-v1.json`](../schemas/output-v1.json).
 This document is the human-readable field reference. Every emitted JSON
-record pins `schema_version: "2.0.0"` and validates against the JSON
+record pins `schema_version: "2.1.0"` and validates against the JSON
 Schema — both are CI-enforced.
 
 ## Stability contract
@@ -56,7 +56,7 @@ same; the field name is load-bearing for readability.
 
 ```
 ScanResult {
-  schema_version: "2.0.0"
+  schema_version: "2.1.0"
   scanner:      { name, version }
   capabilities: { ... }
   scan:         { ... }
@@ -70,7 +70,7 @@ ScanResult {
 ```
 
 ### `schema_version`
-String, always `"2.0.0"` in schema v2. Pin on this exact value; check
+String, always `"2.1.0"` in schema v2.1. Pin on this exact value; check
 the major before interpreting anything else.
 
 ### `scanner`
@@ -276,6 +276,13 @@ a specific reason — never `supported: false` without a real probe.
   npn: ObservationBool,
   supported_point_formats_echoed: [...],
   max_fragment_length?: string,             // "2^9".."2^12" or "0xNN"
+  observed_server_extensions?: [
+    {
+      protocol_phase: string,               // e.g. "tls1_2_server_hello"
+      extension_id: "0xNNNN",
+      extension_name: string                // known name or "unknown_0xNNNN"
+    }
+  ],
   record_size_limit: {                      // RFC 8449 (see caveat)
     value: int | null,
     method: Method,
@@ -341,6 +348,12 @@ Notes:
   ServerHello via the byte-level hello probe. Client offers both
   extensions to elicit server echoes (without actually negotiating
   them — probe bails after ServerHello).
+- **`observed_server_extensions`** — generic extension inventory for
+  ServerHello, TLS 1.3 EncryptedExtensions, leaf CertificateEntry, and
+  CertificateRequest extension blocks. Named fields above remain the
+  compatibility surface for specific facts; this array preserves
+  extension coverage for newer or rare codepoints such as ECH, ALPS,
+  token_binding, psk_key_exchange_modes, and post_handshake_auth.
 - **`grease_echoed`** — RFC 8701 conformance observation. The
   byte-level hello probe injects a GREASE extension codepoint
   (`0x0A0A`) in the ClientHello. A correctly-behaving server
@@ -572,13 +585,66 @@ cert verifier; no cert validation is performed.
 ### `tls.sni_behavior`
 ```
 {
-  omitted_probe: "same_cert" | "different_cert" | "rejected" | "error" | null,
+  omitted_probe: "same_cert" | "different_cert" | "rejected" | "error" | "not_probed" | null,
   method: Method,
-  reason?: string
+  reason?: string,
+  probes?: [
+    {
+      variant: "omitted" | "bogus_dns" | "ip_literal",
+      sni_sent?: string | null,
+      outcome: "same_cert" | "different_cert" | "rejected" | "error" | "not_probed",
+      leaf_fingerprint_sha256?: string,
+      reason?: string
+    }
+  ]
 }
 ```
 Comparison of leaf cert fingerprints between the SNI-set characterization
-handshake and a second handshake with SNI omitted (via `ServerName::IpAddress`).
+handshake and SNI-variant handshakes. `omitted_probe` is retained for
+compatibility and mirrors the `variant: "omitted"` row; `probes[]` also
+records a bogus-DNS SNI and an IP-literal attempt when the TLS backend can
+express it. rustls is used for the omitted and bogus-DNS rows; when
+`legacy-probes` is enabled, the IP-literal row is attempted through OpenSSL
+because rustls correctly refuses to serialize IP literals as SNI. Without
+`legacy-probes`, the IP-literal row is emitted as `not_probed`.
+
+### `tls.server_key_exchange_signatures`
+```
+[
+  {
+    cipher_suite: string,
+    signature_algorithm: string,
+    method: Method,
+    reason?: string,
+    leaf_fingerprint_sha256?: string,
+    chain_fingerprint_sha256?: string,
+    group?: string
+  }
+]
+```
+
+Per-cipher OpenSSL observations of the TLS 1.2 ServerKeyExchange /
+TLS 1.3 CertificateVerify signature algorithm. The optional fingerprint
+fields are join keys back to the exact certificate chain observed during
+that constrained handshake; `chain_fingerprint_sha256` is SHA-256 over
+concatenated DER chain bytes.
+
+### `tls.renegotiation_behavior`
+```
+{
+  client_initiated_verdict?: "accepted" | "rejected" | "not_attempted" | "error" | null,
+  method: Method,
+  reason?: string,
+  server_initiated_observed: ObservationBool,
+  server_initiated_probe_reason?: string
+}
+```
+
+The client-initiated verdict actively requests TLS 1.2 renegotiation.
+The server-initiated observation is passive: kemist completes a TLS 1.2
+handshake, sends a minimal HTTP request, then waits briefly for a
+server-initiated renegotiation signal. It does not fuzz application
+protocol triggers.
 
 ### `tls.channel_binding`
 ```

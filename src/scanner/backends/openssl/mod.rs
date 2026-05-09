@@ -420,6 +420,7 @@ impl TlsBackend for OpensslBackend {
                 let mut result = HandshakeResult::outcome_only(run.outcome);
                 result.dh_parameters = run.dh_snapshot;
                 result.ske_signature_name = run.ske_sig;
+                result.cert_chain = run.cert_chain;
                 Ok(result)
             }
             (None, Some(groups), Some((v_min, v_max))) if groups.len() == 1 && v_min == v_max => {

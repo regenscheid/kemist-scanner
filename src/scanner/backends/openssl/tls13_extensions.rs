@@ -76,6 +76,8 @@ use foreign_types::ForeignTypeRef;
 use openssl::ssl::{Ssl, SslContext, SslMethod, SslVerifyMode, SslVersion};
 use tracing::{debug, info};
 
+use crate::model::scan_result::ObservedServerExtension;
+
 /// OpenSSL control code from `<openssl/ssl.h>`. Same literal as in
 /// [`client_auth`](super::client_auth) — the constant isn't re-exported
 /// from openssl-sys at the version we pin.
@@ -158,6 +160,9 @@ pub struct Tls13EncryptedExtensions {
     pub delegated_credential: Option<DelegatedCredentialFacts>,
     /// Human-readable failure reason when `parsed` is false.
     pub error: Option<String>,
+    /// Generic server-side TLS extension inventory observed in TLS 1.3
+    /// encrypted handshake messages.
+    pub observed_extensions: Vec<ObservedServerExtension>,
 }
 
 /// Parsed DelegatedCredential fields per RFC 9345 §4.1. Only the
@@ -275,7 +280,14 @@ fn probe_blocking(
     // EE parse success — the two are independent observations.
     if let Some(cert_bytes) = captured_cert.as_deref() {
         out.delegated_credential = parse_certificate_for_dc(cert_bytes);
+        out.observed_extensions
+            .extend(observed_certificate_extensions(
+                cert_bytes,
+                "tls1_3_certificate",
+            ));
     }
+    out.observed_extensions.sort();
+    out.observed_extensions.dedup();
     out
 }
 
@@ -427,6 +439,10 @@ fn parse_encrypted_extensions(raw: &[u8]) -> Tls13EncryptedExtensions {
             break;
         }
         let ext_body = &ext_bytes[i + 4..body_end];
+        out.observed_extensions.push(ObservedServerExtension::new(
+            "tls1_3_encrypted_extensions",
+            ty,
+        ));
 
         match ty {
             // RFC 8449 §4 — payload is a single uint16. Any other
@@ -439,6 +455,28 @@ fn parse_encrypted_extensions(raw: &[u8]) -> Tls13EncryptedExtensions {
             }
             _ => {}
         }
+        i = body_end;
+    }
+    out
+}
+
+fn observed_certificate_extensions(
+    raw: &[u8],
+    protocol_phase: &str,
+) -> Vec<ObservedServerExtension> {
+    let Some(ext_block) = leaf_certificate_extensions(raw) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i + 4 <= ext_block.len() {
+        let ty = u16::from_be_bytes([ext_block[i], ext_block[i + 1]]);
+        let body_len = u16::from_be_bytes([ext_block[i + 2], ext_block[i + 3]]) as usize;
+        let body_end = i + 4 + body_len;
+        if body_end > ext_block.len() {
+            break;
+        }
+        out.push(ObservedServerExtension::new(protocol_phase, ty));
         i = body_end;
     }
     out
@@ -499,33 +537,7 @@ fn signature_scheme_name(code: u16) -> String {
 /// The scanner reads `valid_time` and `expected_cert_verify_algorithm`;
 /// the public-key and signature blobs are skipped.
 fn parse_certificate_for_dc(raw: &[u8]) -> Option<DelegatedCredentialFacts> {
-    if raw.len() < 4 || raw[0] != HANDSHAKE_TYPE_CERTIFICATE {
-        return None;
-    }
-    let hs_len = ((raw[1] as usize) << 16) | ((raw[2] as usize) << 8) | (raw[3] as usize);
-    let body = raw.get(4..4 + hs_len)?;
-    // certificate_request_context<0..2^8-1>
-    let (&ctx_len, rest) = body.split_first()?;
-    let after_ctx = rest.get(ctx_len as usize..)?;
-    // certificate_list<0..2^24-1>
-    if after_ctx.len() < 3 {
-        return None;
-    }
-    let list_len =
-        ((after_ctx[0] as usize) << 16) | ((after_ctx[1] as usize) << 8) | (after_ctx[2] as usize);
-    let list_body = after_ctx.get(3..3 + list_len)?;
-    // Leaf entry only (first entry).
-    if list_body.len() < 3 {
-        return None;
-    }
-    let cert_len =
-        ((list_body[0] as usize) << 16) | ((list_body[1] as usize) << 8) | (list_body[2] as usize);
-    let after_cert = list_body.get(3 + cert_len..)?;
-    if after_cert.len() < 2 {
-        return None;
-    }
-    let ext_len = u16::from_be_bytes([after_cert[0], after_cert[1]]) as usize;
-    let ext_block = after_cert.get(2..2 + ext_len)?;
+    let ext_block = leaf_certificate_extensions(raw)?;
     // Walk CertificateEntry extensions.
     let mut i = 0;
     while i + 4 <= ext_block.len() {
@@ -541,6 +553,33 @@ fn parse_certificate_for_dc(raw: &[u8]) -> Option<DelegatedCredentialFacts> {
         i = body_end;
     }
     None
+}
+
+fn leaf_certificate_extensions(raw: &[u8]) -> Option<&[u8]> {
+    if raw.len() < 4 || raw[0] != HANDSHAKE_TYPE_CERTIFICATE {
+        return None;
+    }
+    let hs_len = ((raw[1] as usize) << 16) | ((raw[2] as usize) << 8) | (raw[3] as usize);
+    let body = raw.get(4..4 + hs_len)?;
+    let (&ctx_len, rest) = body.split_first()?;
+    let after_ctx = rest.get(ctx_len as usize..)?;
+    if after_ctx.len() < 3 {
+        return None;
+    }
+    let list_len =
+        ((after_ctx[0] as usize) << 16) | ((after_ctx[1] as usize) << 8) | (after_ctx[2] as usize);
+    let list_body = after_ctx.get(3..3 + list_len)?;
+    if list_body.len() < 3 {
+        return None;
+    }
+    let cert_len =
+        ((list_body[0] as usize) << 16) | ((list_body[1] as usize) << 8) | (list_body[2] as usize);
+    let after_cert = list_body.get(3 + cert_len..)?;
+    if after_cert.len() < 2 {
+        return None;
+    }
+    let ext_len = u16::from_be_bytes([after_cert[0], after_cert[1]]) as usize;
+    after_cert.get(2..2 + ext_len)
 }
 
 /// Parse the body of the RFC 9345 `delegated_credential` extension.

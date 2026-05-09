@@ -21,16 +21,20 @@
 //! `Some(true)` whenever TLS 1.2 or 1.3 was available, without doing
 //! a real probe).
 
+use std::io::{ErrorKind, Read, Write};
 use std::net::SocketAddr;
-use std::os::raw::c_int;
+use std::os::raw::{c_int, c_long};
 use std::time::Duration;
 
 use foreign_types::ForeignTypeRef;
-use openssl::ssl::{HandshakeError, Ssl, SslContext, SslMethod, SslVerifyMode, SslVersion};
+use openssl::ssl::{HandshakeError, Ssl, SslContext, SslMethod, SslRef, SslVerifyMode, SslVersion};
 use tracing::info;
 
 use super::alerts;
 use crate::model::errors::ScannerError;
+use crate::model::scan_result::ObservationBool;
+
+const SSL_CTRL_GET_TOTAL_RENEGOTIATIONS: c_int = 12;
 
 extern "C" {
     /// Raw FFI — the `openssl` crate at 0.10.73 does not expose
@@ -69,6 +73,8 @@ pub struct RenegotiationObservation {
     pub secure_renegotiation_advertised: Option<bool>,
     pub client_initiated_verdict: RenegotiationVerdict,
     pub reason: Option<String>,
+    pub server_initiated_observed: ObservationBool,
+    pub server_initiated_probe_reason: Option<String>,
 }
 
 /// Run the probe. Full handshake + reneg attempt happens in a single
@@ -91,10 +97,27 @@ pub async fn probe(
         secure_renegotiation_advertised: None,
         client_initiated_verdict: RenegotiationVerdict::Error(format!("spawn_blocking_panic:{e}")),
         reason: Some(format!("spawn_blocking_panic:{e}")),
+        server_initiated_observed: ObservationBool::error(&format!("spawn_blocking_panic:{e}")),
+        server_initiated_probe_reason: Some(format!("spawn_blocking_panic:{e}")),
     })
 }
 
 fn probe_blocking(
+    target: SocketAddr,
+    hostname: &str,
+    connect_timeout: Duration,
+    handshake_timeout: Duration,
+) -> RenegotiationObservation {
+    let server_initiated =
+        probe_server_initiated_blocking(target, hostname, connect_timeout, handshake_timeout);
+    let mut obs =
+        probe_client_initiated_blocking(target, hostname, connect_timeout, handshake_timeout);
+    obs.server_initiated_observed = server_initiated.observed;
+    obs.server_initiated_probe_reason = server_initiated.reason;
+    obs
+}
+
+fn probe_client_initiated_blocking(
     target: SocketAddr,
     hostname: &str,
     connect_timeout: Duration,
@@ -131,6 +154,8 @@ fn probe_blocking(
                 secure_renegotiation_advertised: None,
                 client_initiated_verdict: RenegotiationVerdict::NotAttempted,
                 reason: Some(format!("initial_handshake_failed:{cat}")),
+                server_initiated_observed: ObservationBool::not_probed("client_probe_returned"),
+                server_initiated_probe_reason: Some("client_probe_returned".to_string()),
             };
         }
         Err(HandshakeError::SetupFailure(stack)) => {
@@ -138,6 +163,8 @@ fn probe_blocking(
                 secure_renegotiation_advertised: None,
                 client_initiated_verdict: RenegotiationVerdict::NotAttempted,
                 reason: Some(format!("initial_handshake_setup:{stack}")),
+                server_initiated_observed: ObservationBool::not_probed("client_probe_returned"),
+                server_initiated_probe_reason: Some("client_probe_returned".to_string()),
             };
         }
         Err(HandshakeError::WouldBlock(_)) => {
@@ -145,6 +172,8 @@ fn probe_blocking(
                 secure_renegotiation_advertised: None,
                 client_initiated_verdict: RenegotiationVerdict::NotAttempted,
                 reason: Some("initial_handshake_would_block".to_string()),
+                server_initiated_observed: ObservationBool::not_probed("client_probe_returned"),
+                server_initiated_probe_reason: Some("client_probe_returned".to_string()),
             };
         }
     };
@@ -157,6 +186,8 @@ fn probe_blocking(
             secure_renegotiation_advertised: None,
             client_initiated_verdict: RenegotiationVerdict::NotAttempted,
             reason: Some(format!("negotiated_version_not_tls12:{:?}", negotiated)),
+            server_initiated_observed: ObservationBool::not_probed("client_probe_returned"),
+            server_initiated_probe_reason: Some("client_probe_returned".to_string()),
         };
     }
 
@@ -176,6 +207,8 @@ fn probe_blocking(
             secure_renegotiation_advertised: None,
             client_initiated_verdict: RenegotiationVerdict::ClientInitiatedAccepted,
             reason: Some("renegotiation_handshake_completed".to_string()),
+            server_initiated_observed: ObservationBool::not_probed("client_probe_returned"),
+            server_initiated_probe_reason: Some("client_probe_returned".to_string()),
         },
         Err(e) => {
             let se = alerts::classify_openssl_error("reneg handshake", &e);
@@ -187,8 +220,163 @@ fn probe_blocking(
                 secure_renegotiation_advertised: None,
                 client_initiated_verdict: verdict,
                 reason: Some(format!("{}: {}", se.category, se.context)),
+                server_initiated_observed: ObservationBool::not_probed("client_probe_returned"),
+                server_initiated_probe_reason: Some("client_probe_returned".to_string()),
             }
         }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ServerInitiatedObservation {
+    observed: ObservationBool,
+    reason: Option<String>,
+}
+
+fn probe_server_initiated_blocking(
+    target: SocketAddr,
+    hostname: &str,
+    connect_timeout: Duration,
+    handshake_timeout: Duration,
+) -> ServerInitiatedObservation {
+    let tcp = match std::net::TcpStream::connect_timeout(&target, connect_timeout) {
+        Ok(s) => s,
+        Err(e) => {
+            let cat = ScannerError::from_io("server_reneg tcp connect", e).category;
+            return ServerInitiatedObservation {
+                observed: ObservationBool::error(&cat),
+                reason: Some(cat),
+            };
+        }
+    };
+    let _ = tcp.set_read_timeout(Some(handshake_timeout));
+    let _ = tcp.set_write_timeout(Some(handshake_timeout));
+
+    let ctx = match build_tls12_context() {
+        Ok(c) => c,
+        Err(stack) => {
+            let reason = format!("openssl_ctx_build:{stack}");
+            return ServerInitiatedObservation {
+                observed: ObservationBool::error(&reason),
+                reason: Some(reason),
+            };
+        }
+    };
+
+    let mut ssl = match Ssl::new(&ctx) {
+        Ok(s) => s,
+        Err(stack) => {
+            let reason = format!("openssl_ssl_new:{stack}");
+            return ServerInitiatedObservation {
+                observed: ObservationBool::error(&reason),
+                reason: Some(reason),
+            };
+        }
+    };
+    let _ = ssl.set_hostname(hostname);
+
+    let mut stream = match ssl.connect(tcp) {
+        Ok(s) => s,
+        Err(HandshakeError::Failure(mid)) => {
+            let cat = alerts::classify_openssl_error("server_reneg initial handshake", mid.error())
+                .category;
+            if cat.contains("protocol_version") {
+                return ServerInitiatedObservation {
+                    observed: ObservationBool::not_applicable(&format!(
+                        "tls12_initial_handshake_failed:{cat}"
+                    )),
+                    reason: Some(format!("tls12_initial_handshake_failed:{cat}")),
+                };
+            }
+            return ServerInitiatedObservation {
+                observed: ObservationBool::error(&format!("initial_handshake_failed:{cat}")),
+                reason: Some(format!("initial_handshake_failed:{cat}")),
+            };
+        }
+        Err(HandshakeError::SetupFailure(stack)) => {
+            let reason = format!("initial_handshake_setup:{stack}");
+            return ServerInitiatedObservation {
+                observed: ObservationBool::error(&reason),
+                reason: Some(reason),
+            };
+        }
+        Err(HandshakeError::WouldBlock(_)) => {
+            return ServerInitiatedObservation {
+                observed: ObservationBool::error("initial_handshake_would_block"),
+                reason: Some("initial_handshake_would_block".to_string()),
+            };
+        }
+    };
+
+    let negotiated = stream.ssl().version2();
+    if negotiated != Some(SslVersion::TLS1_2) {
+        let reason = format!("negotiated_version_not_tls12:{:?}", negotiated);
+        return ServerInitiatedObservation {
+            observed: ObservationBool::not_applicable(&reason),
+            reason: Some(reason),
+        };
+    }
+
+    if let Err(e) = stream.write_all(b"HEAD / HTTP/1.0\r\n\r\n") {
+        let reason = format!("probe_write:{e}");
+        return ServerInitiatedObservation {
+            observed: ObservationBool::error(&reason),
+            reason: Some(reason),
+        };
+    }
+
+    if total_renegotiations(stream.ssl()) > 0 {
+        return ServerInitiatedObservation {
+            observed: ObservationBool::probe(true),
+            reason: Some("renegotiation_observed_after_request_write".to_string()),
+        };
+    }
+
+    let mut buf = [0u8; 1024];
+    loop {
+        match stream.read(&mut buf) {
+            Ok(0) => {
+                return ServerInitiatedObservation {
+                    observed: ObservationBool::probe(false),
+                    reason: Some("connection_closed_without_server_renegotiation".to_string()),
+                };
+            }
+            Ok(_) => {
+                if total_renegotiations(stream.ssl()) > 0 {
+                    return ServerInitiatedObservation {
+                        observed: ObservationBool::probe(true),
+                        reason: Some("renegotiation_observed_during_passive_read".to_string()),
+                    };
+                }
+            }
+            Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
+                return ServerInitiatedObservation {
+                    observed: ObservationBool::probe(false),
+                    reason: Some("passive_wait_timeout".to_string()),
+                };
+            }
+            Err(e) => {
+                let reason = format!("probe_read:{e}");
+                return ServerInitiatedObservation {
+                    observed: ObservationBool::error(&reason),
+                    reason: Some(reason),
+                };
+            }
+        }
+    }
+}
+
+fn total_renegotiations(ssl: &SslRef) -> c_long {
+    // SAFETY: `ssl.as_ptr()` is a live SSL pointer borrowed from a live
+    // `SslRef`. The control command only reads OpenSSL's renegotiation
+    // counter and does not take ownership of the null argument.
+    unsafe {
+        openssl_sys::SSL_ctrl(
+            ssl.as_ptr(),
+            SSL_CTRL_GET_TOTAL_RENEGOTIATIONS,
+            0,
+            std::ptr::null_mut(),
+        )
     }
 }
 
@@ -226,6 +414,8 @@ fn error_observation(reason: String) -> RenegotiationObservation {
         secure_renegotiation_advertised: None,
         client_initiated_verdict: RenegotiationVerdict::Error(reason.clone()),
         reason: Some(reason),
+        server_initiated_observed: ObservationBool::not_probed("client_probe_returned"),
+        server_initiated_probe_reason: Some("client_probe_returned".to_string()),
     }
 }
 

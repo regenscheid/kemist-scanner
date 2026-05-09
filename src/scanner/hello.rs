@@ -126,6 +126,11 @@ pub struct HelloExtensionsObserved {
     /// through `Some("2^12")` (RFC values 1-4); `Some("0xNN")` for
     /// unknown bytes. `None` when the server did not echo the extension.
     pub max_fragment_length: Option<String>,
+    /// Raw ServerHello extension codepoints observed by this byte-level
+    /// probe. Specific fields above keep their dedicated typed values;
+    /// this preserves generic coverage for all extensions the server
+    /// echoed.
+    pub observed_server_extensions: Vec<u16>,
     /// RFC 8446 §4.1.3 downgrade-protection sentinel observed in the last
     /// 8 bytes of ServerRandom. One of `"tls12"` (server is TLS
     /// 1.3-capable but negotiated TLS 1.2), `"lte_tls11"` (server
@@ -439,6 +444,7 @@ fn parse_server_hello(bytes: &[u8], out: &mut HelloExtensionsObserved) {
     };
 
     let seen = walk_extensions(ext_bytes);
+    out.observed_server_extensions = sorted_extension_ids(&seen);
 
     out.ems = Some(seen.contains_key(&EXT_EXTENDED_MASTER_SECRET));
     out.encrypt_then_mac = Some(seen.contains_key(&EXT_ENCRYPT_THEN_MAC));
@@ -511,6 +517,12 @@ fn walk_extensions(bytes: &[u8]) -> HashMap<u16, &[u8]> {
         i = body_end;
     }
     seen
+}
+
+fn sorted_extension_ids(seen: &HashMap<u16, &[u8]>) -> Vec<u16> {
+    let mut ids: Vec<u16> = seen.keys().copied().collect();
+    ids.sort_unstable();
+    ids
 }
 
 /// Parse a `supported_point_formats` extension body (RFC 4492 §5.1.2).
