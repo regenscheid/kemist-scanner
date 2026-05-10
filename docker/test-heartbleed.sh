@@ -65,10 +65,12 @@ print_warning "Only use for testing purposes on isolated networks!"
 print_warning "Do NOT expose this to the internet!"
 echo ""
 
-# Test if kemist binary exists
-KEMIST_PATH="../target/debug/kemist"
+# Test if kemist binary exists. Prefer the release binary because the
+# GitHub Actions integration job builds release immediately before running
+# this script, while target/debug may be restored from cache.
+KEMIST_PATH="../target/release/kemist"
 if [ ! -f "$KEMIST_PATH" ]; then
-    KEMIST_PATH="../target/release/kemist"
+    KEMIST_PATH="../target/debug/kemist"
 fi
 
 if [ ! -f "$KEMIST_PATH" ]; then
@@ -79,10 +81,21 @@ fi
 # Run kemist against the vulnerable server
 print_status "Testing with kemist..."
 echo ""
-echo "Command: $KEMIST_PATH localhost:8443 --timeout 10"
+echo "Command: $KEMIST_PATH --target 127.0.0.1:8443#sni=localhost --connect-timeout 5 --handshake-timeout 5 --total-timeout 30"
 echo "========================================================"
 
-$KEMIST_PATH localhost:8443 --timeout 10
+SCAN_OUTPUT=$($KEMIST_PATH --target 127.0.0.1:8443#sni=localhost --connect-timeout 5 --handshake-timeout 5 --total-timeout 30)
+echo "$SCAN_OUTPUT"
+
+if ! echo "$SCAN_OUTPUT" | grep -q "TLS 1.2    yes"; then
+    print_error "kemist did not observe TLS 1.2 support on the Heartbleed fixture"
+    exit 1
+fi
+
+if ! echo "$SCAN_OUTPUT" | grep -q "Errors: 0"; then
+    print_error "kemist reported scan errors against the Heartbleed fixture"
+    exit 1
+fi
 
 echo ""
 echo "========================================================"

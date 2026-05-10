@@ -8,6 +8,87 @@ numbers follow [semver](https://semver.org/).
 
 (no changes yet)
 
+## [0.5.0] — 2026-05-09
+
+Schema v2.1. Additive release with broader TLS evidence capture,
+cleaner preferred schema shapes, and compatibility fields marked for
+removal in schema v3.
+
+### Added
+
+- **Generic server-extension inventory.** Added
+  `tls.extensions.observed_server_extensions[]` so consumers can see
+  every observed server-side extension codepoint, including rare or
+  emerging extensions, across TLS 1.2 ServerHello and TLS 1.3
+  EncryptedExtensions / Certificate / CertificateRequest paths. Named
+  fields such as EMS, secure renegotiation, delegated credentials, and
+  record-size-limit remain in place.
+- **TLS 1.3 extension capture via OpenSSL message callbacks.** The
+  legacy-probes backend now captures TLS 1.3 EncryptedExtensions,
+  CertificateEntry, and CertificateRequest extension blocks, including
+  generic extension visibility and the existing detailed parsers.
+- **SNI variant matrix.** `tls.sni_behavior.probes[]` now records
+  omitted SNI, bogus-DNS SNI, and an OpenSSL-backed IP-literal SNI
+  attempt when `legacy-probes` is enabled. The old `omitted_probe`
+  fields remain for compatibility.
+- **Directionally consistent renegotiation shape.** Added
+  `tls.renegotiation_behavior.client_initiated.accepted` and
+  `server_initiated.observed`, both using the normal
+  `ObservationBool` envelope. The older flat renegotiation fields are
+  still emitted as deprecated compatibility fields.
+- **Passive server-initiated renegotiation observation.** The
+  OpenSSL-backed renegotiation probe now separately records whether a
+  server-initiated TLS 1.2 renegotiation was observed after a minimal
+  HTTP request and passive read window. This is observation-only; the
+  scanner does not fuzz application-layer triggers.
+- **Per-handshake certificate join keys.** Per-cipher SKE /
+  CertificateVerify rows now include optional
+  `leaf_fingerprint_sha256`, `chain_fingerprint_sha256`, and `group`.
+  Alternate chains observed under per-cipher and signature-policy
+  probes feed into certificate chain observations.
+- **Preferred certificate-chain observation shape.** Added
+  `certificates.observed_chains[]`, which uniformly represents the
+  primary characterization chain and alternate chains with
+  `role`, `observed_via`, leaf fingerprint, optional chain
+  fingerprint, and full chain contents.
+- **Accurately named client-auth raw-byte fields.** Added
+  `raw_der_hex` and `values_hex` alongside the old misnamed `_b64`
+  fields under `tls.client_auth_request`.
+
+### Changed
+
+- **TLS 1.3 0-RTT semantics are clearer.** When a server issues TLS
+  1.3 tickets with `max_early_data_size == 0`,
+  `early_data_accepted` now renders `method: not_applicable` with
+  reason `ticket_max_early_data_size_zero` instead of `not_probed`.
+  A `probe(false)` value is reserved for an actual resumed,
+  0-RTT-capable handshake where early data was offered and not
+  accepted.
+- **Schema ergonomics improved while preserving compatibility.**
+  Deprecated schema-2.x fields are now annotated with
+  `"deprecated": true` in the JSON Schema and documented in
+  `docs/OUTPUT_SCHEMA.md` with their preferred replacements and
+  schema-v3 removal plan.
+- **Alternate certificate chains are surfaced more consistently.**
+  `certificates.alternates[]` still exists for compatibility, but
+  new consumers should read `certificates.observed_chains[]`.
+
+### Deprecated
+
+- Planned for removal in schema v3:
+  `tls.sni_behavior.omitted_probe`, `tls.sni_behavior.method`,
+  `tls.sni_behavior.reason`,
+  `tls.renegotiation_behavior.client_initiated_verdict`,
+  `tls.renegotiation_behavior.method`,
+  `tls.renegotiation_behavior.reason`,
+  `tls.renegotiation_behavior.server_initiated_observed`,
+  `tls.renegotiation_behavior.server_initiated_probe_reason`,
+  `tls.client_auth_request.ca_distinguished_names[].raw_der_b64`,
+  `tls.client_auth_request.oid_filters[].values_b64`,
+  `certificates.leaf`, `certificates.chain`,
+  `certificates.chain_length`, `certificates.alternates`,
+  `certificates.*.embedded_scts`, and `validation.validation_error`.
+
 ## [0.4.0] — 2026-04-30
 
 Schema v2.0. One breaking restructure (split `tls.extensions`),

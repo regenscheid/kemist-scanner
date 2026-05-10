@@ -182,7 +182,6 @@ async fn run_one(
             chain_fingerprint_sha256: None,
             leaf_subject_dn: hr.cert_chain.first().map(|c| c.subject.clone()),
             cert_chain: hr.cert_chain,
-            ..Default::default()
         },
         HandshakeOutcome::NotSupported => {
             let cat = hr.alert.unwrap_or_default();

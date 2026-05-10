@@ -55,6 +55,7 @@ RUN echo '#!/bin/bash' > /start-server.sh && \
     echo '  -key /certs/server.key \' >> /start-server.sh && \
     echo '  -tls1_2 \' >> /start-server.sh && \
     echo '  -cipher ALL \' >> /start-server.sh && \
+    echo '  -www \' >> /start-server.sh && \
     echo '  -msg \' >> /start-server.sh && \
     echo '  -debug' >> /start-server.sh && \
     chmod +x /start-server.sh

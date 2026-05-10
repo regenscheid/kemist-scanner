@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use chrono::Utc;
 use futures::stream::{self, StreamExt};
-use hickory_resolver::TokioAsyncResolver;
+use hickory_resolver::TokioResolver;
 use tokio::sync::Semaphore;
 use tracing::{info, warn};
 
@@ -192,7 +192,8 @@ impl Scanner {
             return Ok((ip, SocketAddr::new(ip, target.port)));
         }
 
-        let resolver = TokioAsyncResolver::tokio_from_system_conf()
+        let resolver = TokioResolver::builder_tokio()
+            .and_then(|builder| builder.build())
             .map_err(|e| ScannerError::dns_resolution_failed(format!("resolver init: {e}")))?;
 
         let response = resolver

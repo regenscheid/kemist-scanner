@@ -30,6 +30,11 @@ use crate::scanner::ScanResults;
 const RECORD_SIZE_LIMIT_CLIENT_OFFER_UNSUPPORTED: &str =
     "client_offer_unsupported_in_current_build";
 
+#[cfg(feature = "legacy-probes")]
+type AlternateChainBucket = (Vec<String>, Vec<CertificateInfo>, Option<String>);
+#[cfg(feature = "legacy-probes")]
+type AlternateChainByLeaf = BTreeMap<String, AlternateChainBucket>;
+
 /// Inputs that the scanner does not yet capture but that schema v2 requires.
 /// Supplied by `main.rs` around the `SslScanner::scan()` call.
 pub struct JsonEmitContext {
@@ -1317,9 +1322,15 @@ fn build_ocsp_stapling(results: &ScanResults, ctx: &JsonEmitContext) -> OcspStap
 /// `record_size_limit` is currently parser-only because neither rustls
 /// nor our pinned OpenSSL stack can emit the RFC 8449 client offer.
 fn build_tls13_ee_observations(results: &ScanResults) -> (ObservationU16, Vec<String>) {
+    #[cfg(feature = "legacy-probes")]
     let mut record_size_limit =
         ObservationU16::not_probed(RECORD_SIZE_LIMIT_CLIENT_OFFER_UNSUPPORTED);
+    #[cfg(not(feature = "legacy-probes"))]
+    let record_size_limit = ObservationU16::not_probed(RECORD_SIZE_LIMIT_CLIENT_OFFER_UNSUPPORTED);
+    #[cfg(feature = "legacy-probes")]
     let mut compress_certificate_algorithms = results.certificate_compression_algorithms.clone();
+    #[cfg(not(feature = "legacy-probes"))]
+    let compress_certificate_algorithms = results.certificate_compression_algorithms.clone();
     #[cfg(feature = "legacy-probes")]
     {
         if let Some(obs) = results.openssl_observations.as_ref() {
@@ -1340,10 +1351,6 @@ fn build_tls13_ee_observations(results: &ScanResults) -> (ObservationU16, Vec<St
                 }
             }
         }
-    }
-    #[cfg(not(feature = "legacy-probes"))]
-    {
-        let _ = results;
     }
     (record_size_limit, compress_certificate_algorithms)
 }
@@ -1402,8 +1409,7 @@ fn build_alternate_certificates(results: &ScanResults) -> Vec<CertificateAlterna
         ("signature_algorithm_policy.eddsa_only", &policy.eddsa_only),
     ];
 
-    let mut by_leaf: BTreeMap<String, (Vec<String>, Vec<CertificateInfo>, Option<String>)> =
-        BTreeMap::new();
+    let mut by_leaf: AlternateChainByLeaf = BTreeMap::new();
     for (via, probe) in probes {
         let Some(leaf) = probe.cert_chain.first() else {
             continue;
