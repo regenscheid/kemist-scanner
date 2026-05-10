@@ -15,7 +15,8 @@ use colored::Colorize;
 
 use crate::model::scan_result::{
     CipherSuiteEntry, ClientAuthRequestEntry, DhParametersObservation, GroupObservation, Method,
-    ObservationBool, RenegotiationBehavior, ScanResult, SkeSigObservation, TlsExtensions,
+    ObservationBool, ObservationU16, RenegotiationBehavior, ScanResult, SkeSigObservation,
+    TlsExtensions,
 };
 
 /// Render one scan record to stdout. Compact (~50 lines).
@@ -409,9 +410,7 @@ fn render_extensions(r: &ScanResult) {
     if let Some(v) = &ext.max_fragment_length {
         kv("max_fragment_length", v);
     }
-    if let Some(v) = ext.record_size_limit {
-        kv("record_size_limit", &v.to_string());
-    }
+    print_obs_u16("record_size_limit", &ext.record_size_limit);
     if !ext.compress_certificate_algorithms.is_empty() {
         kv(
             "compress_certificate",
@@ -436,9 +435,10 @@ fn render_behavioral_probes(r: &ScanResult) {
     let bp = &r.tls.behavioral_probes;
     section("Behavioral probes");
     print_obs_bool("heartbleed_echo", &bp.heartbeat_echoes_oversized_payload);
-    if !bp.compression_offered.is_empty() {
-        kv("compression_methods", &bp.compression_offered.join(", "));
+    if let Some(selected) = &bp.compression_selected {
+        kv("compression_selected", selected);
     }
+    print_obs_bool("crime_vulnerable", &bp.crime_vulnerable);
     print_obs_bool("grease_echoed", &bp.grease_echoed);
     print_obs_bool("hello_retry_request", &bp.hello_retry_request);
     // ephemeral_key_reuse + bleichenbacher_oracle_probe are
@@ -851,6 +851,28 @@ fn print_obs_bool(label: &str, o: &ObservationBool) {
                 label_cell,
                 "—".yellow(),
                 method_label(m).yellow()
+            ),
+        },
+    }
+}
+
+fn print_obs_u16(label: &str, o: &ObservationU16) {
+    let label_cell = format!("{label}:");
+    match o.value {
+        Some(value) => println!("  {:<22} {}", label_cell, value.to_string().green()),
+        None => match &o.reason {
+            Some(reason) => println!(
+                "  {:<22} {} [{}: {}]",
+                label_cell,
+                "—".yellow(),
+                method_label(&o.method).yellow(),
+                reason.dimmed()
+            ),
+            None => println!(
+                "  {:<22} {} [{}]",
+                label_cell,
+                "—".yellow(),
+                method_label(&o.method).yellow()
             ),
         },
     }

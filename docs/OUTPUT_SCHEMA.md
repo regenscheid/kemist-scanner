@@ -2,7 +2,7 @@
 
 Formal contract: [`schemas/output-v1.json`](../schemas/output-v1.json).
 This document is the human-readable field reference. Every emitted JSON
-record pins `schema_version: "2.0.0"` and validates against the JSON
+record pins `schema_version: "2.1.0"` and validates against the JSON
 Schema — both are CI-enforced.
 
 ## Stability contract
@@ -20,6 +20,34 @@ Schema versioning is semver over **shape only**, not semantic meaning.
 
 Consumers **MUST** ignore unknown fields — a scanner from a later minor
 may emit observations a consumer hasn't seen before.
+
+### Deprecation Policy
+
+Schema 2.x may emit both a preferred field and an older compatibility
+field when a name or shape turned out to be misleading. Deprecated
+fields stay populated through schema 2.x so existing consumers do not
+break, but new integrations should read the preferred fields. Deprecated
+compatibility fields are annotated with `"deprecated": true` in
+[`schemas/output-v1.json`](../schemas/output-v1.json) and are planned
+for removal in schema v3.
+
+Current schema-2.x compatibility fields:
+
+| Deprecated field | Prefer | Removal |
+|---|---|---|
+| `tls.sni_behavior.omitted_probe` | `tls.sni_behavior.probes[]` row where `variant == "omitted"` | schema v3 |
+| `tls.sni_behavior.method` / `reason` | same omitted-SNI row's `outcome` / `reason` | schema v3 |
+| `tls.renegotiation_behavior.client_initiated_verdict` | `tls.renegotiation_behavior.client_initiated.accepted` | schema v3 |
+| `tls.renegotiation_behavior.method` / `reason` | `tls.renegotiation_behavior.client_initiated.accepted.method` / `reason` | schema v3 |
+| `tls.renegotiation_behavior.server_initiated_observed` / `server_initiated_probe_reason` | `tls.renegotiation_behavior.server_initiated.observed` | schema v3 |
+| `tls.client_auth_request.ca_distinguished_names[].raw_der_b64` | `raw_der_hex` | schema v3 |
+| `tls.client_auth_request.oid_filters[].values_b64` | `values_hex` | schema v3 |
+| `certificates.leaf` | `certificates.observed_chains[]` primary entry's `chain[0]` | schema v3 |
+| `certificates.chain` | `certificates.observed_chains[]` primary entry's `chain` | schema v3 |
+| `certificates.chain_length` | primary observed chain's `chain.length` | schema v3 |
+| `certificates.alternates` | `certificates.observed_chains[]` entries where `role == "alternate"` | schema v3 |
+| `certificates.*.embedded_scts` | `certificates.*.extensions.scts[]` | schema v3 |
+| `validation.validation_error` | `validation.per_store_validation_errors["webpki-roots"]` | schema v3 |
 
 **What the scanner will never emit**, regardless of version:
 - Compliance verdicts, grades, severity rankings, pass/fail judgments
@@ -56,7 +84,7 @@ same; the field name is load-bearing for readability.
 
 ```
 ScanResult {
-  schema_version: "2.0.0"
+  schema_version: "2.1.0"
   scanner:      { name, version }
   capabilities: { ... }
   scan:         { ... }
@@ -70,7 +98,7 @@ ScanResult {
 ```
 
 ### `schema_version`
-String, always `"2.0.0"` in schema v2. Pin on this exact value; check
+String, always `"2.1.0"` in schema v2.1. Pin on this exact value; check
 the major before interpreting anything else.
 
 ### `scanner`
@@ -92,7 +120,7 @@ against what the scanner build was actually able to probe.
 | `probed_cipher_suites` | `string[]` | Cipher suite names the scanner probes — union across every backend compiled in. Per-suite `provider` tag under `tls.cipher_suites.*` identifies which backend ran each probe |
 | `probed_kx_groups` | `string[]` | KX group names the scanner probes — union across every backend |
 | `config_paths` | `string[]` | Config files consulted (reserved; currently always empty) |
-| `probe_limitations` | `string[]` | Runtime-detected probe gaps (reserved) |
+| `probe_limitations` | `string[]` | Reserved for build-level probe limitations; currently empty. Field-specific limitations are carried beside the affected observation. |
 
 ### `scan`
 ```
@@ -223,22 +251,26 @@ backend produced the observation (`aws_lc_rs` vs `openssl`).
 
 **FFDHE cross-check + cross-codepoint coherence.** A TLS 1.2 FFDHE
 entry with
-`{supported: false, reason: "server_does_not_honor_supported_groups", returned_group, returned_prime_bits}`
+`{reason: "server_does_not_honor_supported_groups", returned_group, returned_prime_bits}`
 means the scanner has direct or cross-codepoint evidence that the
-server isn't honoring `supported_groups`:
+server isn't honoring `supported_groups`. The `supported` field still
+answers the row-level question: did this offered codepoint complete
+with its matching group?
 
 - Direct: the server completed a DHE handshake against this
   codepoint's offer but returned a prime that didn't match. The
   `returned_group` field carries the classification of the prime the
   server *actually* sent (`"ffdhe2048"`, `"modp3072"`, `"custom"`,
   etc., matching the `tls.dh_parameters[].classification` vocabulary);
-  `returned_prime_bits` carries its bit length.
+  `returned_prime_bits` carries its bit length. This row is
+  `supported: false`.
 - Cross-codepoint: any FFDHE codepoint probe at TLS 1.2 reported a
-  direct mismatch, so every FFDHE TLS 1.2 row gets downgraded — the
-  matched ones too, since the match is also consistent with the
-  server returning a static prime regardless of offer (e.g. an RFC
-  7919 `ssl_dhparam` that happens to coincide with the requested
-  codepoint).
+  direct mismatch, so every FFDHE TLS 1.2 row gets the same reason
+  and returned-prime evidence. Matched rows remain `supported: true`
+  because the specific offered group completed, but the reason warns
+  that the host appears to serve a static prime regardless of offer
+  (e.g. an RFC 7919 `ssl_dhparam` that happens to coincide with the
+  requested codepoint).
 
 Distinct from a plain `{supported: false}` (no `reason`,
 no `returned_group`), which means the server cleanly refused the
@@ -247,7 +279,7 @@ group offer.
 Entries aws-lc-rs doesn't ship emit `not_probed` with
 a specific reason — never `supported: false` without a real probe.
 
-### `tls.extensions`
+### `tls.extensions` / `tls.behavioral_probes`
 ```
 {
   ems: ObservationBool,
@@ -263,12 +295,27 @@ a specific reason — never `supported: false` without a real probe.
   encrypt_then_mac: ObservationBool,
   heartbeat_present: ObservationBool,
   heartbeat_echoes_oversized_payload: ObservationBool,
-  compression_offered: [...],
+  compression_selected: string | null,
+  crime_vulnerable: ObservationBool,
+  record_compression_by_version: [
+    {version: "SSLv3" | "TLSv1.0" | "TLSv1.1" | "TLSv1.2", compression_selected: string | null, crime_vulnerable: ObservationBool}
+  ],
   truncated_hmac: ObservationBool,
   npn: ObservationBool,
   supported_point_formats_echoed: [...],
   max_fragment_length?: string,             // "2^9".."2^12" or "0xNN"
-  record_size_limit?: int,                  // RFC 8449 (see caveat)
+  observed_server_extensions?: [
+    {
+      protocol_phase: string,               // e.g. "tls1_2_server_hello"
+      extension_id: "0xNNNN",
+      extension_name: string                // known name or "unknown_0xNNNN"
+    }
+  ],
+  record_size_limit: {                      // RFC 8449 (see caveat)
+    value: int | null,
+    method: Method,
+    reason?: string
+  },
   compress_certificate_algorithms: [...],   // RFC 8879 (see caveat)
   grease_echoed: ObservationBool,           // RFC 8701
   delegated_credentials: {                  // RFC 9345
@@ -314,20 +361,27 @@ Notes:
 - **`ocsp_stapling.raw_hex`** — gated behind `--include-ocsp-raw` CLI
   flag. Off by default because the parsed `content` is what rule
   engines want and raw DER inflates output size noticeably.
-- **`record_size_limit` / `compress_certificate_algorithms`** —
-  captured via an OpenSSL msg-callback on the TLS 1.3
-  EncryptedExtensions message. **Known limitation**: OpenSSL 3.5
-  reserves these extension codes for its own internal handlers so
-  we can't inject a matching client offer via `add_custom_ext`, and
-  openssl-sys 0.9.109 doesn't expose the native setters. Per RFC
-  8449 / 8879, servers MUST NOT advertise these unsolicited — so in
-  practice both fields are typically absent on real scans. A
-  future workstream will close this gap when native binding
-  coverage improves.
+- **`dh_parameters[].prime_raw_hex`** — gated behind
+  `--include-dh-raw`. Off by default because FFDHE primes can add
+  kilobytes per DHE observation.
+- **`record_size_limit`** — parser support exists via an OpenSSL
+  msg-callback on TLS 1.3 EncryptedExtensions, but the current build
+  has no RFC 8449 client-offer path. OpenSSL 3.5 has no visible
+  `record_size_limit` implementation/API, and rustls 0.23 exposes
+  only local `max_fragment_size`, not the RFC 8449 extension. Per RFC
+  8449, conforming servers MUST NOT advertise this unsolicited. Real
+  scans therefore normally emit
+  `{value: null, method: "not_probed", reason: "client_offer_unsupported_in_current_build"}`.
 - **`truncated_hmac` / `npn`** — observed in plaintext TLS 1.2
   ServerHello via the byte-level hello probe. Client offers both
   extensions to elicit server echoes (without actually negotiating
   them — probe bails after ServerHello).
+- **`observed_server_extensions`** — generic extension inventory for
+  ServerHello, TLS 1.3 EncryptedExtensions, leaf CertificateEntry, and
+  CertificateRequest extension blocks. Named fields above remain the
+  compatibility surface for specific facts; this array preserves
+  extension coverage for newer or rare codepoints such as ECH, ALPS,
+  token_binding, psk_key_exchange_modes, and post_handshake_auth.
 - **`grease_echoed`** — RFC 8701 conformance observation. The
   byte-level hello probe injects a GREASE extension codepoint
   (`0x0A0A`) in the ClientHello. A correctly-behaving server
@@ -407,6 +461,11 @@ Notes:
   with the detail fields absent. The scanner does **not** verify
   the DC signature against the leaf pubkey and does **not**
   compare `valid_time` against the wall clock — observation only.
+- **`compress_certificate_algorithms`** — RFC 8879 certificate
+  compression observation. This is populated when kemist offers TLS
+  1.3 certificate decompression and the server responds with a
+  `CompressedCertificate` handshake message. It is distinct from
+  TLS record-layer compression under `behavioral_probes`.
 
 **Note on revocation.** `ocsp_stapling` is a TLS-handshake
 observation (server stapled or not). Out-of-band revocation
@@ -468,10 +527,14 @@ openssl-sys 0.9.109 doesn't expose `SSL_SESSION_get0_ticket`. Treat
 `false` as "likely stable ticket" rather than "definitely same
 ticket bytes."
 
-The TLS 1.3 slots currently emit `method: not_probed` with reasons
-`tls13_resumption_probe_not_implemented` and
-`early_data_probe_not_implemented`. A follow-up workstream will
-implement them.
+The TLS 1.3 PSK slot reports whether the second handshake resumed from
+a ticket captured during the first handshake. The 0-RTT slot reports
+`probe(true|false)` only when a 0-RTT-capable ticket was available and
+the scanner could observe whether the second handshake accepted early
+data. If the server issued tickets but set `max_early_data_size == 0`,
+`early_data_accepted` is `method: not_applicable` with reason
+`ticket_max_early_data_size_zero`: no 0-RTT was offered, so this is not
+the same thing as a probed rejection.
 
 ### `tls.signature_algorithm_policy_probe`
 ```
@@ -490,6 +553,7 @@ ConstrainedProbeResult = {
   method:                   Method,
   reason?:                  string,
   leaf_fingerprint_sha256?: string,   // SHA-256 (lowercase hex) of leaf DER on complete
+  chain_fingerprint_sha256?: string,  // SHA-256 over concatenated DER chain bytes
   leaf_subject_dn?:         string    // leaf subject DN on complete
 }
 ```
@@ -511,8 +575,10 @@ v1.5 signatures.
 
 **Differential cert-selection observation.** When the handshake
 completes, each constrained probe records `leaf_fingerprint_sha256`
-(SHA-256 of the leaf DER, lowercase hex) and `leaf_subject_dn` (same
-formatting as `certificates.leaf.subject_dn`). ≥2 distinct
+(SHA-256 of the leaf DER, lowercase hex),
+`chain_fingerprint_sha256` when raw chain DER was available, and
+`leaf_subject_dn` (same formatting as
+`certificates.observed_chains[].chain[].subject_dn`). ≥2 distinct
 fingerprints across the five probes signal a dual-cert deployment
 (e.g. RSA + ECDSA leaves on one endpoint); the scanner records the
 fingerprints, downstream rule engines compute the comparison.
@@ -554,13 +620,120 @@ cert verifier; no cert validation is performed.
 ### `tls.sni_behavior`
 ```
 {
-  omitted_probe: "same_cert" | "different_cert" | "rejected" | "error" | null,
+  probes?: [
+    {
+      variant: "omitted" | "bogus_dns" | "ip_literal",
+      sni_sent?: string | null,
+      outcome: "same_cert" | "different_cert" | "rejected" | "error" | "not_probed",
+      leaf_fingerprint_sha256?: string,
+      reason?: string
+    }
+  ],
+
+  // Deprecated compatibility fields; prefer probes[].
+  omitted_probe: "same_cert" | "different_cert" | "rejected" | "error" | "not_probed" | null,
   method: Method,
   reason?: string
 }
 ```
 Comparison of leaf cert fingerprints between the SNI-set characterization
-handshake and a second handshake with SNI omitted (via `ServerName::IpAddress`).
+handshake and SNI-variant handshakes. New consumers should read
+`probes[]`; the deprecated `omitted_probe`/`method`/`reason` fields
+mirror the `variant: "omitted"` row for schema-2.x compatibility.
+`probes[]` also records a bogus-DNS SNI and an IP-literal attempt when
+the TLS backend can express it. rustls is used for the omitted and
+bogus-DNS rows; when
+`legacy-probes` is enabled, the IP-literal row is attempted through OpenSSL
+because rustls correctly refuses to serialize IP literals as SNI. Without
+`legacy-probes`, the IP-literal row is emitted as `not_probed`.
+
+### `tls.server_key_exchange_signatures`
+```
+[
+  {
+    cipher_suite: string,
+    signature_algorithm: string,
+    method: Method,
+    reason?: string,
+    leaf_fingerprint_sha256?: string,
+    chain_fingerprint_sha256?: string,
+    group?: string
+  }
+]
+```
+
+Per-cipher OpenSSL observations of the TLS 1.2 ServerKeyExchange /
+TLS 1.3 CertificateVerify signature algorithm. The optional fingerprint
+fields are join keys back to the exact certificate chain observed during
+that constrained handshake; `chain_fingerprint_sha256` is SHA-256 over
+concatenated DER chain bytes.
+
+### `tls.renegotiation_behavior`
+```
+{
+  client_initiated: {
+    accepted: ObservationBool
+  },
+  server_initiated: {
+    observed: ObservationBool
+  },
+
+  // Legacy compatibility fields; prefer the nested shape above.
+  client_initiated_verdict?: "accepted" | "rejected" | "not_attempted" | "error" | null,
+  method: Method,
+  reason?: string,
+  server_initiated_observed: ObservationBool,
+  server_initiated_probe_reason?: string
+}
+```
+
+Use the nested fields for new consumers:
+
+- `client_initiated.accepted` actively requests TLS 1.2 renegotiation.
+  `value: true` means the server completed a second handshake on the
+  same connection; `value: false` means the server rejected the attempt.
+- `server_initiated.observed` is passive: kemist completes a TLS 1.2
+  handshake, sends a minimal HTTP request, then waits briefly for a
+  server-initiated renegotiation signal. `value: false` means no such
+  renegotiation was seen in that passive window.
+
+The older `client_initiated_verdict`, top-level `method`/`reason`,
+`server_initiated_observed`, and `server_initiated_probe_reason` fields
+remain for schema-2.x compatibility and are planned for removal in
+schema v3. Kemist does not fuzz application protocol triggers.
+
+### `tls.client_auth_request`
+```
+{
+  requested: bool,
+  certificate_types: [int, ...],
+  signature_algorithms: [string, ...],
+  ca_distinguished_names: [
+    {
+      raw_der_hex: string,
+      raw_der_b64: string,  // deprecated: misnamed, contains hex
+      common_name?: string,
+      organization?: string
+    }
+  ],
+  oid_filters: [
+    {
+      oid: string,
+      values_hex: [string, ...],
+      values_b64: [string, ...]  // deprecated: misnamed, contains hex
+    }
+  ],
+  alert_on_empty_cert?: string | null,
+  method: Method,
+  reason?: string
+}
+```
+
+OpenSSL-backed capture of the server's TLS 1.2 / TLS 1.3
+`CertificateRequest`. The preferred raw-byte encodings are
+`raw_der_hex` and `values_hex`. Schema 2.x also emits the older
+misnamed `_b64` fields with identical hex content for compatibility;
+those fields are planned for removal in schema v3.
 
 ### `tls.channel_binding`
 ```
@@ -599,11 +772,38 @@ RFC 7677 / RFC 5802 SCRAM channel-binding requirements.
 ### `certificates`
 ```
 {
+  observed_chains?: [
+    {
+      chain_id: string,
+      role: "primary" | "alternate",
+      observed_via: [string, ...],
+      leaf_fingerprint_sha256?: string,
+      chain_fingerprint_sha256?: string,
+      chain: [CertificateFacts...]
+    }
+  ],
+
+  // Deprecated compatibility fields; prefer observed_chains[].
   leaf?: CertificateFacts,
   chain: [CertificateFacts...],
-  chain_length: int
+  chain_length: int,
+  alternates?: [CertificateAlternate...]
 }
 ```
+
+`observed_chains[]` is the preferred shape for new consumers. It
+contains the primary characterization chain and any alternate chains
+observed by constrained probe handshakes, deduplicated by leaf SHA-256
+fingerprint. `observed_via` values include paths such as
+`characterization_handshake`, `signature_algorithm_policy.rsa_pss_only`,
+and `cipher_suite.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256`.
+
+The older `leaf`, `chain`, `chain_length`, and `alternates` fields
+remain for schema-2.x compatibility and are planned for removal in
+schema v3. Validation and revocation fields still describe only the
+primary chain.
+
+`CertificateAlternate = {observed_via: string[], leaf_fingerprint_sha256?: string, chain_fingerprint_sha256?: string, leaf?: CertificateFacts, chain: CertificateFacts[], chain_length: int}`.
 
 `CertificateFacts`:
 
@@ -647,8 +847,9 @@ RFC 7677 / RFC 5802 SCRAM channel-binding requirements.
 | `scts` | `[SctDetail, ...]` | Per-SCT detail from ext 1.3.6.1.4.1.11129.2.4.2 |
 
 `SctDetail = {log_id: hex, timestamp: RFC3339, signature_hash_algorithm: string, signature_algorithm: string, signature_hex: hex}`.
-The cert-level `embedded_scts` count remains for backwards
-compatibility and equals `scts.len()`.
+The cert-level `embedded_scts` count remains for schema-2.x
+compatibility and equals `scts.len()`; prefer `extensions.scts[]`.
+`embedded_scts` is planned for removal in schema v3.
 
 ### Revocation observations (`certificates.leaf.revocation`)
 
@@ -724,7 +925,7 @@ land in `chain_valid_to_custom_roots`.
 | `chain_valid_to_us_dod_roots` | `data/trust_stores/us_dod.pem`. DoD PKI (placeholder in current snapshot). |
 | `chain_valid_to_custom_roots.<name>` | Per-entry `--extra-trust-store` bundle. |
 | `name_matches_sni` | Store-agnostic SAN/CN match per RFC 6125. |
-| `validation_error` | **Legacy.** Error from webpki-roots validation only, kept for backwards-compatible consumers. New integrations should consume `per_store_validation_errors`. |
+| `validation_error` | **Deprecated compatibility field.** Error from webpki-roots validation only. New integrations should consume `per_store_validation_errors["webpki-roots"]`; planned for removal in schema v3. |
 | `per_store_validation_errors.<name>` | Per-store error category string. Populated only for stores whose chain validation failed. Same taxonomy as `validation_error`. |
 | `trust_store_sources.<name>` | Provenance: `"compiled_in"` / `"cache_refreshed:<path>"` (loaded from `kemist --update-trust-stores` output) / `"runtime_override:<path>"` (user-supplied via `--trust-store NAME:PATH`). |
 | `trust_store_bundle_metadata.<name>` | Per-bundle manifest: `source`, `fetched_at` (ISO 8601), `sha256`, `entry_count`, optional `upstream_version`. Populated only when the store was loaded from the refreshed cache — compile-time + runtime-override loads omit metadata. Lets rule engines pin observations to a specific snapshot. |

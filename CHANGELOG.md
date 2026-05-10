@@ -8,6 +8,87 @@ numbers follow [semver](https://semver.org/).
 
 (no changes yet)
 
+## [0.5.0] — 2026-05-09
+
+Schema v2.1. Additive release with broader TLS evidence capture,
+cleaner preferred schema shapes, and compatibility fields marked for
+removal in schema v3.
+
+### Added
+
+- **Generic server-extension inventory.** Added
+  `tls.extensions.observed_server_extensions[]` so consumers can see
+  every observed server-side extension codepoint, including rare or
+  emerging extensions, across TLS 1.2 ServerHello and TLS 1.3
+  EncryptedExtensions / Certificate / CertificateRequest paths. Named
+  fields such as EMS, secure renegotiation, delegated credentials, and
+  record-size-limit remain in place.
+- **TLS 1.3 extension capture via OpenSSL message callbacks.** The
+  legacy-probes backend now captures TLS 1.3 EncryptedExtensions,
+  CertificateEntry, and CertificateRequest extension blocks, including
+  generic extension visibility and the existing detailed parsers.
+- **SNI variant matrix.** `tls.sni_behavior.probes[]` now records
+  omitted SNI, bogus-DNS SNI, and an OpenSSL-backed IP-literal SNI
+  attempt when `legacy-probes` is enabled. The old `omitted_probe`
+  fields remain for compatibility.
+- **Directionally consistent renegotiation shape.** Added
+  `tls.renegotiation_behavior.client_initiated.accepted` and
+  `server_initiated.observed`, both using the normal
+  `ObservationBool` envelope. The older flat renegotiation fields are
+  still emitted as deprecated compatibility fields.
+- **Passive server-initiated renegotiation observation.** The
+  OpenSSL-backed renegotiation probe now separately records whether a
+  server-initiated TLS 1.2 renegotiation was observed after a minimal
+  HTTP request and passive read window. This is observation-only; the
+  scanner does not fuzz application-layer triggers.
+- **Per-handshake certificate join keys.** Per-cipher SKE /
+  CertificateVerify rows now include optional
+  `leaf_fingerprint_sha256`, `chain_fingerprint_sha256`, and `group`.
+  Alternate chains observed under per-cipher and signature-policy
+  probes feed into certificate chain observations.
+- **Preferred certificate-chain observation shape.** Added
+  `certificates.observed_chains[]`, which uniformly represents the
+  primary characterization chain and alternate chains with
+  `role`, `observed_via`, leaf fingerprint, optional chain
+  fingerprint, and full chain contents.
+- **Accurately named client-auth raw-byte fields.** Added
+  `raw_der_hex` and `values_hex` alongside the old misnamed `_b64`
+  fields under `tls.client_auth_request`.
+
+### Changed
+
+- **TLS 1.3 0-RTT semantics are clearer.** When a server issues TLS
+  1.3 tickets with `max_early_data_size == 0`,
+  `early_data_accepted` now renders `method: not_applicable` with
+  reason `ticket_max_early_data_size_zero` instead of `not_probed`.
+  A `probe(false)` value is reserved for an actual resumed,
+  0-RTT-capable handshake where early data was offered and not
+  accepted.
+- **Schema ergonomics improved while preserving compatibility.**
+  Deprecated schema-2.x fields are now annotated with
+  `"deprecated": true` in the JSON Schema and documented in
+  `docs/OUTPUT_SCHEMA.md` with their preferred replacements and
+  schema-v3 removal plan.
+- **Alternate certificate chains are surfaced more consistently.**
+  `certificates.alternates[]` still exists for compatibility, but
+  new consumers should read `certificates.observed_chains[]`.
+
+### Deprecated
+
+- Planned for removal in schema v3:
+  `tls.sni_behavior.omitted_probe`, `tls.sni_behavior.method`,
+  `tls.sni_behavior.reason`,
+  `tls.renegotiation_behavior.client_initiated_verdict`,
+  `tls.renegotiation_behavior.method`,
+  `tls.renegotiation_behavior.reason`,
+  `tls.renegotiation_behavior.server_initiated_observed`,
+  `tls.renegotiation_behavior.server_initiated_probe_reason`,
+  `tls.client_auth_request.ca_distinguished_names[].raw_der_b64`,
+  `tls.client_auth_request.oid_filters[].values_b64`,
+  `certificates.leaf`, `certificates.chain`,
+  `certificates.chain_length`, `certificates.alternates`,
+  `certificates.*.embedded_scts`, and `validation.validation_error`.
+
 ## [0.4.0] — 2026-04-30
 
 Schema v2.0. One breaking restructure (split `tls.extensions`),
@@ -23,18 +104,15 @@ same behavior.
   additive new fields with default `not_probed: feature_disabled` /
   empty rendering on absent data.
 - **`tls.extensions` split into `tls.extensions` + `tls.behavioral_probes`.**
-  Six fields moved out of `tls.extensions` because they aren't TLS
-  extensions in the RFC 5246 §7.4.1.4 / RFC 8446 §4.2 sense:
-  `heartbeat_echoes_oversized_payload`, `compression_offered`,
+  The following observations live under `tls.behavioral_probes`
+  because they aren't TLS extensions in the RFC 5246 §7.4.1.4 /
+  RFC 8446 §4.2 sense:
+  `heartbeat_echoes_oversized_payload`, `compression_selected`,
+  `crime_vulnerable`, `record_compression_by_version`,
   `grease_echoed`, `hello_retry_request`, `ephemeral_key_reuse`,
-  `bleichenbacher_oracle_probe`. The first is a Heartbleed
-  vulnerability probe, the second is a ClientHello-body field
-  (RFC 5246 §7.4.1.3, predates extensions), the third is an RFC
-  8701 conformance check, the fourth is a ServerHello variant
-  (random == sentinel per RFC 8446 §4.1.3), and the last two are
-  active vulnerability probes (Raccoon CVE-2020-1968, ROBOT). True
-  extensions stay under `tls.extensions`. Polarity (`true` = good
-  vs bad) varies per field within `behavioral_probes` and is
+  `bleichenbacher_oracle_probe`. True extensions stay under
+  `tls.extensions`. Polarity (`true` = good vs bad) varies per field
+  within `behavioral_probes` and is
   documented per-field in the schema; the bucket is a structural
   grouping, not a polarity grouping. Dashboards reading
   `tls.extensions.{ephemeral_key_reuse,bleichenbacher_oracle_probe,...}`
@@ -64,13 +142,14 @@ same behavior.
   description makes per-field polarity explicit.
 - **`returned_group` + `returned_prime_bits` on FFDHE TLS 1.2
   named-group rows.** When the cross-codepoint coherence pass
-  downgrades an FFDHE row to `supported: false`, the row records
-  what prime the server actually returned in response to the offer
+  attaches `reason: "server_does_not_honor_supported_groups"` to an
+  FFDHE row, the row records what prime the server actually returned
+  in response to the offer
   (`"ffdhe2048"`, `"modp3072"`, `"custom"`, etc., matching the
   `tls.dh_parameters[].classification` vocabulary, plus
   `returned_prime_bits` for size when classification is `custom`).
-  Both fields omitted when the row reflects an honest match or a
-  non-FFDHE codepoint.
+  Both fields omitted when the row has no cross-codepoint caveat or
+  direct mismatch, or when it reflects a non-FFDHE codepoint.
 
 ### Changed
 
@@ -81,19 +160,22 @@ same behavior.
   `supported: true` for the `ffdhe2048` codepoint even though it
   ignores `supported_groups` entirely. fs.bbg.gov is the
   motivating case: the server returns its 2048-bit prime regardless
-  of which FFDHE codepoint the client offers. ssllabs reads this
-  correctly as "no FFDHE named-group support"; kemist now matches.
+  of which FFDHE codepoint the client offers. kemist now records the
+  returned prime on every FFDHE TLS 1.2 row while preserving row-level
+  support for any codepoint whose own offer matched.
   Implementation: a new cross-codepoint coherence pass in
   [output/json.rs](src/output/json.rs) — when *any* FFDHE TLS 1.2
   probe returns a prime that doesn't match the offered codepoint
   (the `IgnoredGroupReturnedDifferentPrime` outcome), every FFDHE
-  TLS 1.2 row gets downgraded to
-  `supported: false, reason: "server_does_not_honor_supported_groups"`
-  with `returned_group` + `returned_prime_bits` preserving per-row
-  evidence. TLS 1.3 FFDHE rows are unaffected (wire-confirmed via
-  `key_share` rather than inferred from prime hashing). Old reason
-  string `server_ignored_group_offer_returned_custom_prime` is
-  removed; the new string is more honest about what was concluded.
+  TLS 1.2 row gets
+  `reason: "server_does_not_honor_supported_groups"` with
+  `returned_group` + `returned_prime_bits` preserving per-row evidence.
+  Direct mismatches remain `supported: false`; self-matches remain
+  `supported: true`. TLS 1.3 FFDHE rows are unaffected
+  (wire-confirmed via `key_share` rather than inferred from prime
+  hashing). Old reason string
+  `server_ignored_group_offer_returned_custom_prime` is removed; the
+  new string is more honest about what was concluded.
 - **ECDHE ephemeral-reuse probe handles X25519 / X448.** The probe
   previously rejected non-classical-EC curves with the misleading
   error `peer_tmp_key_not_ec:id=Id(1034)` whenever the server

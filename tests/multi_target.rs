@@ -38,7 +38,7 @@ async fn dns_failure_produces_schema_valid_record_not_panic() {
     let scanner = Scanner::new(fast_config());
     let result = scanner.scan(target).await;
 
-    assert_eq!(result.schema_version, "2.0.0");
+    assert_eq!(result.schema_version, "2.1.0");
     assert!(!result.errors.is_empty());
     assert!(
         result
@@ -72,7 +72,7 @@ async fn scan_many_bounded_concurrency_never_aborts() {
     assert_eq!(results.len(), 3);
     results.sort_by(|a, b| a.scan.host.cmp(&b.scan.host));
     for r in &results {
-        assert_eq!(r.schema_version, "2.0.0");
+        assert_eq!(r.schema_version, "2.1.0");
         assert!(!r.errors.is_empty());
     }
     assert!(results[0].scan.host.contains("no-such-a"));

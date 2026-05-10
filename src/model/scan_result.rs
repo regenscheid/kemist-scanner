@@ -12,9 +12,10 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+use crate::model::cert::CertificateInfo;
 pub use crate::model::errors::ScannerError;
 
-pub const SCHEMA_VERSION: &str = "2.0.0";
+pub const SCHEMA_VERSION: &str = "2.1.0";
 
 /// Top-level scan record. Every emitted JSON document is a `ScanResult`.
 #[derive(Serialize, Debug, Clone)]
@@ -151,6 +152,41 @@ impl ObservationBool {
     }
 }
 
+/// Generic `{value, method, reason?}` envelope for integer observations.
+#[derive(Serialize, Debug, Clone)]
+pub struct ObservationU16 {
+    pub value: Option<u16>,
+    pub method: Method,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+impl ObservationU16 {
+    pub fn probe(value: u16) -> Self {
+        Self {
+            value: Some(value),
+            method: Method::Probe,
+            reason: None,
+        }
+    }
+
+    pub fn not_probed(reason: &str) -> Self {
+        Self {
+            value: None,
+            method: Method::NotProbed,
+            reason: Some(reason.into()),
+        }
+    }
+
+    pub fn error(reason: &str) -> Self {
+        Self {
+            value: None,
+            method: Method::Error,
+            reason: Some(reason.into()),
+        }
+    }
+}
+
 #[derive(Serialize, Debug, Clone)]
 pub struct Tls {
     pub versions_offered: TlsVersionsOffered,
@@ -168,7 +204,8 @@ pub struct Tls {
     /// Non-extension handshake observations: vulnerability probes
     /// (Heartbleed payload echo, ephemeral-key reuse / Raccoon, ROBOT)
     /// plus ClientHello-body / ServerHello-variant signals
-    /// (`compression_offered`, `hello_retry_request`, `grease_echoed`).
+    /// (`compression_selected`, `crime_vulnerable`,
+    /// `hello_retry_request`, `grease_echoed`).
     /// These were grouped under `extensions` in schema v1.0 because
     /// they're observed in the same handshake window, but none of
     /// them are TLS extensions in the RFC 5246 §7.4.1.4 / RFC 8446
@@ -272,12 +309,23 @@ pub struct ConstrainedProbeResult {
     /// fingerprints; it does not compute the comparison.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub leaf_fingerprint_sha256: Option<String>,
+    /// SHA-256 over concatenated DER chain bytes. Populated only
+    /// when the constrained probe completed and raw chain DER was
+    /// available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chain_fingerprint_sha256: Option<String>,
     /// Subject DN of the leaf (same formatting as
     /// `certificates.leaf.subject_dn`). Convenience for downstream
     /// log correlation; the authoritative identifier is
     /// `leaf_fingerprint_sha256`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub leaf_subject_dn: Option<String>,
+    /// Parsed certificate chain observed on this constrained probe.
+    /// Internal-only: the JSON emitter deduplicates these into
+    /// `certificates.alternates[]` rather than repeating full chains
+    /// under every sigalg probe row.
+    #[serde(skip_serializing)]
+    pub cert_chain: Vec<CertificateInfo>,
 }
 
 impl Default for ConstrainedProbeResult {
@@ -289,7 +337,9 @@ impl Default for ConstrainedProbeResult {
             method: Method::NotProbed,
             reason: None,
             leaf_fingerprint_sha256: None,
+            chain_fingerprint_sha256: None,
             leaf_subject_dn: None,
+            cert_chain: Vec::new(),
         }
     }
 }
@@ -327,8 +377,7 @@ pub struct Tls12Resumption {
     /// during the TLS 1.2 handshake?
     pub session_ticket_issued: ObservationBool,
     /// RFC 5077 ticket lifetime hint in seconds, if the server sent a
-    /// ticket. Taken from `SSL_SESSION_get_timeout` (OpenSSL's closest
-    /// proxy for the server-advertised lifetime).
+    /// TLS 1.2 NewSessionTicket message.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ticket_lifetime_hint_secs: Option<u32>,
     /// Did the server issue a (non-empty) session ID? On ticket-using
@@ -370,8 +419,8 @@ pub struct Tls13Resumption {
     /// operators often configure 1 or 2.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub new_session_ticket_count: Option<u32>,
-    /// Per-ticket lifetime from `SSL_SESSION_get_timeout`. Empty
-    /// when no tickets were observed.
+    /// Per-ticket TLS 1.3 lifetime hints when exposed by the backend.
+    /// Empty when no lifetimes were observed.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub ticket_lifetime_secs: Vec<u32>,
     /// Did a second handshake, using the saved session from the first,
@@ -592,18 +641,22 @@ pub struct TlsExtensions {
     /// extension.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_fragment_length: Option<String>,
+    /// Generic inventory of server-side TLS extensions observed in
+    /// ServerHello / EncryptedExtensions / CertificateEntry /
+    /// CertificateRequest messages. Specific extension facts remain
+    /// surfaced in the named fields above; this array preserves raw
+    /// extension coverage for newer or less-common codepoints.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub observed_server_extensions: Vec<ObservedServerExtension>,
     /// RFC 8449 — TLS 1.3 `record_size_limit` value observed in
-    /// EncryptedExtensions. Populated by the OpenSSL-backed
-    /// EncryptedExtensions probe (feature `legacy-probes`); absent
-    /// under other build configs or when the server did not send
-    /// the extension.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub record_size_limit: Option<u16>,
-    /// RFC 8879 — algorithms listed in the server's
-    /// `compress_certificate` extension. Canonical names: `"zlib"`,
-    /// `"brotli"`, `"zstd"`; `"0xNNNN"` for unknown codepoints.
-    /// Populated by the OpenSSL-backed EncryptedExtensions probe;
-    /// empty otherwise.
+    /// EncryptedExtensions, or a local `not_probed` reason when the
+    /// current build cannot emit the required client offer.
+    pub record_size_limit: ObservationU16,
+    /// RFC 8879 — certificate-compression algorithms observed when
+    /// the server sends a TLS 1.3 CompressedCertificate after kemist
+    /// offers support. Canonical names: `"zlib"`, `"brotli"`,
+    /// `"zstd"`; `"0xNNNN"` for unknown codepoints. This is
+    /// distinct from record-layer compression in `behavioral_probes`.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub compress_certificate_algorithms: Vec<String>,
     /// RFC 9345 delegated credentials observation. Offered in the
@@ -616,10 +669,65 @@ pub struct TlsExtensions {
     pub delegated_credentials: DelegatedCredentialsObservation,
 }
 
+#[derive(Serialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ObservedServerExtension {
+    pub protocol_phase: String,
+    /// IANA extension codepoint rendered as `0xNNNN`.
+    pub extension_id: String,
+    /// Canonical short name for known codepoints; `unknown_0xNNNN`
+    /// for unrecognized values.
+    pub extension_name: String,
+}
+
+impl ObservedServerExtension {
+    pub fn new(protocol_phase: impl Into<String>, codepoint: u16) -> Self {
+        let extension_name = tls_extension_name(codepoint)
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("unknown_0x{codepoint:04X}"));
+        Self {
+            protocol_phase: protocol_phase.into(),
+            extension_id: format!("0x{codepoint:04X}"),
+            extension_name,
+        }
+    }
+}
+
+pub fn tls_extension_name(codepoint: u16) -> Option<&'static str> {
+    Some(match codepoint {
+        0x0000 => "server_name",
+        0x0001 => "max_fragment_length",
+        0x0004 => "truncated_hmac",
+        0x0005 => "status_request",
+        0x000A => "supported_groups",
+        0x000B => "ec_point_formats",
+        0x000D => "signature_algorithms",
+        0x000F => "heartbeat",
+        0x0010 => "application_layer_protocol_negotiation",
+        0x0012 => "signed_certificate_timestamp",
+        0x0015 => "padding",
+        0x0016 => "encrypt_then_mac",
+        0x0017 => "extended_master_secret",
+        0x0018 => "token_binding",
+        0x001B => "compress_certificate",
+        0x001C => "record_size_limit",
+        0x0022 => "delegated_credential",
+        0x002B => "supported_versions",
+        0x002D => "psk_key_exchange_modes",
+        0x0031 => "post_handshake_auth",
+        0x0033 => "key_share",
+        0x4469 => "application_settings",
+        0xFE0D => "encrypted_client_hello",
+        0x3374 => "next_protocol_negotiation",
+        0xFF01 => "renegotiation_info",
+        _ => return None,
+    })
+}
+
 /// Handshake-time observations that aren't TLS extensions: active
 /// vulnerability probes (Heartbleed payload echo, ephemeral-key reuse,
 /// ROBOT) plus ClientHello-body / ServerHello-variant signals
-/// (`compression_offered`, `hello_retry_request`, `grease_echoed`).
+/// (`compression_selected`, `crime_vulnerable`,
+/// `hello_retry_request`, `grease_echoed`).
 /// Schema v2.0 split these out of `tls.extensions` to make the
 /// distinction explicit; v1.0 grouped them all under `extensions`.
 #[derive(Serialize, Debug, Clone)]
@@ -630,12 +738,20 @@ pub struct BehavioralProbes {
     /// `heartbeat_present` extension is recorded separately under
     /// `extensions`; this field is the *behavioral* signal.
     pub heartbeat_echoes_oversized_payload: ObservationBool,
-    /// Compression methods echoed back by the server in the
-    /// ServerHello `compression_methods` field (RFC 5246 §7.4.1.3).
-    /// Note: the field is in the ClientHello/ServerHello body proper,
-    /// not an extension. Non-empty list means CRIME-vulnerable
-    /// configuration (RFC 7457 §2.1).
-    pub compression_offered: Vec<String>,
+    /// Record-layer compression method selected by the server in the
+    /// ServerHello `compression_method` field (RFC 5246 §7.4.1.3).
+    /// Note: this is not RFC 8879 certificate compression. `"null"`
+    /// is the safe modern value; `"deflate"` is the CRIME-relevant
+    /// value (RFC 7457 §2.1).
+    pub compression_selected: Option<String>,
+    /// Explicit CRIME-style record-compression verdict derived from
+    /// `compression_selected`. `true` means the server selected a
+    /// non-null TLS record-compression method from our offer.
+    pub crime_vulnerable: ObservationBool,
+    /// Per-protocol-version record-compression probes for SSLv3
+    /// through TLS 1.2. This catches servers that only negotiate
+    /// compression on older protocol versions.
+    pub record_compression_by_version: Vec<RecordCompressionObservation>,
     /// RFC 8701 GREASE echo-detection. `true` = server echoed an
     /// unknown extension (protocol violation signal — the server's
     /// ClientHello parser is non-conformant). `false` = server
@@ -667,6 +783,19 @@ pub struct BehavioralProbes {
     /// records the five-entry comparison table; downstream
     /// interprets.
     pub bleichenbacher_oracle_probe: BleichenbacherOracleProbe,
+}
+
+#[derive(Serialize, Debug, Clone)]
+pub struct RecordCompressionObservation {
+    /// Protocol version targeted by this ClientHello, rendered as
+    /// `"SSLv3"`, `"TLSv1.0"`, `"TLSv1.1"`, or `"TLSv1.2"`.
+    pub version: String,
+    /// Record-layer compression method selected by the server, when
+    /// the probe reached a parseable ServerHello.
+    pub compression_selected: Option<String>,
+    /// `true` when the server selected a non-null TLS
+    /// record-compression method.
+    pub crime_vulnerable: ObservationBool,
 }
 
 /// Per-variant record for the ROBOT differential probe.
@@ -889,6 +1018,20 @@ pub struct SniBehavior {
     pub method: Method,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub probes: Vec<SniProbeEntry>,
+}
+
+#[derive(Serialize, Debug, Clone)]
+pub struct SniProbeEntry {
+    pub variant: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sni_sent: Option<String>,
+    pub outcome: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub leaf_fingerprint_sha256: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 /// Channel-binding observations per RFC 9266 (`tls-exporter`) and
@@ -953,9 +1096,9 @@ pub struct DhParametersObservation {
     pub generator: u32,
     /// Lowercase hex (64 chars).
     pub prime_sha256: String,
-    /// Optional raw prime, lowercase hex. Omitted by default (bandwidth);
-    /// populated when the CLI requests `--include-dh-raw` (flag not yet
-    /// wired).
+    /// Optional raw prime, lowercase hex. Omitted by default
+    /// (bandwidth); populated when the CLI requests
+    /// `--include-dh-raw`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prime_raw_hex: Option<String>,
     pub method: Method,
@@ -971,25 +1114,59 @@ pub struct SkeSigObservation {
     pub method: Method,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub leaf_fingerprint_sha256: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chain_fingerprint_sha256: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
 }
 
 /// Shape of `tls.renegotiation_behavior`.
 #[derive(Serialize, Debug, Clone)]
 pub struct RenegotiationBehavior {
+    /// Preferred direction-specific shape. `accepted.value == true` means the
+    /// server completed a client-triggered TLS 1.2 renegotiation handshake.
+    pub client_initiated: ClientInitiatedRenegotiation,
+    /// Preferred direction-specific shape. `observed.value == true` means the
+    /// server initiated TLS 1.2 renegotiation during the passive wait window.
+    pub server_initiated: ServerInitiatedRenegotiation,
     /// `"accepted"` / `"rejected"` / `"not_attempted"` / `"error"` — or
-    /// `None` when no probe ran.
+    /// `None` when no probe ran. Legacy compatibility field; prefer
+    /// `client_initiated.accepted`.
     pub client_initiated_verdict: Option<String>,
+    /// Legacy compatibility field for `client_initiated_verdict`; prefer the
+    /// method embedded in `client_initiated.accepted`.
     pub method: Method,
+    /// Legacy compatibility field for `client_initiated_verdict`; prefer the
+    /// reason embedded in `client_initiated.accepted`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// Legacy compatibility field; prefer `server_initiated.observed`.
+    pub server_initiated_observed: ObservationBool,
+    /// Legacy compatibility field; prefer the reason embedded in
+    /// `server_initiated.observed`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server_initiated_probe_reason: Option<String>,
+}
+
+#[derive(Serialize, Debug, Clone)]
+pub struct ClientInitiatedRenegotiation {
+    pub accepted: ObservationBool,
+}
+
+#[derive(Serialize, Debug, Clone)]
+pub struct ServerInitiatedRenegotiation {
+    pub observed: ObservationBool,
 }
 
 /// One distinguished-name entry in `tls.client_auth_request.ca_distinguished_names`.
 #[derive(Serialize, Debug, Clone)]
 pub struct ClientAuthCaDn {
-    /// Hex-encoded DER (schema field is nominally base64 — see
-    /// `client_auth.rs::base64_encode` for the shim, swappable to real
-    /// base64 without a schema rename).
+    /// Hex-encoded DER. Preferred field.
+    pub raw_der_hex: String,
+    /// Legacy misnamed field. Contains the same hex bytes as `raw_der_hex`
+    /// and is planned for removal in schema v3.
     pub raw_der_b64: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub common_name: Option<String>,
@@ -1001,6 +1178,10 @@ pub struct ClientAuthCaDn {
 #[derive(Serialize, Debug, Clone)]
 pub struct ClientAuthOidFilter {
     pub oid: String,
+    /// Hex-encoded DER values. Preferred field.
+    pub values_hex: Vec<String>,
+    /// Legacy misnamed field. Contains the same hex bytes as `values_hex`
+    /// and is planned for removal in schema v3.
     pub values_b64: Vec<String>,
 }
 
@@ -1021,6 +1202,53 @@ pub struct ClientAuthRequestEntry {
 
 #[derive(Serialize, Debug, Clone)]
 pub struct Certificates {
+    /// Preferred chain observation shape for schema 2.1+ consumers.
+    /// Includes the primary characterization chain and any alternate
+    /// chains observed by constrained handshakes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub observed_chains: Vec<CertificateChainObservation>,
+    /// Legacy compatibility field; prefer
+    /// `observed_chains[].chain[0]` on the primary chain. Planned for
+    /// removal in schema v3.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub leaf: Option<CertificateFacts>,
+    /// Legacy compatibility field; prefer the primary
+    /// `observed_chains[]` entry. Planned for removal in schema v3.
+    pub chain: Vec<CertificateFacts>,
+    /// Legacy compatibility field; prefer `chain.len()` on the primary
+    /// chain. Planned for removal in schema v3.
+    pub chain_length: usize,
+    /// Legacy compatibility field; prefer `observed_chains[]` entries
+    /// where `role == "alternate"`. Planned for removal in schema v3.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub alternates: Vec<CertificateAlternate>,
+}
+
+#[derive(Serialize, Debug, Clone)]
+pub struct CertificateChainObservation {
+    /// Stable local identifier: `primary` or `alternate-<leaf_fp_prefix>`.
+    pub chain_id: String,
+    /// `primary` for the characterization chain, `alternate` for chains
+    /// observed only under constrained probe paths.
+    pub role: String,
+    /// Probe paths that observed this chain.
+    pub observed_via: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub leaf_fingerprint_sha256: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chain_fingerprint_sha256: Option<String>,
+    pub chain: Vec<CertificateFacts>,
+}
+
+#[derive(Serialize, Debug, Clone)]
+pub struct CertificateAlternate {
+    /// Probe paths that observed this alternate leaf/chain. Stable
+    /// strings such as `signature_algorithm_policy.rsa_pss_only`.
+    pub observed_via: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub leaf_fingerprint_sha256: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chain_fingerprint_sha256: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub leaf: Option<CertificateFacts>,
     pub chain: Vec<CertificateFacts>,
@@ -1340,4 +1568,30 @@ pub struct RedirectHopOutput {
     pub status: u16,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub location: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tls_extension_name_covers_newer_and_less_common_codepoints() {
+        assert_eq!(tls_extension_name(0xFE0D), Some("encrypted_client_hello"));
+        assert_eq!(tls_extension_name(0x4469), Some("application_settings"));
+        assert_eq!(tls_extension_name(0x0015), Some("padding"));
+        assert_eq!(tls_extension_name(0x0018), Some("token_binding"));
+        assert_eq!(tls_extension_name(0x002D), Some("psk_key_exchange_modes"));
+        assert_eq!(tls_extension_name(0x0031), Some("post_handshake_auth"));
+    }
+
+    #[test]
+    fn observed_server_extension_formats_known_and_unknown_ids() {
+        let known = ObservedServerExtension::new("tls1_2_server_hello", 0x0017);
+        assert_eq!(known.extension_id, "0x0017");
+        assert_eq!(known.extension_name, "extended_master_secret");
+
+        let unknown = ObservedServerExtension::new("tls1_3_encrypted_extensions", 0x1234);
+        assert_eq!(unknown.extension_id, "0x1234");
+        assert_eq!(unknown.extension_name, "unknown_0x1234");
+    }
 }

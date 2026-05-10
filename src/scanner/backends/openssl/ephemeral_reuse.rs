@@ -365,6 +365,10 @@ mod tests {
             outcome,
             dh_snapshot: None,
             ske_sig: None,
+            cert_chain: Vec::new(),
+            leaf_fingerprint_sha256: None,
+            chain_fingerprint_sha256: None,
+            group: None,
         }
     }
 

@@ -28,20 +28,24 @@
 //! ## Implementation notes
 //!
 //! Ticket-bytes access: openssl-sys 0.9.109 doesn't expose
-//! `SSL_SESSION_get0_ticket`. We use [`SslSessionRef::id`] +
-//! `SSL_SESSION_get_timeout` via the openssl 0.10 bindings. For
-//! rotation detection we diff the first 32 bytes of the session ID
-//! across two handshakes — when tickets are issued most servers
-//! include ticket-dependent bytes in the session ID, so a bytewise
-//! diff is a reasonable rotation proxy. This is best-effort; the
-//! rule-engine consumer should treat
+//! `SSL_SESSION_get0_ticket`. We parse the RFC 5077 lifetime hint
+//! from the TLS 1.2 `NewSessionTicket` handshake message observed by
+//! OpenSSL's message callback. For rotation detection we diff the
+//! first 32 bytes of the session ID across two handshakes — when
+//! tickets are issued most servers include ticket-dependent bytes in
+//! the session ID, so a bytewise diff is a reasonable rotation proxy.
+//! This is best-effort; the rule-engine consumer should treat
 //! `ticket_rotated_across_connections == false` as "likely stable"
 //! rather than "definitely the same ticket." Functional resumption
 //! tests above are the authoritative signals.
 
+use std::cell::RefCell;
 use std::net::SocketAddr;
+use std::os::raw::{c_int, c_long, c_void};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use foreign_types::ForeignTypeRef;
 use openssl::ssl::{
     HandshakeError, Ssl, SslContext, SslMethod, SslOptions, SslSession, SslSessionCacheMode,
     SslVerifyMode, SslVersion,
@@ -49,6 +53,34 @@ use openssl::ssl::{
 use tracing::{debug, info};
 
 use crate::model::scan_result::{ObservationBool, SessionResumption, Tls12Resumption};
+
+const SSL_CTRL_SET_MSG_CALLBACK: c_int = 15;
+const CONTENT_TYPE_HANDSHAKE: c_int = 22;
+const HANDSHAKE_TYPE_NEW_SESSION_TICKET: u8 = 4;
+
+extern "C" {
+    #[link_name = "SSL_CTX_callback_ctrl"]
+    fn SSL_CTX_callback_ctrl(
+        ctx: *mut openssl_sys::SSL_CTX,
+        cmd: c_int,
+        fp: Option<unsafe extern "C" fn()>,
+    ) -> c_long;
+}
+
+type MsgCbFn = unsafe extern "C" fn(
+    write_p: c_int,
+    version: c_int,
+    content_type: c_int,
+    buf: *const c_void,
+    len: usize,
+    ssl: *mut openssl_sys::SSL,
+    arg: *mut c_void,
+);
+
+thread_local! {
+    static TLS12_NEW_SESSION_TICKET_SEEN: RefCell<bool> = const { RefCell::new(false) };
+    static TLS12_NEW_SESSION_TICKET_LIFETIME_HINT_SECS: RefCell<Option<u32>> = const { RefCell::new(None) };
+}
 
 /// Run the probe. Always returns a populated [`SessionResumption`];
 /// slots that aren't observable fall back to `NotProbed` with a
@@ -189,7 +221,9 @@ fn probe_resumption_pair(
     connect_timeout: Duration,
     handshake_timeout: Duration,
 ) -> ObservationBool {
-    let ctx = match build_tls12_context(allow_tickets) {
+    let captured_session = Arc::new(Mutex::new(None));
+    let ctx = match build_tls12_context_with_capture(allow_tickets, Some(captured_session.clone()))
+    {
         Ok(c) => c,
         Err(e) => return ObservationBool::error(&format!("ctx_build:{e}")),
     };
@@ -207,9 +241,25 @@ fn probe_resumption_pair(
             return ObservationBool::not_probed(&format!("first_handshake:{reason}"));
         }
     };
-    let Some(prev_session) = first.session else {
+    if allow_tickets && !first.has_ticket_hint {
+        return ObservationBool::not_applicable("no_session_ticket_issued_in_first_handshake");
+    }
+    if !allow_tickets && !first.session_id_nonempty {
+        return ObservationBool::not_applicable("no_session_id_issued_in_first_handshake");
+    }
+    let prev_session = captured_session
+        .lock()
+        .ok()
+        .and_then(|mut slot| slot.take())
+        .or(first.session);
+    let Some(prev_session) = prev_session else {
         return ObservationBool::not_applicable("no_session_issued_in_first_handshake");
     };
+    let prev_session = prev_session
+        .to_der()
+        .ok()
+        .and_then(|der| SslSession::from_der(&der).ok())
+        .unwrap_or(prev_session);
 
     match single_tls12_handshake(
         &ctx,
@@ -234,12 +284,8 @@ struct HandshakeSnapshot {
     /// servers that don't echo an ID.
     session_id: Vec<u8>,
     session_id_nonempty: bool,
-    /// Heuristic: we count the server as having issued a ticket when
-    /// `SSL_SESSION_get_timeout` reports a nonzero value. OpenSSL
-    /// populates this from the RFC 5077 lifetime hint for ticket-
-    /// issuing TLS 1.2 servers; non-ticket servers usually have a
-    /// cache-default timeout instead. Not fully precise but good
-    /// enough to distinguish "ticket path" from "no ticket."
+    /// True when OpenSSL's message callback observed a TLS 1.2
+    /// NewSessionTicket handshake message from the server.
     has_ticket_hint: bool,
     lifetime_hint_secs: Option<u32>,
     /// `SSL_session_reused` reading post-handshake — true only when
@@ -263,6 +309,8 @@ fn single_tls12_handshake(
 
     let mut ssl = Ssl::new(ctx).map_err(|e| format!("ssl_new:{e}"))?;
     let _ = ssl.set_hostname(hostname);
+    TLS12_NEW_SESSION_TICKET_SEEN.with(|seen| *seen.borrow_mut() = false);
+    TLS12_NEW_SESSION_TICKET_LIFETIME_HINT_SECS.with(|hint| *hint.borrow_mut() = None);
 
     if let Some(prev) = prev_session {
         // SAFETY: `prev` is a borrowed `SslSessionRef` whose owning
@@ -274,7 +322,7 @@ fn single_tls12_handshake(
         }
     }
 
-    let stream = match ssl.connect(tcp) {
+    let mut stream = match ssl.connect(tcp) {
         Ok(s) => s,
         Err(HandshakeError::Failure(mid)) => {
             return Err(format!("tls_alert:{}", mid.error()));
@@ -291,24 +339,29 @@ fn single_tls12_handshake(
     let session_ref = stream.ssl().session();
     let session: Option<SslSession> = session_ref.map(|s| s.to_owned());
     let session_id: Vec<u8> = session_ref.map(|s| s.id().to_vec()).unwrap_or_default();
-    let timeout_secs: i64 = session_ref.map(|s| s.timeout()).unwrap_or(0) as i64;
-    let (has_ticket_hint, lifetime_hint_secs) = if timeout_secs > 0 {
-        (true, Some(timeout_secs as u32))
-    } else {
-        (false, None)
-    };
+    let new_session_ticket_seen = TLS12_NEW_SESSION_TICKET_SEEN.with(|seen| *seen.borrow());
+    let lifetime_hint_secs =
+        TLS12_NEW_SESSION_TICKET_LIFETIME_HINT_SECS.with(|hint| *hint.borrow());
+    let _ = stream.shutdown();
 
     Ok(HandshakeSnapshot {
         session,
         session_id_nonempty: !session_id.is_empty(),
         session_id,
-        has_ticket_hint,
+        has_ticket_hint: new_session_ticket_seen,
         lifetime_hint_secs,
         resumed,
     })
 }
 
 fn build_tls12_context(allow_tickets: bool) -> Result<SslContext, openssl::error::ErrorStack> {
+    build_tls12_context_with_capture(allow_tickets, None)
+}
+
+fn build_tls12_context_with_capture(
+    allow_tickets: bool,
+    captured_session: Option<Arc<Mutex<Option<SslSession>>>>,
+) -> Result<SslContext, openssl::error::ErrorStack> {
     let mut builder = SslContext::builder(SslMethod::tls_client())?;
     builder.set_min_proto_version(Some(SslVersion::TLS1_2))?;
     builder.set_max_proto_version(Some(SslVersion::TLS1_2))?;
@@ -317,7 +370,16 @@ fn build_tls12_context(allow_tickets: bool) -> Result<SslContext, openssl::error
     // CLIENT cache mode is required for OpenSSL to populate the
     // SslSession fully on `ssl.session()` — applies to all our
     // handshakes whether we resume explicitly or not.
-    builder.set_session_cache_mode(SslSessionCacheMode::CLIENT);
+    if let Some(captured_session) = captured_session {
+        builder.set_session_cache_mode(SslSessionCacheMode::CLIENT);
+        builder.set_new_session_callback(move |_, session| {
+            if let Ok(mut slot) = captured_session.lock() {
+                *slot = Some(session);
+            }
+        });
+    } else {
+        builder.set_session_cache_mode(SslSessionCacheMode::CLIENT);
+    }
     if !allow_tickets {
         // SSL_OP_NO_TICKET: client doesn't include the SessionTicket
         // extension and won't process server-issued tickets. Forces
@@ -326,7 +388,56 @@ fn build_tls12_context(allow_tickets: bool) -> Result<SslContext, openssl::error
         // (caching)" probe.
         builder.set_options(SslOptions::NO_TICKET);
     }
-    Ok(builder.build())
+    let ctx = builder.build();
+    // SAFETY: `msg_callback` has the signature required by
+    // SSL_CTRL_SET_MSG_CALLBACK; OpenSSL invokes it synchronously
+    // during handshakes performed with this context.
+    unsafe {
+        SSL_CTX_callback_ctrl(
+            ctx.as_ptr(),
+            SSL_CTRL_SET_MSG_CALLBACK,
+            Some(std::mem::transmute::<MsgCbFn, unsafe extern "C" fn()>(
+                msg_callback,
+            )),
+        );
+    }
+    Ok(ctx)
+}
+
+unsafe extern "C" fn msg_callback(
+    write_p: c_int,
+    _version: c_int,
+    content_type: c_int,
+    buf: *const c_void,
+    len: usize,
+    _ssl: *mut openssl_sys::SSL,
+    _arg: *mut c_void,
+) {
+    if write_p != 0 || content_type != CONTENT_TYPE_HANDSHAKE || buf.is_null() || len == 0 {
+        return;
+    }
+    // SAFETY: OpenSSL passes a valid buffer for the lifetime of the
+    // callback invocation.
+    let slice = unsafe { std::slice::from_raw_parts(buf as *const u8, len) };
+    if slice.first() == Some(&HANDSHAKE_TYPE_NEW_SESSION_TICKET) {
+        TLS12_NEW_SESSION_TICKET_SEEN.with(|seen| *seen.borrow_mut() = true);
+        if let Some(lifetime_hint_secs) = parse_tls12_new_session_ticket_lifetime(slice) {
+            TLS12_NEW_SESSION_TICKET_LIFETIME_HINT_SECS
+                .with(|hint| *hint.borrow_mut() = Some(lifetime_hint_secs));
+        }
+    }
+}
+
+fn parse_tls12_new_session_ticket_lifetime(handshake: &[u8]) -> Option<u32> {
+    if handshake.len() < 8 || handshake.first() != Some(&HANDSHAKE_TYPE_NEW_SESSION_TICKET) {
+        return None;
+    }
+    Some(u32::from_be_bytes([
+        handshake[4],
+        handshake[5],
+        handshake[6],
+        handshake[7],
+    ]))
 }
 
 fn ctx_build_failure(reason: &str) -> Tls12Resumption {
@@ -354,6 +465,40 @@ fn handshake_failure(reason: &str) -> Tls12Resumption {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::SocketAddr;
+
+    const FIXTURE_ADDR_ENV: &str = "KEMIST_LEGACY_FIXTURE_ADDR";
+    const FIXTURE_HOSTNAME_ENV: &str = "KEMIST_LEGACY_FIXTURE_HOSTNAME";
+    const ID_FIXTURE_ADDR_ENV: &str = "KEMIST_LEGACY_ID_FIXTURE_ADDR";
+    const ID_FIXTURE_HOSTNAME_ENV: &str = "KEMIST_LEGACY_ID_FIXTURE_HOSTNAME";
+
+    fn fixture() -> (SocketAddr, String) {
+        let addr_s = std::env::var(FIXTURE_ADDR_ENV).unwrap_or_else(|_| {
+            panic!(
+                "missing env {FIXTURE_ADDR_ENV}; boot a resumable TLS fixture first, e.g. openssl s_server"
+            )
+        });
+        let addr: SocketAddr = addr_s.parse().unwrap_or_else(|e| {
+            panic!("{FIXTURE_ADDR_ENV}={addr_s} is not a valid socket addr: {e}")
+        });
+        let hostname = std::env::var(FIXTURE_HOSTNAME_ENV).unwrap_or_else(|_| "localhost".into());
+        (addr, hostname)
+    }
+
+    fn id_fixture() -> (SocketAddr, String) {
+        let addr_s = std::env::var(ID_FIXTURE_ADDR_ENV).unwrap_or_else(|_| {
+            std::env::var(FIXTURE_ADDR_ENV).unwrap_or_else(|_| {
+                panic!("missing env {ID_FIXTURE_ADDR_ENV}; boot a TLS 1.2 -no_ticket fixture first")
+            })
+        });
+        let addr: SocketAddr = addr_s.parse().unwrap_or_else(|e| {
+            panic!("{ID_FIXTURE_ADDR_ENV}={addr_s} is not a valid socket addr: {e}")
+        });
+        let hostname = std::env::var(ID_FIXTURE_HOSTNAME_ENV)
+            .or_else(|_| std::env::var(FIXTURE_HOSTNAME_ENV))
+            .unwrap_or_else(|_| "localhost".into());
+        (addr, hostname)
+    }
 
     #[test]
     fn probe_tls12_blocking_surfaces_ctx_build_errors_cleanly() {
@@ -390,5 +535,82 @@ mod tests {
         // `set_options(NO_TICKET)` confirms wiring.
         assert!(build_tls12_context(true).is_ok());
         assert!(build_tls12_context(false).is_ok());
+    }
+
+    #[test]
+    fn parses_tls12_new_session_ticket_lifetime_hint() {
+        let handshake = [
+            HANDSHAKE_TYPE_NEW_SESSION_TICKET,
+            0x00,
+            0x00,
+            0x06,
+            0x00,
+            0x00,
+            0xfd,
+            0x20,
+            0x00,
+            0x00,
+        ];
+
+        assert_eq!(
+            parse_tls12_new_session_ticket_lifetime(&handshake),
+            Some(64800)
+        );
+        assert_eq!(
+            parse_tls12_new_session_ticket_lifetime(&handshake[..7]),
+            None
+        );
+        assert_eq!(parse_tls12_new_session_ticket_lifetime(&[]), None);
+    }
+
+    #[test]
+    #[ignore]
+    fn tls12_ticket_resumption_fixture_reports_accepted() {
+        let (addr, hostname) = fixture();
+        let out = probe_tls12_blocking(
+            addr,
+            &hostname,
+            Duration::from_secs(8),
+            Duration::from_secs(8),
+        );
+
+        assert_eq!(
+            out.session_ticket_issued.value,
+            Some(true),
+            "fixture must issue TLS 1.2 tickets for this regression test: {out:?}"
+        );
+        assert_eq!(
+            out.session_ticket_resumption_accepted.value,
+            Some(true),
+            "fixture accepts TLS 1.2 ticket resumption with openssl s_client; kemist should report accepted: {out:?}"
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn tls12_session_id_resumption_fixture_reports_accepted() {
+        let (addr, hostname) = id_fixture();
+        let out = probe_tls12_blocking(
+            addr,
+            &hostname,
+            Duration::from_secs(8),
+            Duration::from_secs(8),
+        );
+
+        assert_eq!(
+            out.session_ticket_issued.value,
+            Some(false),
+            "fixture should have tickets disabled so this test isolates session-ID resumption: {out:?}"
+        );
+        assert_eq!(
+            out.session_id_issued.value,
+            Some(true),
+            "fixture must issue a TLS 1.2 session ID for this regression test: {out:?}"
+        );
+        assert_eq!(
+            out.session_id_resumption_accepted.value,
+            Some(true),
+            "fixture accepts TLS 1.2 session-ID resumption with openssl s_client; kemist should report accepted: {out:?}"
+        );
     }
 }

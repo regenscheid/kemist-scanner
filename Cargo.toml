@@ -1,6 +1,6 @@
 [package]
 name = "kemist"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
 authors = ["kemist contributors"]
 description = "TLS + PQC observation scanner: records what servers support, emits structured JSON"
@@ -20,7 +20,7 @@ legacy-probes = ["dep:openssl", "dep:openssl-sys", "dep:openssl-src", "dep:forei
 
 [dependencies]
 # TLS implementation
-rustls = { version = "0.23", features = ["aws_lc_rs", "tls12", "std", "prefer-post-quantum"] }
+rustls = { version = "0.23", features = ["aws_lc_rs", "tls12", "std", "prefer-post-quantum", "brotli"] }
 rustls-native-certs = "0.8"
 webpki-roots = "0.26"
 rustls-pki-types = "1"
@@ -74,8 +74,9 @@ thiserror = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
 
-# Network utilities - migrated from trust-dns-resolver to hickory-resolver
-hickory-resolver = "0.24"
+# Network utilities - migrated from trust-dns-resolver to hickory-resolver.
+# Keep at 0.26+ for RUSTSEC-2026-0119 in hickory-proto.
+hickory-resolver = "0.26"
 ipnet = "2"
 
 # Date/time handling
@@ -162,4 +163,3 @@ lto = true
 codegen-units = 1
 strip = true
 opt-level = "z"
-

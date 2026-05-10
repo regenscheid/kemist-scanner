@@ -27,7 +27,9 @@
 //! | 23    | extended_master_secret         | `ems.value` |
 //! | 0xff01| renegotiation_info             | `secure_renegotiation.value` |
 //!
-//! Plus the compression_method byte inside ServerHello → `compression_offered`.
+//! Plus the record-layer compression_method byte inside ServerHello
+//! → `compression_selected` / `crime_vulnerable` (not RFC 8879
+//! certificate compression).
 //!
 //! ## Failure modes
 //!
@@ -48,6 +50,7 @@ use tokio::time::timeout;
 use tracing::debug;
 
 use crate::model::errors::ScannerError;
+use crate::model::protocol::TlsVersion;
 
 /// Extensions we look for in ServerHello. Not all servers echo every one.
 const EXT_MAX_FRAGMENT_LENGTH: u16 = 1; // RFC 6066 §4.
@@ -123,6 +126,11 @@ pub struct HelloExtensionsObserved {
     /// through `Some("2^12")` (RFC values 1-4); `Some("0xNN")` for
     /// unknown bytes. `None` when the server did not echo the extension.
     pub max_fragment_length: Option<String>,
+    /// Raw ServerHello extension codepoints observed by this byte-level
+    /// probe. Specific fields above keep their dedicated typed values;
+    /// this preserves generic coverage for all extensions the server
+    /// echoed.
+    pub observed_server_extensions: Vec<u16>,
     /// RFC 8446 §4.1.3 downgrade-protection sentinel observed in the last
     /// 8 bytes of ServerRandom. One of `"tls12"` (server is TLS
     /// 1.3-capable but negotiated TLS 1.2), `"lte_tls11"` (server
@@ -143,6 +151,18 @@ pub struct HelloExtensionsObserved {
     /// echoes it back (`true`). `None` when no ServerHello parsed.
     pub grease_echoed: Option<bool>,
     /// Human-readable failure reason when `server_hello_parsed` is false.
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RecordCompressionProbeResult {
+    /// ClientHello maximum protocol version used by this probe.
+    pub version: TlsVersion,
+    /// Whether we got a parseable ServerHello back.
+    pub server_hello_parsed: bool,
+    /// Record-layer compression method selected by the server.
+    pub compression_selected: Option<String>,
+    /// Human-readable failure reason when parsing failed.
     pub error: Option<String>,
 }
 
@@ -184,10 +204,45 @@ pub async fn probe_hello_extensions(
     connect_timeout: Duration,
     handshake_timeout: Duration,
 ) -> HelloExtensionsObserved {
-    let mut out = HelloExtensionsObserved::default();
-
     let client_hello = build_tls12_client_hello(sni);
+    observe_server_hello_with_client_hello(target, client_hello, connect_timeout, handshake_timeout)
+        .await
+}
 
+pub async fn probe_record_compression_versions(
+    target: SocketAddr,
+    sni: &str,
+    versions: &[TlsVersion],
+    connect_timeout: Duration,
+    handshake_timeout: Duration,
+) -> Vec<RecordCompressionProbeResult> {
+    let mut observations = Vec::new();
+    for &version in versions {
+        let client_hello = build_record_compression_client_hello(sni, version);
+        let observed = observe_server_hello_with_client_hello(
+            target,
+            client_hello,
+            connect_timeout,
+            handshake_timeout,
+        )
+        .await;
+        observations.push(RecordCompressionProbeResult {
+            version,
+            server_hello_parsed: observed.server_hello_parsed,
+            compression_selected: observed.compression_selected,
+            error: observed.error,
+        });
+    }
+    observations
+}
+
+async fn observe_server_hello_with_client_hello(
+    target: SocketAddr,
+    client_hello: Vec<u8>,
+    connect_timeout: Duration,
+    handshake_timeout: Duration,
+) -> HelloExtensionsObserved {
+    let mut out = HelloExtensionsObserved::default();
     let mut stream = match timeout(connect_timeout, TcpStream::connect(&target)).await {
         Err(_) => {
             out.error = Some("tcp_connect_timeout".to_string());
@@ -389,6 +444,7 @@ fn parse_server_hello(bytes: &[u8], out: &mut HelloExtensionsObserved) {
     };
 
     let seen = walk_extensions(ext_bytes);
+    out.observed_server_extensions = sorted_extension_ids(&seen);
 
     out.ems = Some(seen.contains_key(&EXT_EXTENDED_MASTER_SECRET));
     out.encrypt_then_mac = Some(seen.contains_key(&EXT_ENCRYPT_THEN_MAC));
@@ -463,6 +519,12 @@ fn walk_extensions(bytes: &[u8]) -> HashMap<u16, &[u8]> {
     seen
 }
 
+fn sorted_extension_ids(seen: &HashMap<u16, &[u8]>) -> Vec<u16> {
+    let mut ids: Vec<u16> = seen.keys().copied().collect();
+    ids.sort_unstable();
+    ids
+}
+
 /// Parse a `supported_point_formats` extension body (RFC 4492 §5.1.2).
 ///
 /// Structure: `length(1) | point_format(1) *`. We render canonical
@@ -511,18 +573,45 @@ fn compression_name(id: u8) -> String {
     }
 }
 
+fn protocol_version_bytes(version: TlsVersion) -> [u8; 2] {
+    match version {
+        TlsVersion::Ssl3 => [0x03, 0x00],
+        TlsVersion::Tls10 => [0x03, 0x01],
+        TlsVersion::Tls11 => [0x03, 0x02],
+        TlsVersion::Tls12 => [0x03, 0x03],
+        _ => [0x03, 0x03],
+    }
+}
+
+fn build_record_compression_client_hello(sni: &str, version: TlsVersion) -> Vec<u8> {
+    let client_version = protocol_version_bytes(version);
+    let record_version = if matches!(version, TlsVersion::Ssl3) {
+        [0x03, 0x00]
+    } else {
+        [0x03, 0x01]
+    };
+    build_legacy_client_hello(sni, client_version, record_version)
+}
+
 /// Build a TLS 1.2 ClientHello that advertises all extensions we want to
 /// observe. Cipher suite list deliberately includes CBC suites (to keep
 /// Encrypt-then-MAC applicable) plus modern AEAD suites (so the server
 /// isn't forced to pick something ancient).
 fn build_tls12_client_hello(sni: &str) -> Vec<u8> {
+    build_legacy_client_hello(sni, [0x03, 0x03], [0x03, 0x01])
+}
+
+fn build_legacy_client_hello(
+    sni: &str,
+    client_version: [u8; 2],
+    record_version: [u8; 2],
+) -> Vec<u8> {
     let mut ch = Vec::with_capacity(512);
 
     // ── ClientHello body ──────────────────────────────────────────────
     let body_start = 0;
 
-    // client_version = TLS 1.2
-    ch.extend_from_slice(&[0x03, 0x03]);
+    ch.extend_from_slice(&client_version);
 
     // random = 32 bytes of a known-uninteresting pattern. Doesn't need to
     // be cryptographically random — we're not completing the handshake.
@@ -539,10 +628,15 @@ fn build_tls12_client_hello(sni: &str) -> Vec<u8> {
         0xc030, // TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384
         0xcca9, // TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256
         0xcca8, // TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256
+        0xc009, // TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA — TLS 1.0/1.1 ECDSA path
+        0xc00a, // TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA
         0xc013, // TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA — CBC enables EtM
         0xc014, // TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA
+        0xc008, // TLS_ECDHE_ECDSA_WITH_3DES_EDE_CBC_SHA — legacy fallback
+        0xc012, // TLS_ECDHE_RSA_WITH_3DES_EDE_CBC_SHA
         0x002f, // TLS_RSA_WITH_AES_128_CBC_SHA
         0x0035, // TLS_RSA_WITH_AES_256_CBC_SHA
+        0x000a, // TLS_RSA_WITH_3DES_EDE_CBC_SHA
         0x00ff, // TLS_EMPTY_RENEGOTIATION_INFO_SCSV (RFC 5746)
     ];
     let cs_bytes: Vec<u8> = cipher_suites.iter().flat_map(|c| c.to_be_bytes()).collect();
@@ -615,7 +709,7 @@ fn build_tls12_client_hello(sni: &str) -> Vec<u8> {
     // ── Record header ─────────────────────────────────────────────────
     let mut record = Vec::with_capacity(5 + hs.len());
     record.push(0x16); // handshake
-    record.extend_from_slice(&[0x03, 0x01]); // legacy version TLS 1.0
+    record.extend_from_slice(&record_version);
     record.extend_from_slice(&(hs.len() as u16).to_be_bytes());
     record.extend_from_slice(&hs);
 

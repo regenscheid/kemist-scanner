@@ -61,9 +61,11 @@ fn fixture_results() -> ScanResults {
         group_probes: None,
         sni_behavior: None,
         hello_observed: None,
+        record_compression_observed: Vec::new(),
         hrr_observed: None,
         sslv2_observation: None,
         alpn_matrix: None,
+        certificate_compression_algorithms: Vec::new(),
         #[cfg(all(feature = "http-checks", feature = "legacy-probes"))]
         ocsp_http_fetch: None,
         #[cfg(feature = "http-checks")]
@@ -87,6 +89,45 @@ fn fixture_ctx() -> JsonEmitContext {
         enabled_features: vec![],
         config_paths: vec![],
         include_ocsp_raw: false,
+        include_dh_raw: false,
+    }
+}
+
+#[cfg(feature = "legacy-probes")]
+fn fixture_cert(
+    fingerprint_sha256: &str,
+    subject: &str,
+    wire_position: u32,
+) -> kemist::model::cert::CertificateInfo {
+    kemist::model::cert::CertificateInfo {
+        subject: subject.to_string(),
+        issuer: "CN=Test Issuer, O=Test, C=US".to_string(),
+        serial_number: format!("01{:02x}", wire_position),
+        not_before: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
+        not_after: Utc.with_ymd_and_hms(2027, 1, 1, 0, 0, 0).unwrap(),
+        signature_algorithm: "sha256WithRSAEncryption".to_string(),
+        signature_algorithm_oid: "1.2.840.113549.1.1.11".to_string(),
+        signature_algorithm_structured: kemist::model::scan_result::SignatureAlgorithmStructured {
+            hash: Some("sha256".to_string()),
+            algorithm: "rsa".to_string(),
+            parameters: None,
+        },
+        pqc_signature_family: None,
+        public_key_algorithm: "RSA".to_string(),
+        public_key_size: 2048,
+        rsa_exponent: Some(65_537),
+        ecc_curve_name: None,
+        ecc_curve_oid: None,
+        ecc_key_strength: None,
+        san: vec!["example.test".to_string()],
+        is_self_signed: false,
+        is_expired: false,
+        days_until_expiry: 365,
+        fingerprint_sha256: fingerprint_sha256.to_string(),
+        fingerprint_sha1: "1".repeat(40),
+        embedded_scts: 0,
+        wire_position,
+        extensions: kemist::model::cert_extensions::CertExtensions::default(),
     }
 }
 
@@ -97,7 +138,7 @@ fn load_schema() -> serde_json::Value {
 }
 
 #[test]
-fn empty_fixture_record_matches_schema_v1() {
+fn empty_fixture_record_matches_current_schema() {
     let results = fixture_results();
     let ctx = fixture_ctx();
     let record = build_scan_result(&results, &ctx);
@@ -119,11 +160,11 @@ fn empty_fixture_record_matches_schema_v1() {
 }
 
 #[test]
-fn schema_version_is_pinned_to_2_0_0() {
+fn schema_version_is_pinned_to_2_1_0() {
     let results = fixture_results();
     let ctx = fixture_ctx();
     let record = build_scan_result(&results, &ctx);
-    assert_eq!(record.schema_version, "2.0.0");
+    assert_eq!(record.schema_version, "2.1.0");
 }
 
 #[test]
@@ -191,7 +232,109 @@ fn error_category_strings_are_canonical() {
 
 #[cfg(feature = "legacy-probes")]
 #[test]
-fn fully_populated_openssl_observations_match_schema_v1() {
+fn sigalg_policy_alternate_certificate_chains_surface_once() {
+    use kemist::model::scan_result::{
+        ConstrainedProbeResult, Method as ScanMethod, SigalgOutcome, SignatureAlgorithmPolicyProbe,
+    };
+    use kemist::scanner::openssl::OpensslObservations;
+
+    let primary_fp = "a".repeat(64);
+    let alternate_fp = "b".repeat(64);
+    let primary_chain = vec![fixture_cert(&primary_fp, "CN=ecdsa.example.test", 0)];
+    let alternate_chain = vec![fixture_cert(&alternate_fp, "CN=rsa.example.test", 0)];
+
+    let complete =
+        |sigalg: &str, chain: Vec<kemist::model::cert::CertificateInfo>| ConstrainedProbeResult {
+            outcome: SigalgOutcome::HandshakeComplete,
+            selected_sigalg: Some(sigalg.to_string()),
+            method: ScanMethod::Probe,
+            leaf_fingerprint_sha256: chain.first().map(|c| c.fingerprint_sha256.clone()),
+            leaf_subject_dn: chain.first().map(|c| c.subject.clone()),
+            cert_chain: chain,
+            ..Default::default()
+        };
+
+    let mut results = fixture_results();
+    results.certificate_chain = primary_chain.clone();
+    results.openssl_observations = Some(OpensslObservations {
+        sigalg_policy: Some(SignatureAlgorithmPolicyProbe {
+            sha256_plus_only: complete("ecdsa_secp256r1_sha256", primary_chain.clone()),
+            ecdsa_only: complete("ecdsa_secp256r1_sha256", primary_chain),
+            rsa_pss_only: complete("rsa_pss_rsae_sha256", alternate_chain.clone()),
+            rsa_pkcs1_only: complete("rsa_pkcs1_sha256", alternate_chain),
+            eddsa_only: ConstrainedProbeResult {
+                outcome: SigalgOutcome::HandshakeFailure,
+                method: ScanMethod::Probe,
+                reason: Some("tls_alert_handshake_failure".to_string()),
+                alert: Some("tls_alert_handshake_failure".to_string()),
+                ..Default::default()
+            },
+        }),
+        ..Default::default()
+    });
+
+    let record = build_scan_result(&results, &fixture_ctx());
+    assert_eq!(record.certificates.alternates.len(), 1);
+    let alternate = &record.certificates.alternates[0];
+    assert_eq!(alternate.chain_length, 1);
+    assert_eq!(
+        alternate
+            .leaf
+            .as_ref()
+            .map(|leaf| leaf.fingerprint_sha256.as_str()),
+        Some(alternate_fp.as_str())
+    );
+    assert_eq!(
+        alternate.observed_via,
+        vec![
+            "signature_algorithm_policy.rsa_pss_only".to_string(),
+            "signature_algorithm_policy.rsa_pkcs1_only".to_string(),
+        ]
+    );
+    assert_eq!(record.certificates.observed_chains.len(), 2);
+    let primary_observed = &record.certificates.observed_chains[0];
+    assert_eq!(primary_observed.chain_id, "primary");
+    assert_eq!(primary_observed.role, "primary");
+    assert_eq!(
+        primary_observed.observed_via,
+        vec!["characterization_handshake".to_string()]
+    );
+    assert_eq!(
+        primary_observed.leaf_fingerprint_sha256.as_deref(),
+        Some(primary_fp.as_str())
+    );
+    let alternate_observed = &record.certificates.observed_chains[1];
+    assert_eq!(alternate_observed.role, "alternate");
+    assert_eq!(
+        alternate_observed.leaf_fingerprint_sha256.as_deref(),
+        Some(alternate_fp.as_str())
+    );
+    assert_eq!(
+        alternate_observed.observed_via,
+        vec![
+            "signature_algorithm_policy.rsa_pss_only".to_string(),
+            "signature_algorithm_policy.rsa_pkcs1_only".to_string(),
+        ]
+    );
+
+    let record_value = serde_json::to_value(&record).expect("serialize");
+    let schema_value = load_schema();
+    let validator = jsonschema::validator_for(&schema_value).expect("schema compiles");
+    let errors: Vec<_> = validator.iter_errors(&record_value).collect();
+    if !errors.is_empty() {
+        for e in &errors {
+            eprintln!("schema error at {}: {}", e.instance_path, e);
+        }
+        panic!(
+            "ScanResult failed schema validation with {} error(s)",
+            errors.len()
+        );
+    }
+}
+
+#[cfg(feature = "legacy-probes")]
+#[test]
+fn fully_populated_openssl_observations_match_current_schema() {
     use kemist::model::protocol::TlsVersion;
     use kemist::model::scan_result::{
         ConstrainedProbeResult, Method as ScanMethod, ObservationBool, SessionResumption,
@@ -219,6 +362,7 @@ fn fully_populated_openssl_observations_match_schema_v1() {
             0x98, 0x77, 0xa4, 0xd4, 0x40, 0x51, 0x2c, 0xda, 0x8d, 0x1c, 0x1c, 0xf0, 0xcd, 0x6e,
             0x33, 0x69, 0x89, 0x66,
         ],
+        prime_bytes: vec![0x01, 0x02, 0x03, 0x04],
         classification: DhClassification::Ffdhe2048,
     };
 
@@ -234,6 +378,10 @@ fn fully_populated_openssl_observations_match_schema_v1() {
                 outcome: HandshakeOutcome::Supported,
                 dh_snapshot: None,
                 ske_sig: None,
+                cert_chain: Vec::new(),
+                leaf_fingerprint_sha256: None,
+                chain_fingerprint_sha256: None,
+                group: None,
             },
             LegacyCipherResult {
                 name: "TLS_DHE_RSA_WITH_AES_128_CBC_SHA".to_string(),
@@ -243,6 +391,10 @@ fn fully_populated_openssl_observations_match_schema_v1() {
                 outcome: HandshakeOutcome::Supported,
                 dh_snapshot: Some(dh.clone()),
                 ske_sig: Some("rsa_pkcs1_sha1".to_string()),
+                cert_chain: Vec::new(),
+                leaf_fingerprint_sha256: Some("a".repeat(64)),
+                chain_fingerprint_sha256: Some("b".repeat(64)),
+                group: Some("ffdhe2048".to_string()),
             },
             LegacyCipherResult {
                 name: "TLS_RSA_WITH_NULL_SHA".to_string(),
@@ -252,6 +404,10 @@ fn fully_populated_openssl_observations_match_schema_v1() {
                 outcome: HandshakeOutcome::NotSupported,
                 dh_snapshot: None,
                 ske_sig: None,
+                cert_chain: Vec::new(),
+                leaf_fingerprint_sha256: None,
+                chain_fingerprint_sha256: None,
+                group: None,
             },
             LegacyCipherResult {
                 name: "TLS_RSA_WITH_RC4_128_SHA".to_string(),
@@ -261,6 +417,10 @@ fn fully_populated_openssl_observations_match_schema_v1() {
                 outcome: HandshakeOutcome::Error("connection_timeout".to_string()),
                 dh_snapshot: None,
                 ske_sig: None,
+                cert_chain: Vec::new(),
+                leaf_fingerprint_sha256: None,
+                chain_fingerprint_sha256: None,
+                group: None,
             },
             // Static-DH raw probe variant: server tore the connection
             // down with a TCP RST after our minimal ClientHello.
@@ -276,6 +436,10 @@ fn fully_populated_openssl_observations_match_schema_v1() {
                 },
                 dh_snapshot: None,
                 ske_sig: None,
+                cert_chain: Vec::new(),
+                leaf_fingerprint_sha256: None,
+                chain_fingerprint_sha256: None,
+                group: None,
             },
         ],
     };
@@ -284,12 +448,11 @@ fn fully_populated_openssl_observations_match_schema_v1() {
     // IgnoredGroupReturnedDifferentPrime, plus a non-FFDHE row demonstrating
     // an OpenSSL override of an aws-lc-rs `not_probed` slot.
     //
-    // The ffdhe2048 self-match here triggers the cross-codepoint
-    // coherence downgrade because the ffdhe3072 row carries
-    // `IgnoredGroupReturnedDifferentPrime` evidence — the JSON
-    // builder downgrades both rows to
-    // `reason: server_does_not_honor_supported_groups` with
-    // returned-prime evidence preserved.
+    // The ffdhe3072 mismatch here triggers the cross-codepoint
+    // coherence note. The ffdhe2048 self-match remains supported,
+    // but both rows carry `reason:
+    // server_does_not_honor_supported_groups` with returned-prime
+    // evidence preserved.
     let kx_group_probes = KxGroupProbeOutput {
         results: vec![
             KxGroupProbeResult {
@@ -331,6 +494,8 @@ fn fully_populated_openssl_observations_match_schema_v1() {
         secure_renegotiation_advertised: None,
         client_initiated_verdict: RenegotiationVerdict::ClientInitiatedRejected,
         reason: Some("tls_alert_no_renegotiation".to_string()),
+        server_initiated_observed: ObservationBool::probe(false),
+        server_initiated_probe_reason: Some("passive_wait_timeout".to_string()),
     };
 
     let client_auth = ClientAuthRequest {
@@ -349,6 +514,7 @@ fn fully_populated_openssl_observations_match_schema_v1() {
             oid: "1.3.6.1.5.5.7.3.2".to_string(),
             values_b64: vec!["deadbeef".to_string()],
         }],
+        observed_extensions: vec![0x000d, 0x002f],
         alert_on_empty_cert: Some("tls_alert_certificate_required".to_string()),
         negotiated_version: Some("tls1_3".to_string()),
     };
@@ -365,6 +531,10 @@ fn fully_populated_openssl_observations_match_schema_v1() {
             expected_cert_verify_algorithm: "ecdsa_secp256r1_sha256".to_string(),
         }),
         error: None,
+        observed_extensions: vec![kemist::model::scan_result::ObservedServerExtension::new(
+            "tls1_3_encrypted_extensions",
+            0x001c,
+        )],
     };
 
     // Session resumption. TLS 1.2 fully populated via the two-connection
@@ -408,6 +578,7 @@ fn fully_populated_openssl_observations_match_schema_v1() {
         reason: None,
         leaf_fingerprint_sha256: Some(fp.to_string()),
         leaf_subject_dn: Some("CN=example.com, O=Test, C=US".to_string()),
+        ..Default::default()
     };
     let sigalg_policy = SignatureAlgorithmPolicyProbe {
         sha256_plus_only: complete("ecdsa_secp256r1_sha256", &ecdsa_leaf_fp),
@@ -421,6 +592,7 @@ fn fully_populated_openssl_observations_match_schema_v1() {
             reason: Some("tls_alert_handshake_failure".to_string()),
             leaf_fingerprint_sha256: None,
             leaf_subject_dn: None,
+            ..Default::default()
         },
         eddsa_only: ConstrainedProbeResult {
             outcome: SigalgOutcome::HandshakeFailure,
@@ -430,6 +602,7 @@ fn fully_populated_openssl_observations_match_schema_v1() {
             reason: Some("tls_alert_handshake_failure".to_string()),
             leaf_fingerprint_sha256: None,
             leaf_subject_dn: None,
+            ..Default::default()
         },
     };
 
@@ -546,6 +719,25 @@ fn fully_populated_openssl_observations_match_schema_v1() {
         tls.get("dh_parameters").unwrap().as_array().unwrap().len(),
         1
     );
+    assert!(
+        tls.pointer("/dh_parameters/0/prime_raw_hex").is_none(),
+        "raw DH prime should be omitted by default"
+    );
+    let mut raw_ctx = fixture_ctx();
+    raw_ctx.include_dh_raw = true;
+    let raw_record = build_scan_result(&results, &raw_ctx);
+    let raw_record_value = serde_json::to_value(&raw_record).expect("serialize");
+    assert_eq!(
+        raw_record_value
+            .pointer("/tls/dh_parameters/0/prime_raw_hex")
+            .and_then(|v| v.as_str()),
+        Some("01020304")
+    );
+    let raw_errors: Vec<_> = validator.iter_errors(&raw_record_value).collect();
+    assert!(
+        raw_errors.is_empty(),
+        "raw-DH record should remain schema-valid"
+    );
     let groups = tls.get("groups").unwrap();
     // Three FFDHE probe rows produce three tls1_2 + three tls1_3 entries.
     assert_eq!(groups.get("tls1_2").unwrap().as_object().unwrap().len(), 3);
@@ -560,16 +752,101 @@ fn fully_populated_openssl_observations_match_schema_v1() {
         .expect("secp521r1 override lands in tls1_3");
     assert_eq!(s521.get("supported").unwrap().as_bool(), Some(false));
     assert_eq!(s521.get("provider").unwrap().as_str(), Some("openssl"));
+    let observed_extensions = tls
+        .pointer("/extensions/observed_server_extensions")
+        .unwrap()
+        .as_array()
+        .unwrap();
+    assert!(observed_extensions.iter().any(|e| {
+        e.get("protocol_phase").and_then(|v| v.as_str()) == Some("tls1_3_encrypted_extensions")
+            && e.get("extension_id").and_then(|v| v.as_str()) == Some("0x001C")
+            && e.get("extension_name").and_then(|v| v.as_str()) == Some("record_size_limit")
+    }));
+    assert!(observed_extensions.iter().any(|e| {
+        e.get("protocol_phase").and_then(|v| v.as_str()) == Some("tls1_3_certificate_request")
+            && e.get("extension_id").and_then(|v| v.as_str()) == Some("0x000D")
+            && e.get("extension_name").and_then(|v| v.as_str()) == Some("signature_algorithms")
+    }));
+
+    let ske = tls
+        .get("server_key_exchange_signatures")
+        .unwrap()
+        .as_array()
+        .unwrap();
+    assert_eq!(ske.len(), 1);
     assert_eq!(
-        tls.get("server_key_exchange_signatures")
-            .unwrap()
-            .as_array()
-            .unwrap()
-            .len(),
-        1
+        ske[0]
+            .get("leaf_fingerprint_sha256")
+            .and_then(|v| v.as_str()),
+        Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
     );
-    assert!(tls.get("renegotiation_behavior").is_some());
-    assert!(tls.get("client_auth_request").is_some());
+    assert_eq!(
+        ske[0].get("group").and_then(|v| v.as_str()),
+        Some("ffdhe2048")
+    );
+
+    let reneg = tls.get("renegotiation_behavior").unwrap();
+    assert_eq!(
+        reneg
+            .pointer("/client_initiated/accepted/value")
+            .and_then(|v| v.as_bool()),
+        Some(false)
+    );
+    assert_eq!(
+        reneg
+            .pointer("/client_initiated/accepted/reason")
+            .and_then(|v| v.as_str()),
+        Some("tls_alert_no_renegotiation")
+    );
+    assert_eq!(
+        reneg
+            .pointer("/server_initiated/observed/value")
+            .and_then(|v| v.as_bool()),
+        Some(false)
+    );
+    assert_eq!(
+        reneg
+            .pointer("/server_initiated/observed/reason")
+            .and_then(|v| v.as_str()),
+        Some("passive_wait_timeout")
+    );
+    assert_eq!(
+        reneg
+            .pointer("/server_initiated_observed/value")
+            .and_then(|v| v.as_bool()),
+        Some(false)
+    );
+    assert_eq!(
+        reneg
+            .get("server_initiated_probe_reason")
+            .and_then(|v| v.as_str()),
+        Some("passive_wait_timeout")
+    );
+    let client_auth = tls.get("client_auth_request").unwrap();
+    assert_eq!(
+        client_auth
+            .pointer("/ca_distinguished_names/0/raw_der_hex")
+            .and_then(|v| v.as_str()),
+        Some("3017310f300d06035504030c064b65696d737407")
+    );
+    assert_eq!(
+        client_auth
+            .pointer("/ca_distinguished_names/0/raw_der_b64")
+            .and_then(|v| v.as_str()),
+        Some("3017310f300d06035504030c064b65696d737407")
+    );
+    assert_eq!(
+        client_auth
+            .pointer("/oid_filters/0/values_hex/0")
+            .and_then(|v| v.as_str()),
+        Some("deadbeef")
+    );
+    assert_eq!(
+        client_auth
+            .pointer("/oid_filters/0/values_b64/0")
+            .and_then(|v| v.as_str()),
+        Some("deadbeef")
+    );
     // No more legacy_cipher_suites / ffdhe_support at top level.
     assert!(tls.get("legacy_cipher_suites").is_none());
     assert!(tls.get("ffdhe_support").is_none());
@@ -621,7 +898,9 @@ fn fully_populated_openssl_observations_match_schema_v1() {
     // tls.extensions.{record_size_limit, compress_certificate_algorithms}.
     let ext = tls.get("extensions").unwrap();
     assert_eq!(
-        ext.get("record_size_limit").and_then(|v| v.as_u64()),
+        ext.get("record_size_limit")
+            .and_then(|v| v.get("value"))
+            .and_then(|v| v.as_u64()),
         Some(16385)
     );
     let comp = ext
@@ -776,15 +1055,14 @@ fn ffdhe_cross_check_reason_surfaces_in_output() {
 }
 
 /// Cross-codepoint coherence: when one FFDHE row reports
-/// `IgnoredGroupReturnedDifferentPrime`, every FFDHE TLS 1.2 row
-/// (including a sibling that "matched" its own offer) gets downgraded
-/// to `supported: false` with the same explicit reason. The matched
-/// row's `returned_group` records the row's own group classification,
-/// since that is the prime the server returned in response to the
-/// offer.
+/// `IgnoredGroupReturnedDifferentPrime`, every FFDHE TLS 1.2 row gets
+/// the same explicit reason. A sibling that matched its own offer
+/// remains `supported: true`; its `returned_group` records the row's
+/// own group classification, since that is the prime the server
+/// returned in response to the offer.
 #[cfg(feature = "legacy-probes")]
 #[test]
-fn ffdhe_cross_codepoint_coherence_downgrades_self_match() {
+fn ffdhe_cross_codepoint_coherence_notes_self_match() {
     use kemist::scanner::backends::HandshakeOutcome;
     use kemist::scanner::openssl::{
         kx_groups::{KxGroupProbeOutput, KxGroupProbeResult},
@@ -828,12 +1106,12 @@ fn ffdhe_cross_codepoint_coherence_downgrades_self_match() {
     let record = build_scan_result(&results, &ctx);
     let value = serde_json::to_value(&record).expect("serialize");
 
-    // ffdhe2048 self-match is downgraded; returned_group reflects the
-    // matching prime the server actually returned.
+    // ffdhe2048 self-match stays supported; returned_group reflects
+    // the matching prime the server actually returned.
     let two = value
         .pointer("/tls/groups/tls1_2/ffdhe2048")
         .expect("ffdhe2048 row present");
-    assert_eq!(two.get("supported").unwrap().as_bool(), Some(false));
+    assert_eq!(two.get("supported").unwrap().as_bool(), Some(true));
     assert_eq!(
         two.get("reason").unwrap().as_str(),
         Some("server_does_not_honor_supported_groups")
@@ -992,6 +1270,52 @@ fn legacy_probes_disabled_renders_empty_schema_sections() {
             Some("feature_disabled")
         );
     }
+}
+
+#[cfg(feature = "legacy-probes")]
+#[test]
+fn legacy_probe_absence_after_total_timeout_uses_budget_reason() {
+    let mut results = fixture_results();
+    results.openssl_observations = None;
+    results.scan_errors.push(ScannerError::handshake_timeout(
+        "total_timeout 60s elapsed for www.amazon.com:443",
+    ));
+
+    let ctx = fixture_ctx();
+    let record = build_scan_result(&results, &ctx);
+    let value = serde_json::to_value(&record).expect("serialize");
+
+    let fallback = value
+        .pointer("/tls/downgrade_signaling/fallback_scsv_enforced")
+        .expect("fallback_scsv_enforced slot present");
+    assert_eq!(
+        fallback.get("reason").unwrap().as_str(),
+        Some("total_timeout_exceeded")
+    );
+
+    let reneg = value
+        .pointer("/tls/renegotiation_behavior")
+        .expect("renegotiation_behavior slot present");
+    assert_eq!(
+        reneg.get("reason").unwrap().as_str(),
+        Some("total_timeout_exceeded")
+    );
+
+    let session_ticket = value
+        .pointer("/tls/session_resumption/tls1_2/session_ticket_resumption_accepted")
+        .expect("session_ticket_resumption_accepted slot present");
+    assert_eq!(
+        session_ticket.get("reason").unwrap().as_str(),
+        Some("total_timeout_exceeded")
+    );
+
+    let sigalg = value
+        .pointer("/tls/signature_algorithm_policy_probe/sha256_plus_only")
+        .expect("sigalg probe slot present");
+    assert_eq!(
+        sigalg.get("reason").unwrap().as_str(),
+        Some("total_timeout_exceeded")
+    );
 }
 
 // --------------------------------------------------------------------
@@ -1526,6 +1850,10 @@ fn wire_rejected_cipher_renders_as_supported_false_with_reason() {
                 },
                 dh_snapshot: None,
                 ske_sig: None,
+                cert_chain: Vec::new(),
+                leaf_fingerprint_sha256: None,
+                chain_fingerprint_sha256: None,
+                group: None,
             }],
         }),
         kx_group_probes: None,

@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/regenscheid/kemist-scanner/schemas/output-v1.json",
-  "title": "kemist scan result (schema v2)",
+  "title": "kemist scan result (schema v2.1)",
   "description": "One record per scanned target. See docs/OUTPUT_SCHEMA.md for field-by-field semantics. Tri-state: {value: false, method: probe} is a real negative, {value: null, method: not_probed|not_applicable|error} is an absence of signal — downstream rule engines MUST distinguish these.",
   "type": "object",
   "required": [
@@ -17,7 +17,7 @@
   "properties": {
     "schema_version": {
       "type": "string",
-      "const": "2.0.0"
+      "const": "2.1.0"
     },
     "scanner": {
       "type": "object",
@@ -146,7 +146,7 @@
         },
         "extensions": {
           "type": "object",
-          "description": "True TLS extensions per RFC 5246 §7.4.1.4 / RFC 8446 §4.2 — fields that ride in the `extensions` block of ClientHello / ServerHello / EncryptedExtensions. Schema v2.0 split non-extension handshake observations (vulnerability probes, ClientHello-body fields, ServerHello variants) out of this block into `behavioral_probes`.",
+          "description": "True TLS extensions per RFC 5246 §7.4.1.4 / RFC 8446 §4.2 — fields that ride in the `extensions` block of ClientHello / ServerHello / EncryptedExtensions. Schema v2.0 split non-extension handshake observations (vulnerability probes, ClientHello-body fields, ServerHello variants) out of this block into `behavioral_probes`; v2.1 adds generic observed_server_extensions coverage.",
           "required": [
             "ems",
             "secure_renegotiation",
@@ -158,6 +158,7 @@
             "truncated_hmac",
             "npn",
             "supported_point_formats_echoed",
+            "record_size_limit",
             "delegated_credentials"
           ],
           "properties": {
@@ -206,16 +207,31 @@
               "type": "string",
               "description": "RFC 6066 §4 — server-echoed max_fragment_length code. `2^9`..`2^12` for values 1-4; `0xNN` for unknown bytes."
             },
+            "observed_server_extensions": {
+              "type": "array",
+              "description": "Generic inventory of server-side TLS extensions observed in ServerHello / EncryptedExtensions / CertificateEntry / CertificateRequest messages. Specific facts remain surfaced in named fields.",
+              "items": {
+                "type": "object",
+                "required": ["protocol_phase", "extension_id", "extension_name"],
+                "properties": {
+                  "protocol_phase": { "type": "string" },
+                  "extension_id": {
+                    "type": "string",
+                    "pattern": "^0x[0-9A-F]{4}$"
+                  },
+                  "extension_name": { "type": "string" }
+                },
+                "additionalProperties": false
+              }
+            },
             "record_size_limit": {
-              "type": "integer",
-              "minimum": 0,
-              "maximum": 65535,
-              "description": "RFC 8449 — observed in TLS 1.3 EncryptedExtensions. Populated when the OpenSSL-backed EE probe (feature `legacy-probes`) completed a TLS 1.3 handshake and the server advertised the extension."
+              "$ref": "#/$defs/observationU16",
+              "description": "RFC 8449 — TLS 1.3 record_size_limit. `value` is populated only when the server sends the extension; the current build normally emits `{value: null, method: not_probed, reason: client_offer_unsupported_in_current_build}` because neither pinned TLS stack can emit the required client offer."
             },
             "compress_certificate_algorithms": {
               "type": "array",
               "items": { "type": "string" },
-              "description": "RFC 8879 — server-advertised certificate compression algorithms. Populated via the OpenSSL EncryptedExtensions probe."
+              "description": "RFC 8879 — certificate-compression algorithms observed when the server sends a TLS 1.3 CompressedCertificate after kemist offers support. Canonical names: zlib, brotli, zstd; 0xNNNN for unknown codepoints."
             },
             "delegated_credentials": {
               "type": "object",
@@ -246,10 +262,12 @@
         },
         "behavioral_probes": {
           "type": "object",
-          "description": "Non-extension handshake observations — active vulnerability probes (Heartbleed payload echo, ephemeral-key reuse / Raccoon, ROBOT) plus ClientHello-body / ServerHello-variant signals (`compression_offered`, `hello_retry_request`, `grease_echoed`). Schema v2.0 split these out of `extensions`. Polarity (whether `true` is good or bad) varies per field; the scanner records facts and downstream rule engines interpret.",
+          "description": "Non-extension handshake observations — active vulnerability probes (Heartbleed payload echo, ephemeral-key reuse / Raccoon, ROBOT) plus ClientHello-body / ServerHello-variant signals (`compression_selected`, `crime_vulnerable`, `hello_retry_request`, `grease_echoed`). Schema v2.0 split these out of `extensions`. Polarity (whether `true` is good or bad) varies per field; the scanner records facts and downstream rule engines interpret.",
           "required": [
             "heartbeat_echoes_oversized_payload",
-            "compression_offered",
+            "compression_selected",
+            "crime_vulnerable",
+            "record_compression_by_version",
             "grease_echoed",
             "hello_retry_request",
             "ephemeral_key_reuse",
@@ -260,10 +278,35 @@
               "$ref": "#/$defs/observationBool",
               "description": "Heartbleed (CVE-2014-0160) probe. `true` = server echoed our oversized-payload heartbeat back, leaking adjacent memory bytes. `false` = server correctly bounds-checked. Distinct from `extensions.heartbeat_present`, which records whether the *extension* itself is advertised."
             },
-            "compression_offered": {
+            "compression_selected": {
+              "type": ["string", "null"],
+              "description": "Record-layer compression method selected by the server in the primary ServerHello `compression_method` field (RFC 5246 §7.4.1.3 — body field, not an extension). `null` means the probe did not reach a parseable ServerHello; the string value `null` means the server selected no compression."
+            },
+            "crime_vulnerable": {
+              "$ref": "#/$defs/observationBool",
+              "description": "CRIME-style record-compression verdict derived from `compression_selected`. `true` means the server selected a non-null TLS record-compression method from the scanner's offer."
+            },
+            "record_compression_by_version": {
               "type": "array",
-              "items": { "type": "string" },
-              "description": "Compression methods echoed by the server in the ServerHello `compression_methods` field (RFC 5246 §7.4.1.3 — body field, not an extension). Non-empty list = CRIME-vulnerable configuration (RFC 7457 §2.1)."
+              "description": "Version-specific record-compression probes for supported SSLv3 through TLS 1.2 versions, so older-version compression is visible even when the primary TLS 1.2-style ClientHello negotiates a safer version.",
+              "items": {
+                "type": "object",
+                "required": ["version", "compression_selected", "crime_vulnerable"],
+                "properties": {
+                  "version": {
+                    "type": "string",
+                    "enum": ["SSLv3", "TLSv1.0", "TLSv1.1", "TLSv1.2"]
+                  },
+                  "compression_selected": {
+                    "type": ["string", "null"],
+                    "description": "Record-layer compression method selected by the server for this version, or null when the version-specific probe did not parse a ServerHello."
+                  },
+                  "crime_vulnerable": {
+                    "$ref": "#/$defs/observationBool"
+                  }
+                },
+                "additionalProperties": false
+              }
             },
             "grease_echoed": {
               "$ref": "#/$defs/observationBool",
@@ -358,10 +401,44 @@
           "properties": {
             "omitted_probe": {
               "type": ["string", "null"],
-              "enum": ["same_cert", "different_cert", "rejected", "error", null]
+              "enum": ["same_cert", "different_cert", "rejected", "error", "not_probed", null],
+              "deprecated": true,
+              "description": "Deprecated compatibility field; prefer probes[] entry with variant=omitted. Planned removal in schema v3."
             },
-            "method": { "$ref": "#/$defs/method" },
-            "reason": { "type": "string" }
+            "method": {
+              "allOf": [{ "$ref": "#/$defs/method" }],
+              "deprecated": true,
+              "description": "Deprecated compatibility field for omitted_probe; prefer probes[] entry with variant=omitted. Planned removal in schema v3."
+            },
+            "reason": {
+              "type": "string",
+              "deprecated": true,
+              "description": "Deprecated compatibility field for omitted_probe; prefer probes[] entry with variant=omitted. Planned removal in schema v3."
+            },
+            "probes": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["variant", "outcome"],
+                "properties": {
+                  "variant": {
+                    "type": "string",
+                    "enum": ["omitted", "bogus_dns", "ip_literal"]
+                  },
+                  "sni_sent": { "type": ["string", "null"] },
+                  "outcome": {
+                    "type": "string",
+                    "enum": ["same_cert", "different_cert", "rejected", "error", "not_probed"]
+                  },
+                  "leaf_fingerprint_sha256": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$"
+                  },
+                  "reason": { "type": "string" }
+                },
+                "additionalProperties": false
+              }
+            }
           },
           "additionalProperties": false
         },
@@ -375,14 +452,53 @@
         },
         "renegotiation_behavior": {
           "type": "object",
-          "required": ["method"],
+          "description": "OpenSSL-backed TLS 1.2 renegotiation observations. Client-initiated probe actively requests renegotiation; server-initiated observation passively waits after a minimal HTTP request and does not force application-specific triggers.",
+          "required": ["method", "server_initiated_observed"],
           "properties": {
+            "client_initiated": {
+              "type": "object",
+              "description": "Preferred client-initiated renegotiation observation. This replaces the older client_initiated_verdict/method/reason trio for new consumers.",
+              "required": ["accepted"],
+              "properties": {
+                "accepted": { "$ref": "#/$defs/observationBool" }
+              },
+              "additionalProperties": false
+            },
+            "server_initiated": {
+              "type": "object",
+              "description": "Preferred server-initiated renegotiation observation. This replaces the older server_initiated_observed/server_initiated_probe_reason pair for new consumers.",
+              "required": ["observed"],
+              "properties": {
+                "observed": { "$ref": "#/$defs/observationBool" }
+              },
+              "additionalProperties": false
+            },
             "client_initiated_verdict": {
               "type": ["string", "null"],
-              "enum": ["accepted", "rejected", "not_attempted", "error", null]
+              "enum": ["accepted", "rejected", "not_attempted", "error", null],
+              "deprecated": true,
+              "description": "Deprecated compatibility field; prefer client_initiated.accepted. Planned removal in schema v3."
             },
-            "method": { "$ref": "#/$defs/method" },
-            "reason": { "type": "string" }
+            "method": {
+              "allOf": [{ "$ref": "#/$defs/method" }],
+              "deprecated": true,
+              "description": "Deprecated compatibility field for client_initiated_verdict; prefer client_initiated.accepted.method. Planned removal in schema v3."
+            },
+            "reason": {
+              "type": "string",
+              "deprecated": true,
+              "description": "Deprecated compatibility field for client_initiated_verdict; prefer client_initiated.accepted.reason. Planned removal in schema v3."
+            },
+            "server_initiated_observed": {
+              "allOf": [{ "$ref": "#/$defs/observationBool" }],
+              "deprecated": true,
+              "description": "Deprecated compatibility field; prefer server_initiated.observed. Planned removal in schema v3."
+            },
+            "server_initiated_probe_reason": {
+              "type": "string",
+              "deprecated": true,
+              "description": "Deprecated compatibility field; prefer server_initiated.observed.reason. Planned removal in schema v3."
+            }
           },
           "additionalProperties": false
         },
@@ -404,7 +520,16 @@
                 "type": "object",
                 "required": ["raw_der_b64"],
                 "properties": {
-                  "raw_der_b64": { "type": "string" },
+                  "raw_der_hex": {
+                    "type": "string",
+                    "pattern": "^([0-9a-f]{2})*$",
+                    "description": "Preferred hex-encoded DER distinguished name bytes."
+                  },
+                  "raw_der_b64": {
+                    "type": "string",
+                    "deprecated": true,
+                    "description": "Deprecated misnamed compatibility field. It contains hex, not base64; prefer raw_der_hex. Planned removal in schema v3."
+                  },
                   "common_name": { "type": "string" },
                   "organization": { "type": "string" }
                 },
@@ -418,7 +543,17 @@
                 "required": ["oid", "values_b64"],
                 "properties": {
                   "oid": { "type": "string" },
-                  "values_b64": { "type": "array", "items": { "type": "string" } }
+                  "values_hex": {
+                    "type": "array",
+                    "items": { "type": "string", "pattern": "^([0-9a-f]{2})*$" },
+                    "description": "Preferred hex-encoded DER OID filter values."
+                  },
+                  "values_b64": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "deprecated": true,
+                    "description": "Deprecated misnamed compatibility field. Values contain hex, not base64; prefer values_hex. Planned removal in schema v3."
+                  }
                 },
                 "additionalProperties": false
               }
@@ -464,9 +599,34 @@
       "type": "object",
       "required": ["chain", "chain_length"],
       "properties": {
-        "leaf": { "$ref": "#/$defs/certificateFacts" },
-        "chain": { "type": "array", "items": { "$ref": "#/$defs/certificateFacts" } },
-        "chain_length": { "type": "integer", "minimum": 0 }
+        "observed_chains": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/certificateChainObservation" },
+          "description": "Preferred schema-2.1+ chain observation list. Contains the primary characterization chain and alternate chains observed by constrained probes. New consumers should prefer this over leaf/chain/chain_length/alternates."
+        },
+        "leaf": {
+          "allOf": [{ "$ref": "#/$defs/certificateFacts" }],
+          "deprecated": true,
+          "description": "Deprecated compatibility field; prefer observed_chains[] primary entry chain[0]. Planned removal in schema v3."
+        },
+        "chain": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/certificateFacts" },
+          "deprecated": true,
+          "description": "Deprecated compatibility field; prefer observed_chains[] primary entry chain. Planned removal in schema v3."
+        },
+        "chain_length": {
+          "type": "integer",
+          "minimum": 0,
+          "deprecated": true,
+          "description": "Deprecated compatibility field; prefer observed_chains[] primary entry chain.length. Planned removal in schema v3."
+        },
+        "alternates": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/certificateAlternate" },
+          "deprecated": true,
+          "description": "Deprecated compatibility field for alternate chains; prefer observed_chains[] entries with role=alternate. Planned removal in schema v3."
+        }
       },
       "additionalProperties": false
     },
@@ -492,7 +652,11 @@
           "additionalProperties": { "$ref": "#/$defs/observationBool" }
         },
         "name_matches_sni": { "$ref": "#/$defs/observationBool" },
-        "validation_error": { "type": ["string", "null"] },
+        "validation_error": {
+          "type": ["string", "null"],
+          "deprecated": true,
+          "description": "Deprecated compatibility field for webpki-roots only; prefer per_store_validation_errors. Planned removal in schema v3."
+        },
         "per_store_validation_errors": {
           "type": "object",
           "description": "Per-store error strings — populated only for stores whose chain-validation attempt failed. Keys are canonical store names.",
@@ -656,6 +820,26 @@
         }
       ]
     },
+    "observationU16": {
+      "type": "object",
+      "required": ["value", "method"],
+      "properties": {
+        "value": { "type": ["integer", "null"], "minimum": 0, "maximum": 65535 },
+        "method": { "$ref": "#/$defs/method" },
+        "reason": { "type": "string" }
+      },
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": { "properties": { "method": { "const": "probe" } } },
+          "then": { "properties": { "value": { "type": "integer", "minimum": 0, "maximum": 65535 } } }
+        },
+        {
+          "if": { "properties": { "method": { "enum": ["not_probed", "not_applicable", "error"] } } },
+          "then": { "properties": { "value": { "type": "null" } }, "required": ["reason"] }
+        }
+      ]
+    },
     "channelBindingValue": {
       "type": "object",
       "required": ["method"],
@@ -701,7 +885,7 @@
         "provider": { "type": "string", "enum": ["aws_lc_rs", "openssl"] },
         "returned_group": {
           "type": "string",
-          "description": "FFDHE TLS 1.2 only. Classification of the prime the server actually returned when its behavior diverged from the codepoint we offered (or when cross-codepoint coherence determined the server isn't honoring `supported_groups`). Vocabulary mirrors `tls.dh_parameters[].classification`.",
+          "description": "FFDHE TLS 1.2 only. Classification of the prime the server actually returned when its behavior diverged from the codepoint we offered, or when cross-codepoint coherence attached the `server_does_not_honor_supported_groups` caveat to a matching row. Vocabulary mirrors `tls.dh_parameters[].classification`.",
           "enum": ["ffdhe2048", "ffdhe3072", "ffdhe4096", "ffdhe6144", "ffdhe8192", "modp1024", "modp1536", "modp2048", "modp3072", "custom"]
         },
         "returned_prime_bits": {
@@ -773,7 +957,11 @@
         },
         "generator": { "type": "integer", "minimum": 0 },
         "prime_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
-        "prime_raw_hex": { "type": "string", "pattern": "^[0-9a-f]+$" },
+        "prime_raw_hex": {
+          "type": "string",
+          "pattern": "^[0-9a-f]+$",
+          "description": "Big-endian DH prime bytes as lowercase hex. Omitted by default; present only when the CLI uses --include-dh-raw."
+        },
         "method": { "$ref": "#/$defs/method" },
         "reason": { "type": "string" }
       },
@@ -786,7 +974,16 @@
         "cipher_suite": { "type": "string" },
         "signature_algorithm": { "type": "string" },
         "method": { "$ref": "#/$defs/method" },
-        "reason": { "type": "string" }
+        "reason": { "type": "string" },
+        "leaf_fingerprint_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "chain_fingerprint_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "group": { "type": "string" }
       },
       "additionalProperties": false
     },
@@ -853,7 +1050,12 @@
           },
           "additionalProperties": false
         },
-        "embedded_scts": { "type": "integer", "minimum": 0 },
+        "embedded_scts": {
+          "type": "integer",
+          "minimum": 0,
+          "deprecated": true,
+          "description": "Deprecated compatibility count; prefer extensions.scts[]. Planned removal in schema v3."
+        },
         "fingerprint_sha256": { "type": "string" },
         "fingerprint_sha1": { "type": "string" },
         "wire_position": {
@@ -906,6 +1108,59 @@
           },
           "additionalProperties": false
         }
+      },
+      "additionalProperties": false
+    },
+    "certificateChainObservation": {
+      "type": "object",
+      "required": ["chain_id", "role", "observed_via", "chain"],
+      "properties": {
+        "chain_id": {
+          "type": "string",
+          "description": "Stable local ID for this scan result, e.g. primary or alternate-<leaf-fingerprint-prefix>."
+        },
+        "role": {
+          "type": "string",
+          "enum": ["primary", "alternate"]
+        },
+        "observed_via": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Probe paths that observed this chain."
+        },
+        "leaf_fingerprint_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "chain_fingerprint_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "description": "SHA-256 over concatenated DER chain bytes when raw chain DER was available."
+        },
+        "chain": { "type": "array", "items": { "$ref": "#/$defs/certificateFacts" } }
+      },
+      "additionalProperties": false
+    },
+    "certificateAlternate": {
+      "type": "object",
+      "required": ["observed_via", "chain", "chain_length"],
+      "properties": {
+        "observed_via": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Probe paths that observed this alternate leaf/chain, for example signature_algorithm_policy.rsa_pss_only."
+        },
+        "leaf_fingerprint_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "chain_fingerprint_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "leaf": { "$ref": "#/$defs/certificateFacts" },
+        "chain": { "type": "array", "items": { "$ref": "#/$defs/certificateFacts" } },
+        "chain_length": { "type": "integer", "minimum": 0 }
       },
       "additionalProperties": false
     },
@@ -1081,6 +1336,11 @@
           "type": "string",
           "pattern": "^[0-9a-f]{64}$",
           "description": "Lowercase hex SHA-256 of the DER of the leaf cert the server returned under this constraint. Populated only when the handshake completed. Two distinct values across the sigalg probe set signal a dual-cert deployment (e.g. RSA + ECDSA leaves)."
+        },
+        "chain_fingerprint_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "description": "Lowercase hex SHA-256 over concatenated DER chain bytes observed under this constraint. Populated only when the handshake completed and raw chain DER was available."
         },
         "leaf_subject_dn": {
           "type": "string",

@@ -18,16 +18,18 @@
 //!   advertises `early_data` automatically when `config.enable_early_data`
 //!   is set AND the cached ticket's `max_early_data_size > 0`.
 //!
-//! Both observations fall through to `not_probed` with a specific
-//! reason when the preconditions aren't met (TCP failed, no ticket
-//! issued, ticket not 0-RTT-capable, etc.) so rule engines always see
-//! a stable schema shape.
+//! Observations use the normal tri-state convention: `probe(true/false)`
+//! only when the scanner actually exercised the behavior, `not_applicable`
+//! when server policy makes a behavior unavailable (for example, a TLS 1.3
+//! ticket with `max_early_data_size == 0`), and `not_probed` when the probe
+//! could not reach the relevant step.
 //!
 //! Post-handshake-action style: this is an inherent helper, not part
 //! of the `TlsBackend` trait. The orchestrator calls it directly; the
 //! OpenSSL-side `tickets::probe` aggregates the result into the
 //! combined [`SessionResumption`] output.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -96,13 +98,7 @@ pub async fn probe(ctx: &ProbeContext) -> Tls13Resumption {
             new_session_ticket_count: Some(ticket_count),
             ticket_lifetime_secs: Vec::new(),
             psk_resumption_accepted: ObservationBool::probe(resumed),
-            early_data_accepted: if max_early_data == 0 {
-                ObservationBool::not_probed("ticket_max_early_data_size_zero")
-            } else if !resumed {
-                ObservationBool::not_probed("psk_not_accepted_so_no_0rtt_to_observe")
-            } else {
-                ObservationBool::probe(early_accepted)
-            },
+            early_data_accepted: early_data_observation(max_early_data, resumed, early_accepted),
         },
         Ok(Err(reason)) => Tls13Resumption {
             new_session_ticket_count: Some(ticket_count),
@@ -125,6 +121,20 @@ fn not_probed_with(reason: &str) -> Tls13Resumption {
         ticket_lifetime_secs: Vec::new(),
         psk_resumption_accepted: ObservationBool::not_probed(reason),
         early_data_accepted: ObservationBool::not_probed(reason),
+    }
+}
+
+fn early_data_observation(
+    max_early_data: u32,
+    resumed: bool,
+    early_accepted: bool,
+) -> ObservationBool {
+    if max_early_data == 0 {
+        ObservationBool::not_applicable("ticket_max_early_data_size_zero")
+    } else if !resumed {
+        ObservationBool::not_probed("psk_not_accepted_so_no_0rtt_to_observe")
+    } else {
+        ObservationBool::probe(early_accepted)
     }
 }
 
@@ -215,24 +225,24 @@ fn build_config(store: Arc<dyn ClientSessionStore>) -> ClientConfig {
 }
 
 /// Wraps [`ClientSessionMemoryCache`] to count `insert_tls13_ticket`
-/// calls and record the max `max_early_data_size` across tickets. All
-/// other trait methods delegate to the inner cache unchanged.
+/// calls and record the max `max_early_data_size` across tickets.
+/// TLS 1.3 tickets are kept in an explicit per-server queue so this
+/// probe can reliably offer the ticket it just captured.
 #[derive(Debug)]
 struct TicketCountingStore {
     inner: ClientSessionMemoryCache,
+    tls13_tickets: Mutex<HashMap<ServerName<'static>, Vec<Tls13ClientSessionValue>>>,
     ticket_count: AtomicU32,
     max_early_data: AtomicU32,
-    #[allow(dead_code)]
-    lifetimes: Mutex<Vec<u32>>,
 }
 
 impl TicketCountingStore {
     fn new() -> Self {
         Self {
-            inner: ClientSessionMemoryCache::new(4),
+            inner: ClientSessionMemoryCache::new(16),
+            tls13_tickets: Mutex::new(HashMap::new()),
             ticket_count: AtomicU32::new(0),
             max_early_data: AtomicU32::new(0),
-            lifetimes: Mutex::new(Vec::new()),
         }
     }
 }
@@ -269,14 +279,25 @@ impl ClientSessionStore for TicketCountingStore {
         if mx > prev {
             self.max_early_data.store(mx, Ordering::Relaxed);
         }
-        self.inner.insert_tls13_ticket(server_name, value);
+        if let Ok(mut tickets_by_server) = self.tls13_tickets.lock() {
+            let tickets = tickets_by_server.entry(server_name).or_default();
+            if tickets.len() == 8 {
+                tickets.remove(0);
+            }
+            tickets.push(value);
+        }
     }
 
     fn take_tls13_ticket(
         &self,
         server_name: &ServerName<'static>,
     ) -> Option<Tls13ClientSessionValue> {
-        self.inner.take_tls13_ticket(server_name)
+        self.tls13_tickets
+            .lock()
+            .ok()
+            .and_then(|mut tickets_by_server| {
+                tickets_by_server.get_mut(server_name).and_then(Vec::pop)
+            })
     }
 }
 
@@ -304,5 +325,23 @@ mod tests {
         let j = serde_json::to_value(&out.psk_resumption_accepted).unwrap();
         assert_eq!(j["reason"], "custom_reason");
         assert_eq!(j["method"], "not_probed");
+    }
+
+    #[test]
+    fn zero_early_data_ticket_is_not_applicable_not_false() {
+        let out = early_data_observation(0, true, false);
+        let j = serde_json::to_value(&out).unwrap();
+        assert!(j["value"].is_null());
+        assert_eq!(j["method"], "not_applicable");
+        assert_eq!(j["reason"], "ticket_max_early_data_size_zero");
+    }
+
+    #[test]
+    fn early_data_false_requires_an_actual_resumed_0rtt_capable_probe() {
+        let out = early_data_observation(16_384, true, false);
+        let j = serde_json::to_value(&out).unwrap();
+        assert_eq!(j["value"], false);
+        assert_eq!(j["method"], "probe");
+        assert!(j.get("reason").is_none());
     }
 }

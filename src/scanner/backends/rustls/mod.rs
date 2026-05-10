@@ -18,6 +18,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 pub mod alpn_matrix;
+pub mod cert_compression;
 pub mod characterize;
 pub mod ciphers;
 pub mod groups;

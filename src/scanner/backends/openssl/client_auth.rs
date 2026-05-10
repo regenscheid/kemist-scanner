@@ -126,6 +126,9 @@ pub struct ClientAuthRequest {
     pub ca_distinguished_names: Vec<CaDnEntry>,
     /// TLS 1.3 only — empty for TLS 1.2 CertificateRequest.
     pub oid_filters: Vec<OidFilter>,
+    /// TLS 1.3 CertificateRequest extension codepoints observed in
+    /// the request's extension block.
+    pub observed_extensions: Vec<u16>,
     /// Alert category observed after our empty-Certificate response.
     /// `None` on handshake success (server accepted the empty cert or
     /// made client auth optional); `Some("tls_alert_<name>")` on a
@@ -428,6 +431,7 @@ fn parse_tls13_extensions(mut block: &[u8], out: &mut ClientAuthRequest) {
             return;
         }
         let ext_body = &rest[..ext_len];
+        out.observed_extensions.push(ext_type);
         match ext_type {
             EXT_SIGNATURE_ALGORITHMS | EXT_SIGNATURE_ALGORITHMS_CERT => {
                 // 2-byte length prefix per RFC 8446 §4.2.3
@@ -448,6 +452,8 @@ fn parse_tls13_extensions(mut block: &[u8], out: &mut ClientAuthRequest) {
         }
         block = &rest[ext_len..];
     }
+    out.observed_extensions.sort_unstable();
+    out.observed_extensions.dedup();
 }
 
 /// Each SignatureScheme is a u16. Map known codepoints to their canonical

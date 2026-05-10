@@ -3,8 +3,8 @@
 //! Despite the module name ("tls13_extensions"), this module captures
 //! observations from two TLS 1.3 handshake messages via
 //! `SSL_CTX_set_msg_callback`: EncryptedExtensions (RFC 8449
-//! record_size_limit, RFC 8879 compress_certificate) and Certificate
-//! (RFC 9345 delegated_credentials, carried in the leaf
+//! record_size_limit) and Certificate (RFC 9345 delegated_credentials,
+//! carried in the leaf
 //! CertificateEntry's extensions block).
 //!
 //! EncryptedExtensions is sent encrypted under the handshake traffic
@@ -25,27 +25,27 @@
 //! | Extension | IANA # | Field |
 //! |-----------|--------|-------|
 //! | RFC 8449 record_size_limit | 28 | [`Tls13EncryptedExtensions::record_size_limit`] |
-//! | RFC 8879 compress_certificate | 27 | [`Tls13EncryptedExtensions::compress_certificate_algorithms`] |
+//! | RFC 8879 compress_certificate | 27 | [`Tls13EncryptedExtensions::compress_certificate_algorithms`] (legacy parser only; normal support is observed by the rustls certificate-compression probe) |
 //!
 //! ## Known limitation: client-side offer gap
 //!
 //! Both RFCs require the server to advertise these extensions *only
 //! in response to* a matching client offer. OpenSSL 3.5 reserves ext
-//! 27 and 28 for its own internal handlers, so `add_custom_ext`
-//! cannot inject a client-side offer — the call returns failure with
-//! an empty error stack. openssl-sys 0.9.109 doesn't expose the
-//! native high-level setters
-//! (`SSL_CTX_set1_cert_comp_preference`, etc.) that would let
-//! OpenSSL's built-in machinery emit the offer.
+//! 27 for its own internal certificate-compression handler, so
+//! `add_custom_ext` cannot inject that client-side offer; normal RFC
+//! 8879 support is observed by rustls instead. OpenSSL 3.5 does not
+//! appear to implement RFC 8449 `record_size_limit` at all, and rustls
+//! 0.23 only exposes local `max_fragment_size`, not the RFC 8449
+//! extension.
 //!
 //! Result: on real-world targets we typically observe `parsed: true`
 //! with empty fields because servers respect the "MUST NOT send
 //! unsolicited" rule. The probe still infrastructure-tests correctly
 //! (see unit tests in this file) and remains useful for servers that
 //! advertise these extensions unsolicited — rare but legal.
-//! Follow-up workstream: gain access to the native OpenSSL setters
-//! and wire them in, then the fields populate on every modern TLS
-//! 1.3 deployment.
+//! Normal RFC 8879 support is observed by
+//! `backends::rustls::cert_compression`, which offers Brotli and
+//! records when a server sends a CompressedCertificate handshake.
 //!
 //! Deliberately **not** observed here:
 //! - `early_data` (ext 42) — only populated in EncryptedExtensions on
@@ -75,6 +75,8 @@ use std::time::Duration;
 use foreign_types::ForeignTypeRef;
 use openssl::ssl::{Ssl, SslContext, SslMethod, SslVerifyMode, SslVersion};
 use tracing::{debug, info};
+
+use crate::model::scan_result::ObservedServerExtension;
 
 /// OpenSSL control code from `<openssl/ssl.h>`. Same literal as in
 /// [`client_auth`](super::client_auth) — the constant isn't re-exported
@@ -158,6 +160,9 @@ pub struct Tls13EncryptedExtensions {
     pub delegated_credential: Option<DelegatedCredentialFacts>,
     /// Human-readable failure reason when `parsed` is false.
     pub error: Option<String>,
+    /// Generic server-side TLS extension inventory observed in TLS 1.3
+    /// encrypted handshake messages.
+    pub observed_extensions: Vec<ObservedServerExtension>,
 }
 
 /// Parsed DelegatedCredential fields per RFC 9345 §4.1. Only the
@@ -275,7 +280,14 @@ fn probe_blocking(
     // EE parse success — the two are independent observations.
     if let Some(cert_bytes) = captured_cert.as_deref() {
         out.delegated_credential = parse_certificate_for_dc(cert_bytes);
+        out.observed_extensions
+            .extend(observed_certificate_extensions(
+                cert_bytes,
+                "tls1_3_certificate",
+            ));
     }
+    out.observed_extensions.sort();
+    out.observed_extensions.dedup();
     out
 }
 
@@ -307,27 +319,13 @@ fn build_context_with_callback() -> Result<SslContext, openssl::error::ErrorStac
 
     // Client-side offer limitation:
     //
-    // Per RFC 8449 §4 and RFC 8879 §3, a TLS 1.3 server MUST NOT send
-    // record_size_limit or compress_certificate in EncryptedExtensions
-    // unless the client offered them in ClientHello. We'd normally use
-    // `SSL_CTX_add_custom_ext` (exposed via `add_custom_ext`) to inject
-    // both — but OpenSSL 3.5 reserves these specific extension codes
-    // for its own internal handlers, so the registration call returns
-    // failure with an empty ErrorStack. openssl-sys 0.9.109 doesn't
-    // expose the high-level native setters
-    // (`SSL_CTX_set1_cert_comp_preference` and friends) that would
-    // let us offer these through OpenSSL's built-in machinery.
-    //
-    // Net: the msg_callback below still fires on every TLS 1.3
-    // handshake and the parser handles any EncryptedExtensions bytes
-    // correctly (unit tests in this file pass). But on real servers
-    // we typically observe `parsed: true` with empty record_size_limit
-    // and compress_certificate fields, because servers respect the
-    // "MUST NOT advertise unsolicited" rule. That's the honest signal.
-    //
-    // Follow-up workstream: once openssl-sys gains bindings for the
-    // native preference setters, wire them in and these fields will
-    // populate on every modern TLS 1.3 deployment.
+    // Per RFC 8449 §4, a TLS 1.3 server MUST NOT send
+    // record_size_limit in EncryptedExtensions unless the client
+    // offered it in ClientHello. OpenSSL 3.5 does not expose or appear
+    // to implement that client offer, and rustls 0.23 has no RFC 8449
+    // client-offer API either. The msg_callback below still fires and
+    // the parser handles EncryptedExtensions correctly, but real
+    // servers normally leave record_size_limit absent.
 
     let ctx = builder.build();
 
@@ -441,6 +439,10 @@ fn parse_encrypted_extensions(raw: &[u8]) -> Tls13EncryptedExtensions {
             break;
         }
         let ext_body = &ext_bytes[i + 4..body_end];
+        out.observed_extensions.push(ObservedServerExtension::new(
+            "tls1_3_encrypted_extensions",
+            ty,
+        ));
 
         match ty {
             // RFC 8449 §4 — payload is a single uint16. Any other
@@ -453,6 +455,28 @@ fn parse_encrypted_extensions(raw: &[u8]) -> Tls13EncryptedExtensions {
             }
             _ => {}
         }
+        i = body_end;
+    }
+    out
+}
+
+fn observed_certificate_extensions(
+    raw: &[u8],
+    protocol_phase: &str,
+) -> Vec<ObservedServerExtension> {
+    let Some(ext_block) = leaf_certificate_extensions(raw) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i + 4 <= ext_block.len() {
+        let ty = u16::from_be_bytes([ext_block[i], ext_block[i + 1]]);
+        let body_len = u16::from_be_bytes([ext_block[i + 2], ext_block[i + 3]]) as usize;
+        let body_end = i + 4 + body_len;
+        if body_end > ext_block.len() {
+            break;
+        }
+        out.push(ObservedServerExtension::new(protocol_phase, ty));
         i = body_end;
     }
     out
@@ -513,33 +537,7 @@ fn signature_scheme_name(code: u16) -> String {
 /// The scanner reads `valid_time` and `expected_cert_verify_algorithm`;
 /// the public-key and signature blobs are skipped.
 fn parse_certificate_for_dc(raw: &[u8]) -> Option<DelegatedCredentialFacts> {
-    if raw.len() < 4 || raw[0] != HANDSHAKE_TYPE_CERTIFICATE {
-        return None;
-    }
-    let hs_len = ((raw[1] as usize) << 16) | ((raw[2] as usize) << 8) | (raw[3] as usize);
-    let body = raw.get(4..4 + hs_len)?;
-    // certificate_request_context<0..2^8-1>
-    let (&ctx_len, rest) = body.split_first()?;
-    let after_ctx = rest.get(ctx_len as usize..)?;
-    // certificate_list<0..2^24-1>
-    if after_ctx.len() < 3 {
-        return None;
-    }
-    let list_len =
-        ((after_ctx[0] as usize) << 16) | ((after_ctx[1] as usize) << 8) | (after_ctx[2] as usize);
-    let list_body = after_ctx.get(3..3 + list_len)?;
-    // Leaf entry only (first entry).
-    if list_body.len() < 3 {
-        return None;
-    }
-    let cert_len =
-        ((list_body[0] as usize) << 16) | ((list_body[1] as usize) << 8) | (list_body[2] as usize);
-    let after_cert = list_body.get(3 + cert_len..)?;
-    if after_cert.len() < 2 {
-        return None;
-    }
-    let ext_len = u16::from_be_bytes([after_cert[0], after_cert[1]]) as usize;
-    let ext_block = after_cert.get(2..2 + ext_len)?;
+    let ext_block = leaf_certificate_extensions(raw)?;
     // Walk CertificateEntry extensions.
     let mut i = 0;
     while i + 4 <= ext_block.len() {
@@ -555,6 +553,33 @@ fn parse_certificate_for_dc(raw: &[u8]) -> Option<DelegatedCredentialFacts> {
         i = body_end;
     }
     None
+}
+
+fn leaf_certificate_extensions(raw: &[u8]) -> Option<&[u8]> {
+    if raw.len() < 4 || raw[0] != HANDSHAKE_TYPE_CERTIFICATE {
+        return None;
+    }
+    let hs_len = ((raw[1] as usize) << 16) | ((raw[2] as usize) << 8) | (raw[3] as usize);
+    let body = raw.get(4..4 + hs_len)?;
+    let (&ctx_len, rest) = body.split_first()?;
+    let after_ctx = rest.get(ctx_len as usize..)?;
+    if after_ctx.len() < 3 {
+        return None;
+    }
+    let list_len =
+        ((after_ctx[0] as usize) << 16) | ((after_ctx[1] as usize) << 8) | (after_ctx[2] as usize);
+    let list_body = after_ctx.get(3..3 + list_len)?;
+    if list_body.len() < 3 {
+        return None;
+    }
+    let cert_len =
+        ((list_body[0] as usize) << 16) | ((list_body[1] as usize) << 8) | (list_body[2] as usize);
+    let after_cert = list_body.get(3 + cert_len..)?;
+    if after_cert.len() < 2 {
+        return None;
+    }
+    let ext_len = u16::from_be_bytes([after_cert[0], after_cert[1]]) as usize;
+    after_cert.get(2..2 + ext_len)
 }
 
 /// Parse the body of the RFC 9345 `delegated_credential` extension.

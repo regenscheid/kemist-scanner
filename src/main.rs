@@ -108,6 +108,13 @@ struct Args {
     #[arg(long)]
     include_ocsp_raw: bool,
 
+    /// Emit raw finite-field DH prime bytes as lower-case hex under
+    /// `tls.dh_parameters[].prime_raw_hex`. Off by default because
+    /// FFDHE primes are large; `prime_sha256` is usually enough for
+    /// correlation and classification.
+    #[arg(long)]
+    include_dh_raw: bool,
+
     /// Comma-separated list of signature-algorithm policy probes to
     /// skip. By default all four run (sha256_plus_only, ecdsa_only,
     /// rsa_pss_only, rsa_pkcs1_only). Useful for fast smoke scans or
@@ -336,6 +343,7 @@ async fn run() -> Result<()> {
         enable_http_checks: args.enable_http_checks,
         user_agent_info_url,
         include_ocsp_raw: args.include_ocsp_raw,
+        include_dh_raw: args.include_dh_raw,
         sigalg_probe_skip: args.sigalg_probe_skip.clone(),
         enable_revocation_fetch: args.enable_revocation_fetch,
     });

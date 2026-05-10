@@ -6,21 +6,34 @@
 //! scanner measured" to "what the JSON contract says."
 
 use chrono::{DateTime, Utc};
+use sha2::{Digest, Sha256};
+#[cfg(feature = "legacy-probes")]
+use std::collections::BTreeMap;
 
 use crate::model::cert::CertificateInfo;
 use crate::model::errors::ScannerError;
 use crate::model::protocol::TlsVersion;
 use crate::model::scan_result::{
-    Capabilities, CertificateFacts, Certificates, CipherSuiteEntry, ClientAuthRequestEntry,
+    Capabilities, CertificateAlternate, CertificateChainObservation, CertificateFacts,
+    Certificates, CipherSuiteEntry, ClientAuthRequestEntry, ClientInitiatedRenegotiation,
     DhParametersObservation, DowngradeSignaling, GroupObservation, Hsts, Http, Method,
-    ObservationBool, OcspStapling, PublicKey, RenegotiationBehavior, ScanMetadata, ScanResult,
-    Scanner as ScannerMeta, SctObservation, SecurityTxt, SkeSigObservation, SniBehavior, Tls,
-    TlsCipherSuites, TlsExtensions, TlsGroups, TlsNegotiated, TlsVersionsOffered, Validation,
-    VersionOffered, SCHEMA_VERSION,
+    ObservationBool, ObservationU16, ObservedServerExtension, OcspStapling, PublicKey,
+    RecordCompressionObservation, RenegotiationBehavior, ScanMetadata, ScanResult,
+    Scanner as ScannerMeta, SctObservation, SecurityTxt, ServerInitiatedRenegotiation,
+    SkeSigObservation, SniBehavior, SniProbeEntry, Tls, TlsCipherSuites, TlsExtensions, TlsGroups,
+    TlsNegotiated, TlsVersionsOffered, Validation, VersionOffered, SCHEMA_VERSION,
 };
 #[cfg(feature = "legacy-probes")]
 use crate::model::scan_result::{ClientAuthCaDn, ClientAuthOidFilter};
 use crate::scanner::ScanResults;
+
+const RECORD_SIZE_LIMIT_CLIENT_OFFER_UNSUPPORTED: &str =
+    "client_offer_unsupported_in_current_build";
+
+#[cfg(feature = "legacy-probes")]
+type AlternateChainBucket = (Vec<String>, Vec<CertificateInfo>, Option<String>);
+#[cfg(feature = "legacy-probes")]
+type AlternateChainByLeaf = BTreeMap<String, AlternateChainBucket>;
 
 /// Inputs that the scanner does not yet capture but that schema v2 requires.
 /// Supplied by `main.rs` around the `SslScanner::scan()` call.
@@ -37,6 +50,11 @@ pub struct JsonEmitContext {
     /// `content`. Gated by the `--include-ocsp-raw` CLI flag so most
     /// scans produce compact output.
     pub include_ocsp_raw: bool,
+    /// Emit raw finite-field DH prime bytes as hex alongside
+    /// `tls.dh_parameters[].prime_sha256`. Gated by
+    /// `--include-dh-raw` because FFDHE primes can add kilobytes per
+    /// observation.
+    pub include_dh_raw: bool,
 }
 
 pub fn build_scan_result(results: &ScanResults, ctx: &JsonEmitContext) -> ScanResult {
@@ -199,7 +217,7 @@ fn build_tls(results: &ScanResults, ctx: &JsonEmitContext) -> Tls {
                 .and_then(|h| h.tls13_downgrade_sentinel.clone()),
         },
         sni_behavior: build_sni_behavior(results),
-        dh_parameters: build_dh_parameters(results),
+        dh_parameters: build_dh_parameters(results, ctx),
         server_key_exchange_signatures: build_ske_sigs(results),
         renegotiation_behavior: build_renegotiation_behavior(results),
         session_resumption: build_session_resumption(results),
@@ -617,16 +635,15 @@ fn merge_openssl_kx_groups(results: &ScanResults, out: &mut TlsGroups) {
         // Cross-codepoint coherence: a server that completes a TLS 1.2
         // DHE handshake but returns a prime different from the FFDHE
         // codepoint we offered has demonstrably not honored
-        // `supported_groups`. When that evidence exists, downgrade
-        // every FFDHE TLS 1.2 row — including rows whose returned
-        // prime "matched" the codepoint, since the match is also
-        // consistent with the server returning its static prime
-        // regardless of offer (the fs.bbg.gov pattern: an RFC 7919
-        // prime configured as the static `ssl_dhparam`). Per-row
-        // `returned_group` + `returned_prime_bits` preserve the
-        // observed evidence even after the verdict flips. TLS 1.3
-        // FFDHE rows are wire-confirmed via `key_share` and not
-        // subject to the downgrade.
+        // `supported_groups`. When that evidence exists, attach the
+        // caveat to every FFDHE TLS 1.2 row. Rows whose returned
+        // prime matches their own offer remain supported, because the
+        // row-level question is still "did this codepoint complete
+        // with its matching group?" Mismatched rows stay unsupported,
+        // and per-row `returned_group` + `returned_prime_bits`
+        // preserve what the server actually sent. TLS 1.3 FFDHE rows
+        // are wire-confirmed via `key_share` and not subject to this
+        // coherence note.
         let host_ignores_supported_groups = probes.results.iter().any(|r| {
             ffdhe_bits_for_codepoint(r.iana_code).is_some()
                 && matches!(
@@ -647,12 +664,13 @@ fn merge_openssl_kx_groups(results: &ScanResults, out: &mut TlsGroups) {
                         ffdhe_self_group,
                         ffdhe_self_bits,
                     ) {
-                        // FFDHE TLS 1.2 self-match downgraded by
-                        // cross-codepoint evidence. The server
-                        // returned the codepoint's expected prime, so
-                        // that is what we record as returned_group.
+                        // FFDHE TLS 1.2 self-match with
+                        // cross-codepoint evidence. Keep the positive
+                        // verdict for this specific group, but attach
+                        // the host-level caveat and record the
+                        // matching prime that came back.
                         (true, Some(self_group), Some(self_bits)) => GroupObservation {
-                            supported: Some(false),
+                            supported: Some(true),
                             method: Method::Probe,
                             reason: Some("server_does_not_honor_supported_groups".to_string()),
                             iana_code: Some(iana.to_string()),
@@ -731,7 +749,7 @@ fn merge_openssl_kx_groups(results: &ScanResults, out: &mut TlsGroups) {
         };
         for r in &probes.results {
             let iana = format!("0x{:04X}", r.iana_code);
-            // Only TLS 1.2 FFDHE rows are subject to the downgrade —
+            // Only TLS 1.2 FFDHE rows are subject to the coherence note —
             // the row's own group classification + bit length describe
             // what the server returned when it matched its own offer.
             let ffdhe_self_bits = ffdhe_bits_for_codepoint(r.iana_code);
@@ -850,6 +868,7 @@ fn build_extensions(results: &ScanResults, ctx: &JsonEmitContext) -> TlsExtensio
     let max_fragment_length = hello.and_then(|h| h.max_fragment_length.clone());
     let (record_size_limit, compress_certificate_algorithms) = build_tls13_ee_observations(results);
     let delegated_credentials = build_delegated_credentials(results);
+    let observed_server_extensions = build_observed_server_extensions(results);
 
     TlsExtensions {
         ems,
@@ -866,10 +885,49 @@ fn build_extensions(results: &ScanResults, ctx: &JsonEmitContext) -> TlsExtensio
         npn,
         supported_point_formats_echoed,
         max_fragment_length,
+        observed_server_extensions,
         record_size_limit,
         compress_certificate_algorithms,
         delegated_credentials,
     }
+}
+
+fn build_observed_server_extensions(results: &ScanResults) -> Vec<ObservedServerExtension> {
+    let mut out = Vec::new();
+
+    if let Some(hello) = results.hello_observed.as_ref() {
+        if hello.server_hello_parsed {
+            out.extend(
+                hello
+                    .observed_server_extensions
+                    .iter()
+                    .copied()
+                    .map(|id| ObservedServerExtension::new("tls1_2_server_hello", id)),
+            );
+        }
+    }
+
+    #[cfg(feature = "legacy-probes")]
+    {
+        if let Some(obs) = results.openssl_observations.as_ref() {
+            if let Some(ee) = obs.tls13_extensions.as_ref() {
+                out.extend(ee.observed_extensions.clone());
+            }
+            if let Some(client_auth) = obs.client_auth.as_ref() {
+                out.extend(
+                    client_auth
+                        .observed_extensions
+                        .iter()
+                        .copied()
+                        .map(|id| ObservedServerExtension::new("tls1_3_certificate_request", id)),
+                );
+            }
+        }
+    }
+
+    out.sort();
+    out.dedup();
+    out
 }
 
 /// Build `tls.behavioral_probes`: vulnerability probes (Heartbleed,
@@ -885,13 +943,35 @@ fn build_behavioral_probes(results: &ScanResults) -> crate::model::scan_result::
         .and_then(|h| h.error.clone())
         .unwrap_or_else(|| "hello_probe_not_run".to_string());
 
-    // ClientHello/ServerHello body field — `compression_methods`
-    // (RFC 5246 §7.4.1.3), not an extension. Empty when the byte
-    // probe didn't succeed.
-    let compression_offered: Vec<String> = hello
-        .and_then(|h| h.compression_selected.clone())
-        .map(|c| vec![c])
-        .unwrap_or_default();
+    // ClientHello/ServerHello body field — `compression_method`
+    // (RFC 5246 §7.4.1.3), not an extension. `null` means no record
+    // compression; any non-null selection is the CRIME-relevant case.
+    let compression_selected = hello.and_then(|h| h.compression_selected.clone());
+    let crime_vulnerable = match compression_selected.as_deref() {
+        Some(method) => ObservationBool::probe(is_record_compression_vulnerable(method)),
+        None => ObservationBool::not_probed(&format!("hello_probe_failed:{hello_fail_reason}")),
+    };
+    let record_compression_by_version = results
+        .record_compression_observed
+        .iter()
+        .map(|obs| RecordCompressionObservation {
+            version: obs.version.as_str().to_string(),
+            compression_selected: obs.compression_selected.clone(),
+            crime_vulnerable: if obs.server_hello_parsed {
+                match obs.compression_selected.as_deref() {
+                    Some(method) => {
+                        ObservationBool::probe(is_record_compression_vulnerable(method))
+                    }
+                    None => ObservationBool::not_probed("compression_method_missing"),
+                }
+            } else {
+                ObservationBool::not_probed(&format!(
+                    "record_compression_probe_failed:{}",
+                    obs.error.as_deref().unwrap_or("server_hello_not_parsed")
+                ))
+            },
+        })
+        .collect();
 
     // RFC 8701 GREASE echo. `true` = server echoed an unknown
     // extension (protocol violation); `false` = server correctly
@@ -954,12 +1034,18 @@ fn build_behavioral_probes(results: &ScanResults) -> crate::model::scan_result::
 
     BehavioralProbes {
         heartbeat_echoes_oversized_payload,
-        compression_offered,
+        compression_selected,
+        crime_vulnerable,
+        record_compression_by_version,
         grease_echoed,
         hello_retry_request,
         ephemeral_key_reuse: build_ephemeral_key_reuse(results),
         bleichenbacher_oracle_probe: build_bleichenbacher_oracle_probe(results),
     }
+}
+
+fn is_record_compression_vulnerable(method: &str) -> bool {
+    method != "null"
 }
 
 /// Merge the ROBOT probe observation from
@@ -1232,31 +1318,41 @@ fn build_ocsp_stapling(results: &ScanResults, ctx: &JsonEmitContext) -> OcspStap
 }
 
 /// Pull TLS 1.3 EncryptedExtensions observations from the OpenSSL probe
-/// subsystem. Returns `(None, [])` when `legacy-probes` is disabled or
-/// the probe didn't produce a parseable message — the fields are
-/// optional in the schema, so "absent" correctly means "not observed."
-fn build_tls13_ee_observations(results: &ScanResults) -> (Option<u16>, Vec<String>) {
+/// subsystem and merge the rustls certificate-compression observation.
+/// `record_size_limit` is currently parser-only because neither rustls
+/// nor our pinned OpenSSL stack can emit the RFC 8449 client offer.
+fn build_tls13_ee_observations(results: &ScanResults) -> (ObservationU16, Vec<String>) {
+    #[cfg(feature = "legacy-probes")]
+    let mut record_size_limit =
+        ObservationU16::not_probed(RECORD_SIZE_LIMIT_CLIENT_OFFER_UNSUPPORTED);
+    #[cfg(not(feature = "legacy-probes"))]
+    let record_size_limit = ObservationU16::not_probed(RECORD_SIZE_LIMIT_CLIENT_OFFER_UNSUPPORTED);
+    #[cfg(feature = "legacy-probes")]
+    let mut compress_certificate_algorithms = results.certificate_compression_algorithms.clone();
+    #[cfg(not(feature = "legacy-probes"))]
+    let compress_certificate_algorithms = results.certificate_compression_algorithms.clone();
     #[cfg(feature = "legacy-probes")]
     {
-        let Some(obs) = results.openssl_observations.as_ref() else {
-            return (None, Vec::new());
-        };
-        let Some(ee) = obs.tls13_extensions.as_ref() else {
-            return (None, Vec::new());
-        };
-        if !ee.parsed {
-            return (None, Vec::new());
+        if let Some(obs) = results.openssl_observations.as_ref() {
+            if let Some(ee) = obs.tls13_extensions.as_ref() {
+                if !ee.parsed {
+                    if let Some(error) = ee.error.as_deref() {
+                        record_size_limit = ObservationU16::error(error);
+                    }
+                } else {
+                    if let Some(value) = ee.record_size_limit {
+                        record_size_limit = ObservationU16::probe(value);
+                    }
+                    for alg in &ee.compress_certificate_algorithms {
+                        if !compress_certificate_algorithms.contains(alg) {
+                            compress_certificate_algorithms.push(alg.clone());
+                        }
+                    }
+                }
+            }
         }
-        (
-            ee.record_size_limit,
-            ee.compress_certificate_algorithms.clone(),
-        )
     }
-    #[cfg(not(feature = "legacy-probes"))]
-    {
-        let _ = results;
-        (None, Vec::new())
-    }
+    (record_size_limit, compress_certificate_algorithms)
 }
 
 fn build_certificates(results: &ScanResults) -> Certificates {
@@ -1273,11 +1369,162 @@ fn build_certificates(results: &ScanResults) -> Certificates {
             leaf_facts.revocation = Some(rev);
         }
     }
+    let alternates = build_alternate_certificates(results);
     Certificates {
+        observed_chains: build_observed_certificate_chains(results, &facts, &alternates),
         leaf: facts.first().cloned(),
         chain: facts.clone(),
         chain_length: facts.len(),
+        alternates,
     }
+}
+
+#[cfg(feature = "legacy-probes")]
+fn build_alternate_certificates(results: &ScanResults) -> Vec<CertificateAlternate> {
+    let primary_leaf = results
+        .certificate_chain
+        .first()
+        .map(|c| c.fingerprint_sha256.as_str());
+    let Some(obs) = results.openssl_observations.as_ref() else {
+        return Vec::new();
+    };
+    let Some(policy) = obs.sigalg_policy.as_ref() else {
+        return Vec::new();
+    };
+
+    let probes = [
+        (
+            "signature_algorithm_policy.sha256_plus_only",
+            &policy.sha256_plus_only,
+        ),
+        ("signature_algorithm_policy.ecdsa_only", &policy.ecdsa_only),
+        (
+            "signature_algorithm_policy.rsa_pss_only",
+            &policy.rsa_pss_only,
+        ),
+        (
+            "signature_algorithm_policy.rsa_pkcs1_only",
+            &policy.rsa_pkcs1_only,
+        ),
+        ("signature_algorithm_policy.eddsa_only", &policy.eddsa_only),
+    ];
+
+    let mut by_leaf: AlternateChainByLeaf = BTreeMap::new();
+    for (via, probe) in probes {
+        let Some(leaf) = probe.cert_chain.first() else {
+            continue;
+        };
+        if Some(leaf.fingerprint_sha256.as_str()) == primary_leaf {
+            continue;
+        }
+        let entry = by_leaf
+            .entry(leaf.fingerprint_sha256.clone())
+            .or_insert_with(|| {
+                (
+                    Vec::new(),
+                    probe.cert_chain.clone(),
+                    probe.chain_fingerprint_sha256.clone(),
+                )
+            });
+        if !entry.0.iter().any(|v| v == via) {
+            entry.0.push(via.to_string());
+        }
+        if entry.2.is_none() {
+            entry.2 = probe.chain_fingerprint_sha256.clone();
+        }
+    }
+
+    if let Some(cipher_probes) = obs.cipher_probes.as_ref() {
+        for r in &cipher_probes.results {
+            let Some(leaf) = r.cert_chain.first() else {
+                continue;
+            };
+            if Some(leaf.fingerprint_sha256.as_str()) == primary_leaf {
+                continue;
+            }
+            let via = format!("cipher_suite.{}", r.name);
+            let entry = by_leaf
+                .entry(leaf.fingerprint_sha256.clone())
+                .or_insert_with(|| {
+                    (
+                        Vec::new(),
+                        r.cert_chain.clone(),
+                        r.chain_fingerprint_sha256.clone(),
+                    )
+                });
+            if !entry.0.iter().any(|v| v == &via) {
+                entry.0.push(via);
+            }
+            if entry.2.is_none() {
+                entry.2 = r.chain_fingerprint_sha256.clone();
+            }
+        }
+    }
+
+    by_leaf
+        .into_values()
+        .map(|(observed_via, chain, chain_fingerprint_sha256)| {
+            let facts: Vec<CertificateFacts> = chain.iter().map(cert_to_facts).collect();
+            CertificateAlternate {
+                observed_via,
+                leaf_fingerprint_sha256: facts.first().map(|c| c.fingerprint_sha256.clone()),
+                chain_fingerprint_sha256,
+                leaf: facts.first().cloned(),
+                chain: facts.clone(),
+                chain_length: facts.len(),
+            }
+        })
+        .collect()
+}
+
+#[cfg(not(feature = "legacy-probes"))]
+fn build_alternate_certificates(_results: &ScanResults) -> Vec<CertificateAlternate> {
+    Vec::new()
+}
+
+fn build_observed_certificate_chains(
+    results: &ScanResults,
+    primary_chain: &[CertificateFacts],
+    alternates: &[CertificateAlternate],
+) -> Vec<CertificateChainObservation> {
+    let mut chains = Vec::new();
+    if !primary_chain.is_empty() {
+        chains.push(CertificateChainObservation {
+            chain_id: "primary".to_string(),
+            role: "primary".to_string(),
+            observed_via: vec!["characterization_handshake".to_string()],
+            leaf_fingerprint_sha256: primary_chain.first().map(|c| c.fingerprint_sha256.clone()),
+            chain_fingerprint_sha256: fingerprint_der_chain(&results.cert_chain_der),
+            chain: primary_chain.to_vec(),
+        });
+    }
+    chains.extend(alternates.iter().map(|alternate| {
+        let suffix = alternate
+            .leaf_fingerprint_sha256
+            .as_deref()
+            .map(|fp| fp.chars().take(12).collect::<String>())
+            .unwrap_or_else(|| "unknown".to_string());
+        CertificateChainObservation {
+            chain_id: format!("alternate-{suffix}"),
+            role: "alternate".to_string(),
+            observed_via: alternate.observed_via.clone(),
+            leaf_fingerprint_sha256: alternate.leaf_fingerprint_sha256.clone(),
+            chain_fingerprint_sha256: alternate.chain_fingerprint_sha256.clone(),
+            chain: alternate.chain.clone(),
+        }
+    }));
+    chains
+}
+
+fn fingerprint_der_chain(raw_chain: &[Vec<u8>]) -> Option<String> {
+    if raw_chain.is_empty() {
+        return None;
+    }
+    let mut hasher = Sha256::new();
+    for der in raw_chain {
+        hasher.update(der);
+    }
+    Some(hex::encode(hasher.finalize()))
 }
 
 /// Assemble the leaf's out-of-band revocation observations:
@@ -1341,18 +1588,31 @@ fn build_sni_behavior(results: &ScanResults) -> SniBehavior {
             let method = match r.outcome {
                 SniBehaviorOutcome::SameCert | SniBehaviorOutcome::DifferentCert => Method::Probe,
                 SniBehaviorOutcome::Rejected => Method::Probe,
+                SniBehaviorOutcome::NotProbed => Method::NotProbed,
                 SniBehaviorOutcome::Error => Method::Error,
             };
             SniBehavior {
                 omitted_probe: Some(r.outcome.as_str().to_string()),
                 method,
                 reason: r.reason.clone(),
+                probes: r
+                    .probes
+                    .iter()
+                    .map(|p| SniProbeEntry {
+                        variant: p.variant.as_str().to_string(),
+                        sni_sent: p.sni_sent.clone(),
+                        outcome: p.outcome.as_str().to_string(),
+                        leaf_fingerprint_sha256: p.leaf_fingerprint_sha256.clone(),
+                        reason: p.reason.clone(),
+                    })
+                    .collect(),
             }
         }
         None => SniBehavior {
             omitted_probe: None,
             method: Method::NotProbed,
             reason: Some("sni_probe_did_not_run".to_string()),
+            probes: Vec::new(),
         },
     }
 }
@@ -1494,10 +1754,10 @@ fn build_fallback_scsv_enforced(results: &ScanResults) -> ObservationBool {
     #[cfg(feature = "legacy-probes")]
     {
         let Some(obs) = results.openssl_observations.as_ref() else {
-            return ObservationBool::not_probed("feature_disabled");
+            return ObservationBool::not_probed(legacy_probe_unavailable_reason(results));
         };
         let Some(scsv) = obs.fallback_scsv.as_ref() else {
-            return ObservationBool::not_probed("feature_disabled");
+            return ObservationBool::not_probed(legacy_probe_unavailable_reason(results));
         };
         match scsv.enforced {
             Some(true) => ObservationBool {
@@ -1524,7 +1784,10 @@ fn build_fallback_scsv_enforced(results: &ScanResults) -> ObservationBool {
     }
 }
 
-fn build_dh_parameters(results: &ScanResults) -> Vec<DhParametersObservation> {
+fn build_dh_parameters(
+    results: &ScanResults,
+    ctx: &JsonEmitContext,
+) -> Vec<DhParametersObservation> {
     #[cfg(feature = "legacy-probes")]
     {
         let Some(obs) = results.openssl_observations.as_ref() else {
@@ -1544,7 +1807,7 @@ fn build_dh_parameters(results: &ScanResults) -> Vec<DhParametersObservation> {
                     classification: snap.classification.as_schema_str().to_string(),
                     generator: snap.generator,
                     prime_sha256: snap.prime_sha256_hex(),
-                    prime_raw_hex: None,
+                    prime_raw_hex: ctx.include_dh_raw.then(|| snap.prime_raw_hex()),
                     method: Method::Probe,
                     reason: None,
                 })
@@ -1554,6 +1817,7 @@ fn build_dh_parameters(results: &ScanResults) -> Vec<DhParametersObservation> {
     #[cfg(not(feature = "legacy-probes"))]
     {
         let _ = results;
+        let _ = ctx;
         Vec::new()
     }
 }
@@ -1577,6 +1841,9 @@ fn build_ske_sigs(results: &ScanResults) -> Vec<SkeSigObservation> {
                     signature_algorithm: sig.clone(),
                     method: Method::Probe,
                     reason: None,
+                    leaf_fingerprint_sha256: r.leaf_fingerprint_sha256.clone(),
+                    chain_fingerprint_sha256: r.chain_fingerprint_sha256.clone(),
+                    group: r.group.clone(),
                 })
             })
             .collect()
@@ -1593,10 +1860,10 @@ fn build_renegotiation_behavior(results: &ScanResults) -> RenegotiationBehavior 
     {
         use crate::scanner::openssl::renegotiation::RenegotiationVerdict;
         let Some(obs) = results.openssl_observations.as_ref() else {
-            return feature_disabled_reneg();
+            return legacy_unavailable_reneg(results);
         };
         let Some(ro) = obs.renegotiation.as_ref() else {
-            return feature_disabled_reneg();
+            return legacy_unavailable_reneg(results);
         };
         let (verdict, method) = match &ro.client_initiated_verdict {
             RenegotiationVerdict::ClientInitiatedAccepted => {
@@ -1610,10 +1877,26 @@ fn build_renegotiation_behavior(results: &ScanResults) -> RenegotiationBehavior 
             }
             RenegotiationVerdict::Error(_) => (Some("error".to_string()), Method::Error),
         };
+        let server_initiated_observed = ro.server_initiated_observed.clone();
+        let server_initiated_reason = ro.server_initiated_probe_reason.clone();
         RenegotiationBehavior {
+            client_initiated: ClientInitiatedRenegotiation {
+                accepted: client_initiated_renegotiation_accepted(
+                    &ro.client_initiated_verdict,
+                    ro.reason.as_deref(),
+                ),
+            },
+            server_initiated: ServerInitiatedRenegotiation {
+                observed: observation_with_reason(
+                    server_initiated_observed.clone(),
+                    server_initiated_reason.as_deref(),
+                ),
+            },
             client_initiated_verdict: verdict,
             method,
             reason: ro.reason.clone(),
+            server_initiated_observed,
+            server_initiated_probe_reason: server_initiated_reason,
         }
     }
     #[cfg(not(feature = "legacy-probes"))]
@@ -1623,12 +1906,66 @@ fn build_renegotiation_behavior(results: &ScanResults) -> RenegotiationBehavior 
     }
 }
 
+#[cfg(not(feature = "legacy-probes"))]
 fn feature_disabled_reneg() -> RenegotiationBehavior {
+    not_probed_reneg("feature_disabled")
+}
+
+#[cfg(feature = "legacy-probes")]
+fn legacy_unavailable_reneg(results: &ScanResults) -> RenegotiationBehavior {
+    not_probed_reneg(legacy_probe_unavailable_reason(results))
+}
+
+fn not_probed_reneg(reason: &str) -> RenegotiationBehavior {
     RenegotiationBehavior {
+        client_initiated: ClientInitiatedRenegotiation {
+            accepted: ObservationBool::not_probed(reason),
+        },
+        server_initiated: ServerInitiatedRenegotiation {
+            observed: ObservationBool::not_probed(reason),
+        },
         client_initiated_verdict: None,
         method: Method::NotProbed,
-        reason: Some("feature_disabled".to_string()),
+        reason: Some(reason.to_string()),
+        server_initiated_observed: ObservationBool::not_probed(reason),
+        server_initiated_probe_reason: Some(reason.to_string()),
     }
+}
+
+#[cfg(feature = "legacy-probes")]
+fn client_initiated_renegotiation_accepted(
+    verdict: &crate::scanner::openssl::renegotiation::RenegotiationVerdict,
+    reason: Option<&str>,
+) -> ObservationBool {
+    use crate::scanner::openssl::renegotiation::RenegotiationVerdict;
+
+    match verdict {
+        RenegotiationVerdict::ClientInitiatedAccepted => ObservationBool {
+            value: Some(true),
+            method: Method::Probe,
+            reason: reason.map(str::to_string),
+        },
+        RenegotiationVerdict::ClientInitiatedRejected => ObservationBool {
+            value: Some(false),
+            method: Method::Probe,
+            reason: reason.map(str::to_string),
+        },
+        RenegotiationVerdict::NotAttempted => {
+            ObservationBool::not_applicable(reason.unwrap_or("client_initiated_not_attempted"))
+        }
+        RenegotiationVerdict::Error(err) => ObservationBool::error(reason.unwrap_or(err)),
+    }
+}
+
+#[cfg(feature = "legacy-probes")]
+fn observation_with_reason(
+    mut observation: ObservationBool,
+    reason: Option<&str>,
+) -> ObservationBool {
+    if observation.reason.is_none() {
+        observation.reason = reason.map(str::to_string);
+    }
+    observation
 }
 
 fn build_session_resumption(results: &ScanResults) -> crate::model::scan_result::SessionResumption {
@@ -1640,10 +1977,10 @@ fn build_session_resumption(results: &ScanResults) -> crate::model::scan_result:
             if let Some(sr) = obs.session_resumption.as_ref() {
                 sr.clone()
             } else {
-                feature_disabled_session_resumption()
+                legacy_unavailable_session_resumption(results)
             }
         } else {
-            feature_disabled_session_resumption()
+            legacy_unavailable_session_resumption(results)
         }
     };
     #[cfg(not(feature = "legacy-probes"))]
@@ -1685,24 +2022,36 @@ fn build_session_resumption(results: &ScanResults) -> crate::model::scan_result:
     sr
 }
 
+#[cfg(not(feature = "legacy-probes"))]
 fn feature_disabled_session_resumption() -> crate::model::scan_result::SessionResumption {
+    not_probed_session_resumption("feature_disabled")
+}
+
+#[cfg(feature = "legacy-probes")]
+fn legacy_unavailable_session_resumption(
+    results: &ScanResults,
+) -> crate::model::scan_result::SessionResumption {
+    not_probed_session_resumption(legacy_probe_unavailable_reason(results))
+}
+
+fn not_probed_session_resumption(reason: &str) -> crate::model::scan_result::SessionResumption {
     use crate::model::scan_result::{
         ObservationBool, SessionResumption, Tls12Resumption, Tls13Resumption,
     };
     SessionResumption {
         tls1_2: Tls12Resumption {
-            session_ticket_issued: ObservationBool::not_probed("feature_disabled"),
+            session_ticket_issued: ObservationBool::not_probed(reason),
             ticket_lifetime_hint_secs: None,
-            session_id_issued: ObservationBool::not_probed("feature_disabled"),
-            ticket_rotated_across_connections: ObservationBool::not_probed("feature_disabled"),
-            session_ticket_resumption_accepted: ObservationBool::not_probed("feature_disabled"),
-            session_id_resumption_accepted: ObservationBool::not_probed("feature_disabled"),
+            session_id_issued: ObservationBool::not_probed(reason),
+            ticket_rotated_across_connections: ObservationBool::not_probed(reason),
+            session_ticket_resumption_accepted: ObservationBool::not_probed(reason),
+            session_id_resumption_accepted: ObservationBool::not_probed(reason),
         },
         tls1_3: Tls13Resumption {
             new_session_ticket_count: None,
             ticket_lifetime_secs: Vec::new(),
-            psk_resumption_accepted: ObservationBool::not_probed("feature_disabled"),
-            early_data_accepted: ObservationBool::not_probed("feature_disabled"),
+            psk_resumption_accepted: ObservationBool::not_probed(reason),
+            early_data_accepted: ObservationBool::not_probed(reason),
         },
     }
 }
@@ -1722,17 +2071,14 @@ fn build_sigalg_policy(
             }
         }
     }
-    let _ = results;
-    // feature_disabled fallback — stable shape with every slot
+    let reason = legacy_probe_unavailable_reason(results);
+    // unavailable fallback — stable shape with every slot
     // resolving to the same not_probed reason.
     let slot = || ConstrainedProbeResult {
         outcome: SigalgOutcome::NotProbed,
-        selected_sigalg: None,
-        alert: None,
         method: Method::NotProbed,
-        reason: Some("feature_disabled".to_string()),
-        leaf_fingerprint_sha256: None,
-        leaf_subject_dn: None,
+        reason: Some(reason.to_string()),
+        ..Default::default()
     };
     SignatureAlgorithmPolicyProbe {
         sha256_plus_only: slot(),
@@ -1741,6 +2087,24 @@ fn build_sigalg_policy(
         rsa_pkcs1_only: slot(),
         eddsa_only: slot(),
     }
+}
+
+#[cfg(feature = "legacy-probes")]
+fn legacy_probe_unavailable_reason(results: &ScanResults) -> &'static str {
+    if results
+        .scan_errors
+        .iter()
+        .any(|e| e.category == "handshake_timeout" && e.context.starts_with("total_timeout "))
+    {
+        "total_timeout_exceeded"
+    } else {
+        "feature_disabled"
+    }
+}
+
+#[cfg(not(feature = "legacy-probes"))]
+fn legacy_probe_unavailable_reason(_results: &ScanResults) -> &'static str {
+    "feature_disabled"
 }
 
 fn build_client_auth_request(results: &ScanResults) -> Option<ClientAuthRequestEntry> {
@@ -1756,6 +2120,7 @@ fn build_client_auth_request(results: &ScanResults) -> Option<ClientAuthRequestE
                 .ca_distinguished_names
                 .iter()
                 .map(|d| ClientAuthCaDn {
+                    raw_der_hex: d.raw_der_b64.clone(),
                     raw_der_b64: d.raw_der_b64.clone(),
                     common_name: d.common_name.clone(),
                     organization: d.organization.clone(),
@@ -1766,6 +2131,7 @@ fn build_client_auth_request(results: &ScanResults) -> Option<ClientAuthRequestE
                 .iter()
                 .map(|f| ClientAuthOidFilter {
                     oid: f.oid.clone(),
+                    values_hex: f.values_b64.clone(),
                     values_b64: f.values_b64.clone(),
                 })
                 .collect(),

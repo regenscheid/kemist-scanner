@@ -30,6 +30,7 @@ use openssl::ssl::{HandshakeError, Ssl, SslContext, SslMethod, SslRef, SslVerify
 use sha2::{Digest, Sha256};
 use tracing::{debug, info};
 
+use crate::model::cert::CertificateInfo;
 use crate::model::scan_result::{
     ConstrainedProbeResult, Method, SigalgOutcome, SignatureAlgorithmPolicyProbe,
 };
@@ -177,7 +178,10 @@ async fn run_one(
             alert: None,
             method: Method::Probe,
             reason: None,
-            ..Default::default()
+            leaf_fingerprint_sha256: hr.cert_chain.first().map(|c| c.fingerprint_sha256.clone()),
+            chain_fingerprint_sha256: None,
+            leaf_subject_dn: hr.cert_chain.first().map(|c| c.subject.clone()),
+            cert_chain: hr.cert_chain,
         },
         HandshakeOutcome::NotSupported => {
             let cat = hr.alert.unwrap_or_default();
@@ -270,7 +274,8 @@ pub(crate) fn probe_blocking(
     match ssl.connect(tcp) {
         Ok(stream) => {
             let selected = ske_sig::snapshot(stream.ssl());
-            let (leaf_fingerprint_sha256, leaf_subject_dn) = leaf_observation(stream.ssl());
+            let (leaf_fingerprint_sha256, chain_fingerprint_sha256, leaf_subject_dn, cert_chain) =
+                cert_chain_observation(stream.ssl());
             ConstrainedProbeResult {
                 outcome: SigalgOutcome::HandshakeComplete,
                 selected_sigalg: selected,
@@ -278,7 +283,9 @@ pub(crate) fn probe_blocking(
                 method: Method::Probe,
                 reason: None,
                 leaf_fingerprint_sha256,
+                chain_fingerprint_sha256,
                 leaf_subject_dn,
+                cert_chain,
             }
         }
         Err(HandshakeError::Failure(mid)) => {
@@ -327,24 +334,65 @@ fn classify_failure(category: &str) -> (SigalgOutcome, Option<String>) {
     }
 }
 
-/// Capture the leaf fingerprint (SHA-256 of DER) and subject DN from
-/// a completed handshake. Returns `(None, None)` when the peer cert
-/// can't be read or its DER can't be extracted — the constrained
-/// probe still completed, so these are observation gaps, not errors.
+/// Capture the peer certificate chain from a completed handshake.
+/// Returns empty / `None` values when the peer cert can't be read or
+/// parsed — the constrained probe still completed, so these are
+/// observation gaps, not errors.
 ///
 /// Formatting matches `CertificateFacts.subject_dn` (x509-parser
 /// `Display`) so downstream correlation against the main cert chain
 /// is a byte-equality check.
-fn leaf_observation(ssl: &SslRef) -> (Option<String>, Option<String>) {
-    let Some(cert) = ssl.peer_certificate() else {
-        return (None, None);
+fn cert_chain_observation(
+    ssl: &SslRef,
+) -> (
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Vec<CertificateInfo>,
+) {
+    let mut raw_chain = Vec::new();
+    if let Some(cert) = ssl.peer_certificate() {
+        if let Ok(der) = cert.to_der() {
+            raw_chain.push(der);
+        }
+    }
+    if let Some(chain) = ssl.peer_cert_chain() {
+        for cert in chain {
+            if let Ok(der) = cert.to_der() {
+                if raw_chain.first() != Some(&der) {
+                    raw_chain.push(der);
+                }
+            }
+        }
+    }
+
+    let cert_chain: Vec<CertificateInfo> = raw_chain
+        .iter()
+        .enumerate()
+        .filter_map(|(i, der)| {
+            CertificateInfo::from_der(der).ok().map(|mut c| {
+                c.wire_position = i as u32;
+                c
+            })
+        })
+        .collect();
+
+    if let Some(leaf) = cert_chain.first() {
+        return (
+            Some(leaf.fingerprint_sha256.clone()),
+            (!raw_chain.is_empty()).then(|| fingerprint_chain(&raw_chain)),
+            Some(leaf.subject.clone()),
+            cert_chain,
+        );
+    }
+
+    let Some(der) = raw_chain.first() else {
+        return (None, None, None, Vec::new());
     };
-    let Ok(der) = cert.to_der() else {
-        return (None, None);
-    };
-    let fingerprint = fingerprint_der(&der);
-    let subject_dn = parse_subject_dn(&der);
-    (Some(fingerprint), subject_dn)
+    let fingerprint = fingerprint_der(der);
+    let chain_fingerprint = Some(fingerprint_chain(&raw_chain));
+    let subject_dn = parse_subject_dn(der);
+    (Some(fingerprint), chain_fingerprint, subject_dn, Vec::new())
 }
 
 /// Lowercase hex SHA-256 of a DER blob. Matches the fingerprint
@@ -352,6 +400,14 @@ fn leaf_observation(ssl: &SslRef) -> (Option<String>, Option<String>) {
 fn fingerprint_der(der: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(der);
+    hex::encode(hasher.finalize())
+}
+
+fn fingerprint_chain(raw_chain: &[Vec<u8>]) -> String {
+    let mut hasher = Sha256::new();
+    for der in raw_chain {
+        hasher.update(der);
+    }
     hex::encode(hasher.finalize())
 }
 

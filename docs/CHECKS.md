@@ -83,18 +83,19 @@ run against a vendored OpenSSL 3.5 LTS (`openssl-src = "=300.5.5"`).
 |---|---|---|---|
 | Legacy cipher suite probe | Per-suite handshake with single-suite cipher list + SECLEVEL=0 + version pinned. Covers SSL 3.0 (classic RSA-kex suites incl. RC4/3DES/CBC/export/NULL — for POODLE-era CBC visibility) through TLS 1.2. | `tls.cipher_suites.{ssl3, tls1_0, tls1_1, tls1_2}[]` entries with `provider: "openssl"` | [openssl/ciphers.rs](../src/scanner/backends/openssl/ciphers.rs) |
 | DH parameter capture | `SSL_get_peer_tmp_key` after every successful DHE handshake; SHA-256 of prime classified against RFC 7919 FFDHE (`ffdhe{2048,3072,4096,6144,8192}`) and RFC 2409/3526 MODP Oakley groups (`modp{1024,1536,2048,3072}`). Unknown primes → `custom` with `prime_bits` preserved | `tls.dh_parameters[]` | [openssl/dh_params.rs](../src/scanner/backends/openssl/dh_params.rs) |
-| SKE / CertificateVerify signature | `SSL_ctrl(SSL_CTRL_GET_PEER_SIGNATURE_NAME, …)` post-handshake | `tls.server_key_exchange_signatures[]` | [openssl/ske_sig.rs](../src/scanner/backends/openssl/ske_sig.rs) |
+| SKE / CertificateVerify signature | `SSL_ctrl(SSL_CTRL_GET_PEER_SIGNATURE_NAME, …)` post-handshake, plus per-handshake leaf/chain fingerprints and tmp-key group where OpenSSL exposes them | `tls.server_key_exchange_signatures[]` | [openssl/ske_sig.rs](../src/scanner/backends/openssl/ske_sig.rs) |
 | Named-group probe (FFDHE + aws-lc-rs gaps + non-NIST curves) | `set_groups_list(<name>)` × `{TLS 1.2 + DHE cipher list (FFDHE only), TLS 1.3}`; FFDHE rows cross-check observed prime against advertised codepoint. Also covers TLS 1.3 groups aws-lc-rs does not ship: `X448`, `secp521r1`, `MLKEM{512,1024}`, `secp384r1MLKEM1024`, `brainpoolP{256,384,512}r1`. Deprecated/non-NIST curves that OpenSSL 3.5 accepts by name but refuses at handshake-build time (`secp192r1`, `secp224r1`, `secp256k1`) surface as `{method: not_probed, reason: "openssl_3x_group_not_available:<name>"}` — a backend-capability signal, not a server observation. | `tls.groups.{tls1_2, tls1_3}.*` entries with `provider: "openssl"` | [openssl/kx_groups.rs](../src/scanner/backends/openssl/kx_groups.rs) |
 | TLS_FALLBACK_SCSV enforcement | Characterize server max → probe one step below with `SslMode::SEND_FALLBACK_SCSV`; expect `inappropriate_fallback` alert | `tls.downgrade_signaling.fallback_scsv_enforced` | [openssl/fallback_scsv.rs](../src/scanner/backends/openssl/fallback_scsv.rs) |
-| Client-initiated renegotiation | TLS 1.2 handshake → `SSL_renegotiate` → `SSL_do_handshake`; observe alert / close / success | `tls.renegotiation_behavior` | [openssl/renegotiation.rs](../src/scanner/backends/openssl/renegotiation.rs) |
+| Renegotiation | TLS 1.2 client-initiated request via `SSL_renegotiate` / `SSL_do_handshake`; separate passive post-handshake read after a minimal HTTP request to observe server-initiated renegotiation without application-specific triggers | `tls.renegotiation_behavior` | [openssl/renegotiation.rs](../src/scanner/backends/openssl/renegotiation.rs) |
 | CertificateRequest capture | `SSL_CTX_set_msg_callback` (via `SSL_CTX_callback_ctrl`) intercepting msg_type 13; parse TLS 1.2 and TLS 1.3 shapes | `tls.client_auth_request` | [openssl/client_auth.rs](../src/scanner/backends/openssl/client_auth.rs) |
-| TLS 1.3 EncryptedExtensions capture | `SSL_CTX_set_msg_callback` intercepts msg_type 8; parser extracts `record_size_limit` (RFC 8449) and `compress_certificate` (RFC 8879). See caveat below. | `tls.extensions.record_size_limit`, `tls.extensions.compress_certificate_algorithms` | [openssl/tls13_extensions.rs](../src/scanner/backends/openssl/tls13_extensions.rs) |
+| TLS 1.3 EncryptedExtensions capture | `SSL_CTX_set_msg_callback` intercepts msg_type 8; parser extracts `record_size_limit` (RFC 8449) if a server sends it. See caveat below. | `tls.extensions.record_size_limit` | [openssl/tls13_extensions.rs](../src/scanner/backends/openssl/tls13_extensions.rs) |
+| TLS 1.3 certificate compression | rustls offers RFC 8879 Brotli decompression and records when a server sends `CompressedCertificate`. | `tls.extensions.compress_certificate_algorithms` | [rustls/cert_compression.rs](../src/scanner/backends/rustls/cert_compression.rs) |
 | Delegated credentials — TLS 1.3 | Same msg-callback intercepts msg_type 11 (Certificate); parser walks the leaf CertificateEntry extensions (RFC 8446 §4.4.2) for ext 0x0022; parses RFC 9345 §4.1 DelegatedCredential header (`valid_time`, `expected_cert_verify_algorithm`). No signature validation, no wall-clock comparison | `tls.extensions.delegated_credentials.{valid_time_seconds, expected_cert_verify_algorithm}` with `delivery_path = "tls1_3_certificate_entry"` | [openssl/tls13_extensions.rs](../src/scanner/backends/openssl/tls13_extensions.rs) |
 | Session resumption — TLS 1.2 ticket + rotation | Two sequential TLS 1.2 handshakes with session cache mode `CLIENT`; compare `SSL_SESSION_get_id` across handshakes for rotation proxy | `tls.session_resumption.tls1_2.*` | [openssl/tickets.rs](../src/scanner/backends/openssl/tickets.rs) |
 | Ephemeral DH/ECDH key reuse (Raccoon signal) | Read earlier cipher_probes for a supported DHE / ECDHE suite; pin `DHE-RSA-AES128-GCM-SHA256` / `ECDHE-RSA-AES128-GCM-SHA256`; run two fresh TLS 1.2 handshakes per family with session caching disabled; pull the server's ephemeral public value via `SSL_get_peer_tmp_key` (DH `Y` via openssl-sys `DH_get0_key` + `BN_bn2bin`; ECDH point via `EcPoint::to_bytes` uncompressed); compare SHA-256 across the pair. No side-channel attempt | `tls.behavioral_probes.ephemeral_key_reuse.*` | [openssl/ephemeral_reuse.rs](../src/scanner/backends/openssl/ephemeral_reuse.rs) |
 | ROBOT / Bleichenbacher differential probe | Gated on `TLS_RSA_*` suites observed supported by the cipher probe. For each of five malformed PKCS#1 v1.5 `ClientKeyExchange` variants, runs a raw-socket TLS 1.2 handshake pinned to `TLS_RSA_WITH_AES_128_CBC_SHA` through `ServerHelloDone`, extracts the leaf RSA pubkey, `RSA_public_encrypt(Padding::NONE)`s the crafted plaintext, then sends `CKE + CCS + Finished` with the Finished crypto-correct under the variant's *intended* PMS — TLS 1.2 PRF (P_SHA256) master-secret derivation, key expansion, SHA-256 transcript hash of ClientHello+ServerHello+Certificate+ServerHelloDone+CKE, HMAC-SHA1 MAC-then-encrypt with AES-128-CBC + explicit IV + TLS CBC padding. Classifies response: alert category / TCP RST / timeout / graceful close / unexpected plaintext, with `elapsed_ms`. Emits the five-entry per-variant table; no `vulnerable` boolean | `tls.behavioral_probes.bleichenbacher_oracle_probe.*` | [raw/robot.rs](../src/scanner/raw/robot.rs) |
 | Signature-algorithm policy probe | Five constrained handshakes with `SSL_CTX_set1_sigalgs_list` pinned to each constraint family (`sha256_plus_only`, `ecdsa_only`, `rsa_pss_only`, `rsa_pkcs1_only`, `eddsa_only`); capture outcome + selected sigalg | `tls.signature_algorithm_policy_probe.*` | [openssl/sigalg_policy.rs](../src/scanner/backends/openssl/sigalg_policy.rs) |
-| Leaf fingerprint per sigalg probe | `SSL_get_peer_certificate` after each completed constrained handshake; SHA-256 of leaf DER (lowercase hex) + subject DN via x509-parser (matches `certificates.leaf.subject_dn` formatting). Two distinct fingerprints across the probe set → dual-cert deployment signal; scanner records, downstream compares | `tls.signature_algorithm_policy_probe.*.leaf_fingerprint_sha256`, `tls.signature_algorithm_policy_probe.*.leaf_subject_dn` | [openssl/sigalg_policy.rs](../src/scanner/backends/openssl/sigalg_policy.rs) |
+| Leaf fingerprint / alternate chain per sigalg probe | `SSL_get_peer_certificate` anchors the leaf and `SSL_get_peer_cert_chain` captures the delivered chain after each completed constrained handshake; SHA-256 of leaf DER (lowercase hex) + subject DN via x509-parser (matches `certificates.leaf.subject_dn` formatting). Chains whose leaf differs from the primary characterization cert are deduplicated into `certificates.alternates[]` with `observed_via` probe paths. | `tls.signature_algorithm_policy_probe.*.leaf_fingerprint_sha256`, `tls.signature_algorithm_policy_probe.*.leaf_subject_dn`, `certificates.alternates[]` | [openssl/sigalg_policy.rs](../src/scanner/backends/openssl/sigalg_policy.rs) |
 
 Error classification for every OpenSSL probe flows through
 [openssl/alerts.rs](../src/scanner/backends/openssl/alerts.rs) — same
@@ -105,13 +106,14 @@ can key on alert categories without knowing which backend produced them.
 probe that completes a DHE handshake but returns a prime that doesn't
 match the advertised codepoint surfaces as
 `{supported: false, reason: "server_does_not_honor_supported_groups", returned_group, returned_prime_bits}`.
-When *any* FFDHE TLS 1.2 row reports a direct mismatch the verdict
-propagates to every FFDHE TLS 1.2 row — including ones whose returned
-prime "matched" the codepoint, since that match is also consistent
-with the server serving a static prime regardless of `supported_groups`
-(the common pattern: an RFC 7919 prime configured as the static
-`ssl_dhparam`). Distinct from a plain `supported: false` — the server
-ignored `supported_groups` entirely.
+When *any* FFDHE TLS 1.2 row reports a direct mismatch, the reason and
+returned-prime evidence propagate to every FFDHE TLS 1.2 row. Rows
+whose returned prime matched the offered codepoint remain
+`supported: true`, since that particular group completed, but the note
+warns that the host appears to serve a static prime regardless of
+`supported_groups` (the common pattern: an RFC 7919 prime configured
+as the static `ssl_dhparam`). Distinct from a plain
+`supported: false` — the server ignored `supported_groups` entirely.
 
 **CertificateRequest probe discipline.** The scanner never provisions
 a real client certificate. OpenSSL's default behavior with no cert
@@ -127,16 +129,16 @@ feature matrices.
 moves onto this subsystem when `legacy-probes` is on; see the top of
 this document for the backend-selection table.
 
-**TLS 1.3 EncryptedExtensions — known limitation.** Both
-`record_size_limit` (RFC 8449) and `compress_certificate` (RFC 8879)
-require the server to echo only in response to a matching client
-offer. OpenSSL 3.5 reserves ext codes 27 and 28 for its internal
-handlers so `SSL_CTX_add_custom_ext` refuses to register, and the
-native high-level setters (`SSL_CTX_set1_cert_comp_preference`
-etc.) aren't exposed in openssl-sys 0.9.109. Result: on real-world
-targets both fields are typically absent. The msg_callback
-infrastructure + parser are in place; a future workstream fills the
-client-offer gap.
+**TLS 1.3 EncryptedExtensions — known limitation.**
+`record_size_limit` (RFC 8449) requires the server to echo only in
+response to a matching client offer. The pinned stacks do not expose
+an RFC 8449 client-offer path: OpenSSL 3.5 has no visible
+`record_size_limit` implementation/API, and rustls 0.23 exposes only
+local `max_fragment_size`, not the RFC 8449 extension. Result:
+`tls.extensions.record_size_limit` is normally emitted as
+`{value: null, method: "not_probed", reason: "client_offer_unsupported_in_current_build"}`
+on real-world targets. RFC 8879 certificate compression is observed
+separately through the rustls probe above.
 
 **Session resumption — rotation proxy semantics.** openssl-sys
 0.9.109 doesn't expose `SSL_SESSION_get0_ticket`, so we diff the
@@ -316,6 +318,7 @@ byte-level TLS 1.2 probe.
 | `tls.extensions.ocsp_stapling.content` | Raw bytes parsed via [model/ocsp_response.rs](../src/model/ocsp_response.rs) (RFC 6960 BasicOCSPResponse). `cert_status`, timestamps, responder ID, serial, hash-algorithm OID |
 | `tls.extensions.ocsp_stapling.delivery_path` | Derived from negotiated version: `tls1_2` for CertificateStatus flight, `tls1_3` for EncryptedExtensions status_request response |
 | `tls.extensions.ocsp_stapling.raw_hex` | Gated behind `--include-ocsp-raw` CLI flag |
+| `tls.dh_parameters[].prime_raw_hex` | Gated behind `--include-dh-raw` CLI flag |
 | `tls.extensions.alpn_offered` | What kemist sent in ClientHello |
 
 ### From byte-level ServerHello probe ([scanner/hello.rs](../src/scanner/hello.rs))
@@ -331,7 +334,7 @@ ServerHello bytes.
 | `tls.extensions.encrypt_then_mac` | 22 (RFC 7366) |
 | `tls.extensions.heartbeat_present` | 15 (RFC 6520) |
 | `tls.extensions.secure_renegotiation` | 0xff01 (RFC 5746 renegotiation_info) |
-| `tls.behavioral_probes.compression_offered` | compression_method byte in ServerHello |
+| `tls.behavioral_probes.compression_selected` / `crime_vulnerable` | compression_method byte in ServerHello |
 | `tls.extensions.sct.delivery_paths` (tls_extension) | 18 (signed_certificate_timestamp) |
 | `tls.extensions.truncated_hmac` | 4 (RFC 6066 §7 — deprecated) |
 | `tls.extensions.npn` | 13172 (Google pre-ALPN, deprecated) |

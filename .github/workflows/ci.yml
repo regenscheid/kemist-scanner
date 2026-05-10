@@ -226,7 +226,7 @@ jobs:
       run: |
         cd docker
         chmod +x test-heartbleed.sh
-        ./test-heartbleed.sh || echo "Heartbleed test completed"
+        ./test-heartbleed.sh
 
     - name: Cleanup
       if: always()
