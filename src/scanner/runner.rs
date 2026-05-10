@@ -11,8 +11,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
-use futures::stream::{self, StreamExt};
+use futures::stream::{self, FuturesUnordered, StreamExt};
 use hickory_resolver::TokioResolver;
+use tokio::net::TcpStream;
 use tokio::sync::Semaphore;
 use tracing::{info, warn};
 
@@ -137,16 +138,32 @@ impl Scanner {
         // Resolve DNS up front. On failure, emit an otherwise-empty record
         // with a `dns_resolution_failed` error so consumers see which target
         // couldn't be probed.
-        let (resolved_ip, socket_addr) = match self.resolve(&target).await {
-            Ok(v) => (Some(v.0.to_string()), Some(v.1)),
+        let candidate_addrs = match self.resolve(&target).await {
+            Ok(v) => v,
             Err(e) => {
                 let completed_at = Utc::now();
                 return self.build_dns_failure_record(&target, started_at, completed_at, e);
             }
         };
+        let first_resolved_ip = candidate_addrs.first().map(|addr| addr.ip());
+
+        let socket_addr = match self.pick_reachable_addr(&candidate_addrs).await {
+            Ok(addr) => addr,
+            Err(errors) => {
+                let completed_at = Utc::now();
+                return self.build_preflight_failure_record(
+                    &target,
+                    first_resolved_ip,
+                    started_at,
+                    completed_at,
+                    errors,
+                );
+            }
+        };
+        let resolved_ip = Some(socket_addr.ip().to_string());
 
         // Internal scan with retry loop.
-        let probe_results = self.run_with_retries(&target, socket_addr.unwrap()).await;
+        let probe_results = self.run_with_retries(&target, socket_addr).await;
         let completed_at = Utc::now();
 
         let ctx = JsonEmitContext {
@@ -186,10 +203,10 @@ impl Scanner {
             .await
     }
 
-    async fn resolve(&self, target: &Target) -> Result<(IpAddr, SocketAddr), ScannerError> {
+    async fn resolve(&self, target: &Target) -> Result<Vec<SocketAddr>, ScannerError> {
         // Parse as IP literal first — common enough to shortcut DNS.
         if let Ok(ip) = target.host.parse::<IpAddr>() {
-            return Ok((ip, SocketAddr::new(ip, target.port)));
+            return Ok(vec![SocketAddr::new(ip, target.port)]);
         }
 
         let resolver = TokioResolver::builder_tokio()
@@ -205,21 +222,81 @@ impl Scanner {
 
         let ips: Vec<IpAddr> = response.iter().collect();
 
-        let ip = if self.config.ipv4_only {
-            ips.into_iter().find(|ip| ip.is_ipv4()).ok_or_else(|| {
-                ScannerError::dns_resolution_failed(format!("no IPv4 for {}", target.host))
-            })?
+        let ips: Vec<IpAddr> = if self.config.ipv4_only {
+            let filtered: Vec<IpAddr> = ips.into_iter().filter(|ip| ip.is_ipv4()).collect();
+            if filtered.is_empty() {
+                return Err(ScannerError::dns_resolution_failed(format!(
+                    "no IPv4 for {}",
+                    target.host
+                )));
+            }
+            filtered
         } else if self.config.ipv6_only {
-            ips.into_iter().find(|ip| ip.is_ipv6()).ok_or_else(|| {
-                ScannerError::dns_resolution_failed(format!("no IPv6 for {}", target.host))
-            })?
+            let filtered: Vec<IpAddr> = ips.into_iter().filter(|ip| ip.is_ipv6()).collect();
+            if filtered.is_empty() {
+                return Err(ScannerError::dns_resolution_failed(format!(
+                    "no IPv6 for {}",
+                    target.host
+                )));
+            }
+            filtered
         } else {
-            ips.into_iter().next().ok_or_else(|| {
-                ScannerError::dns_resolution_failed(format!("no A/AAAA for {}", target.host))
-            })?
+            if ips.is_empty() {
+                return Err(ScannerError::dns_resolution_failed(format!(
+                    "no A/AAAA for {}",
+                    target.host
+                )));
+            }
+            ips
         };
 
-        Ok((ip, SocketAddr::new(ip, target.port)))
+        Ok(ips
+            .into_iter()
+            .map(|ip| SocketAddr::new(ip, target.port))
+            .collect())
+    }
+
+    async fn pick_reachable_addr(
+        &self,
+        addrs: &[SocketAddr],
+    ) -> Result<SocketAddr, Vec<ScannerError>> {
+        let mut attempts = FuturesUnordered::new();
+
+        for (index, addr) in addrs.iter().copied().enumerate() {
+            let connect_timeout = self.config.connect_timeout;
+            attempts.push(async move {
+                let delay = Duration::from_millis(250 * index as u64);
+                if !delay.is_zero() {
+                    tokio::time::sleep(delay).await;
+                }
+
+                match tokio::time::timeout(connect_timeout, TcpStream::connect(addr)).await {
+                    Ok(Ok(_stream)) => Ok(addr),
+                    Ok(Err(e)) => Err(ScannerError::from_io(
+                        &format!("tcp preflight connect {addr}"),
+                        e,
+                    )),
+                    Err(_) => Err(ScannerError::connection_timeout(format!(
+                        "tcp preflight connect {addr}: timeout after {connect_timeout:?}"
+                    ))),
+                }
+            });
+        }
+
+        let mut errors = Vec::new();
+        while let Some(result) = attempts.next().await {
+            match result {
+                Ok(addr) => return Ok(addr),
+                Err(error) => errors.push(error),
+            }
+        }
+
+        if errors.is_empty() {
+            errors.push(ScannerError::dns_resolution_failed(
+                "no A/AAAA candidates after resolution",
+            ));
+        }
+        Err(errors)
     }
 
     async fn run_with_retries(
@@ -328,6 +405,35 @@ impl Scanner {
         };
         build_scan_result(&probe_results, &ctx)
     }
+
+    fn build_preflight_failure_record(
+        &self,
+        target: &Target,
+        resolved_ip: Option<IpAddr>,
+        started_at: chrono::DateTime<Utc>,
+        completed_at: chrono::DateTime<Utc>,
+        errors: Vec<ScannerError>,
+    ) -> ScanResult {
+        let addr = resolved_ip
+            .map(|ip| SocketAddr::new(ip, target.port))
+            .unwrap_or_else(|| SocketAddr::from(([0, 0, 0, 0], target.port)));
+        let mut probe_results = empty_scan_results(target, addr);
+        probe_results.scan_errors.extend(errors);
+
+        let ctx = JsonEmitContext {
+            host: target.host.clone(),
+            port: target.port,
+            sni_sent: target.sni().to_string(),
+            resolved_ip: resolved_ip.map(|ip| ip.to_string()),
+            started_at,
+            completed_at,
+            enabled_features: self.config.enabled_features.clone(),
+            config_paths: self.config.config_paths.clone(),
+            include_ocsp_raw: self.config.include_ocsp_raw,
+            include_dh_raw: self.config.include_dh_raw,
+        };
+        build_scan_result(&probe_results, &ctx)
+    }
 }
 
 fn empty_scan_results(target: &Target, addr: SocketAddr) -> crate::scanner::ScanResults {
@@ -364,5 +470,79 @@ fn empty_scan_results(target: &Target, addr: SocketAddr) -> crate::scanner::Scan
         #[cfg(feature = "legacy-probes")]
         openssl_observations: None,
         scan_errors: vec![],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::time::Duration;
+
+    use tokio::net::TcpListener;
+
+    use super::{Scanner, ScannerConfig};
+
+    fn fast_scanner() -> Scanner {
+        Scanner::new(ScannerConfig {
+            connect_timeout: Duration::from_millis(250),
+            handshake_timeout: Duration::from_millis(250),
+            total_timeout: Duration::from_secs(2),
+            retries: 0,
+            ..ScannerConfig::default()
+        })
+    }
+
+    #[tokio::test]
+    async fn pick_reachable_addr_falls_back_after_refused_first_candidate() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let reachable = listener.local_addr().unwrap();
+
+        let closed_listener = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let refused = closed_listener.local_addr().unwrap();
+        drop(closed_listener);
+
+        let accept_once = tokio::spawn(async move {
+            let _ = listener.accept().await;
+        });
+
+        let selected = fast_scanner()
+            .pick_reachable_addr(&[refused, reachable])
+            .await
+            .unwrap();
+
+        assert_eq!(selected, reachable);
+        accept_once.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn pick_reachable_addr_reports_all_failed_candidates() {
+        let closed_listener = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let refused = closed_listener.local_addr().unwrap();
+        drop(closed_listener);
+
+        let scanner = fast_scanner();
+        let errors = scanner.pick_reachable_addr(&[refused]).await.unwrap_err();
+
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].category, "connection_refused");
+    }
+
+    #[tokio::test]
+    async fn pick_reachable_addr_can_select_ipv4_after_ipv6_failure() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let reachable = listener.local_addr().unwrap();
+        let unreachable_v6 = SocketAddr::new(IpAddr::from([0x2001, 0xdb8, 0, 0, 0, 0, 0, 1]), 443);
+
+        let accept_once = tokio::spawn(async move {
+            let _ = listener.accept().await;
+        });
+
+        let selected = fast_scanner()
+            .pick_reachable_addr(&[unreachable_v6, reachable])
+            .await
+            .unwrap();
+
+        assert_eq!(selected, reachable);
+        accept_once.await.unwrap();
     }
 }
