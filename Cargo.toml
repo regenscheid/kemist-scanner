@@ -1,6 +1,6 @@
 [package]
 name = "kemist"
-version = "0.5.0"
+version = "0.5.1"
 edition = "2021"
 authors = ["kemist contributors"]
 description = "TLS + PQC observation scanner: records what servers support, emits structured JSON"

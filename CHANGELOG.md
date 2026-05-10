@@ -8,6 +8,17 @@ numbers follow [semver](https://semver.org/).
 
 (no changes yet)
 
+## [0.5.1] — 2026-05-10
+
+### Fixed
+
+- **Dual-stack address selection.** Kemist now resolves all A/AAAA
+  candidates and preflights TCP connectivity before running the full
+  probe suite, so an unreachable IPv6 route no longer prevents fallback
+  to a reachable IPv4 address. If every candidate fails, kemist emits one
+  preflight failure record instead of repeating the same network error
+  across every cipher/version probe.
+
 ## [0.5.0] — 2026-05-09
 
 Schema v2.1. Additive release with broader TLS evidence capture,

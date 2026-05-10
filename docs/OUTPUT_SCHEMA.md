@@ -139,6 +139,14 @@ against what the scanner build was actually able to probe.
 `sni_sent` is what kemist put in the SNI extension — can differ from
 `host` when a `#sni=` override is used in the target.
 
+For successful scans, `resolved_ip` is the address selected for probing
+after DNS resolution and TCP-connect preflight. On dual-stack hosts it
+may be IPv4 or IPv6 depending on which candidate is reachable first
+under kemist's address selection policy; it is not merely the first
+address returned by DNS. If every candidate fails preflight,
+`resolved_ip` is the first resolved candidate retained for failure
+context.
+
 ### `tls.versions_offered`
 One `{offered, method, reason?}` entry per version.
 
