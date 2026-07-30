@@ -166,11 +166,16 @@ fn classify_probe_outcome(
     match outcome {
         // RFC 7507-compliant enforcement: server detected the SCSV in a
         // downgraded handshake and sent the mandated alert.
+        // Reason leads with the outcome, not the alert name: this is the
+        // clean pass, and `inappropriate_fallback` is the RFC's name for
+        // alert 86 — as the leading token it reads like a complaint about
+        // the server. Mirrors the `rejected_via_non_mandated_alert:` arm
+        // below so the two enforcement paths are greppable as a pair.
         ProbeOutcome::Alert(cat) if cat == "tls_alert_inappropriate_fallback" => {
             FallbackScsvResult {
                 enforced: Some(true),
                 reason: format!(
-                    "inappropriate_fallback_alert_at_{}_with_server_max_{}",
+                    "rejected_via_mandated_alert:inappropriate_fallback_at_{}_with_server_max_{}",
                     version_label(downgrade_target),
                     version_label(server_max)
                 ),

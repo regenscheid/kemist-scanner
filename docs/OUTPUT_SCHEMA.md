@@ -78,6 +78,50 @@ Some sections use a per-subject field name instead of the generic
 `supported`, `cipher_suites[].` uses `supported`. The contract is the
 same; the field name is load-bearing for readability.
 
+### Polarity is per-field, never uniform
+
+`value: true` means "the named condition was observed", **not** "good".
+For most fields the two coincide, but for a substantial minority `true`
+is the worse posture. A renderer that maps `true → green / "Supported"`
+and `false → red / "Rejected"` globally will mislabel every field below,
+turning the secure outcome into a red flag on essentially every host:
+
+| Field | `true` means |
+|---|---|
+| `tls.renegotiation_behavior.client_initiated.accepted` | server allowed client-initiated reneg — the **worse** posture |
+| `tls.renegotiation_behavior.server_initiated.observed` | server initiated reneg — the **worse** posture |
+| `tls.behavioral_probes.heartbeat_echoes_oversized_payload` | Heartbleed-style overread |
+| `tls.behavioral_probes.crime_vulnerable` | compression negotiated |
+| `tls.behavioral_probes.grease_echoed` | server echoed GREASE (non-conformant per RFC 8701) |
+| `tls.behavioral_probes.ephemeral_key_reuse.*_reused_across_connections` | ephemeral key reused |
+| `tls.extensions.truncated_hmac` | deprecated extension negotiated |
+| `tls.extensions.heartbeat_present` | heartbeat extension present |
+
+Kemist does not encode this distinction in the output — doing so would
+be a compliance verdict, which the scanner never emits. Consumers own
+the polarity table.
+
+The reference implementation is [kemist-audit](https://github.com/regenscheid/kemist-audit),
+where each profile rule states the desired state in its `title` and names
+the passing value in its `condition`, so polarity and severity are
+properties of the *rule* rather than of the observation:
+
+```yaml
+- id: tls-prohibit-ssl3
+  title: "SSL 3.0 is not offered"      # desired state
+  severity: critical                    # severity belongs to the rule
+  condition:
+    any:
+      - equals: { path: /tls/versions_offered/ssl3/offered, value: false }
+```
+
+Consumers that render observations directly (dashboards, reports) need
+the same per-field decision, made in the presentation layer.
+
+Note the corollary for `reason`: it is a diagnostic string, **not** a
+severity signal. Affirmative and negative observations alike carry one,
+so "has a `reason`" must never be read as "has a finding".
+
 ---
 
 ## Top-level fields

@@ -8,6 +8,41 @@ numbers follow [semver](https://semver.org/).
 
 (no changes yet)
 
+## [0.5.2] — 2026-07-29
+
+### Changed
+
+- **Renegotiation and downgrade `reason` strings now state the observed
+  outcome.** Both probes reported results in the probe's own voice
+  ("here is why I did not get what I went looking for"), which reads as
+  a finding on outcomes that are in fact the compliant ones. Reason
+  wording is a patch-level change per the stability policy; no `value`,
+  `method`, or field shape changed.
+
+  | Field | Before | After |
+  |---|---|---|
+  | `renegotiation_behavior.client_initiated.accepted` | `tls_alert_no_renegotiation: reneg handshake: error:0A00044C:SSL routines:ssl3_read_bytes:…rec_layer_s3.c:918:…` | `server_sent_no_renegotiation_alert` |
+  | `renegotiation_behavior.server_initiated.observed` | `connection_closed_without_server_renegotiation` | `server_did_not_renegotiate_before_close` |
+  | `renegotiation_behavior.server_initiated.observed` | `passive_wait_timeout` | `server_did_not_renegotiate_within_wait_window` |
+  | `downgrade_signaling.fallback_scsv_enforced` | `inappropriate_fallback_alert_at_…` | `rejected_via_mandated_alert:inappropriate_fallback_at_…` |
+
+  The renegotiation rejection reason previously embedded OpenSSL's raw
+  error text on a definitive `method: "probe"` verdict, including a
+  build-specific `ssl/record/rec_layer_s3.c:NNN` source path that shifts
+  between OpenSSL releases — breaking any consumer that groups or dedupes
+  by reason string. Raw context is now retained only on the inconclusive
+  `error` branch, where triage needs it. The SCSV reason leads with the
+  outcome, mirroring its existing `rejected_via_non_mandated_alert:`
+  sibling; both enforcement paths are now greppable as a pair.
+
+### Documentation
+
+- **`OUTPUT_SCHEMA.md`: field polarity is per-field, never uniform.** New
+  section listing the eight observations where `value: true` is the worse
+  posture, and stating that `reason` is a diagnostic string rather than a
+  severity signal. Consumers that map `true → good` globally mislabel the
+  secure outcome on nearly every host.
+
 ## [0.5.1] — 2026-05-10
 
 ### Fixed

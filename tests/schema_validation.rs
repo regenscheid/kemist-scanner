@@ -487,7 +487,9 @@ fn fully_populated_openssl_observations_match_current_schema() {
 
     let fallback_scsv = FallbackScsvResult {
         enforced: Some(true),
-        reason: "inappropriate_fallback_alert_at_tls1_2_with_server_max_tls1_3".to_string(),
+        reason:
+            "rejected_via_mandated_alert:inappropriate_fallback_at_tls1_2_with_server_max_tls1_3"
+                .to_string(),
     };
 
     let renegotiation = RenegotiationObservation {
@@ -495,7 +497,9 @@ fn fully_populated_openssl_observations_match_current_schema() {
         client_initiated_verdict: RenegotiationVerdict::ClientInitiatedRejected,
         reason: Some("tls_alert_no_renegotiation".to_string()),
         server_initiated_observed: ObservationBool::probe(false),
-        server_initiated_probe_reason: Some("passive_wait_timeout".to_string()),
+        server_initiated_probe_reason: Some(
+            "server_did_not_renegotiate_within_wait_window".to_string(),
+        ),
     };
 
     let client_auth = ClientAuthRequest {
@@ -808,7 +812,7 @@ fn fully_populated_openssl_observations_match_current_schema() {
         reneg
             .pointer("/server_initiated/observed/reason")
             .and_then(|v| v.as_str()),
-        Some("passive_wait_timeout")
+        Some("server_did_not_renegotiate_within_wait_window")
     );
     assert_eq!(
         reneg
@@ -820,7 +824,7 @@ fn fully_populated_openssl_observations_match_current_schema() {
         reneg
             .get("server_initiated_probe_reason")
             .and_then(|v| v.as_str()),
-        Some("passive_wait_timeout")
+        Some("server_did_not_renegotiate_within_wait_window")
     );
     let client_auth = tls.get("client_auth_request").unwrap();
     assert_eq!(

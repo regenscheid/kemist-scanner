@@ -213,13 +213,20 @@ fn probe_client_initiated_blocking(
         Err(e) => {
             let se = alerts::classify_openssl_error("reneg handshake", &e);
             let verdict = classify_reneg_error(&se.category);
-            // Preserve context — the verdict is already definitive, but
-            // the reason carries diagnostic detail (e.g. the specific
-            // alert bytes or the "connection reset by peer" message).
+            // A classified rejection is already definitive, so the reason
+            // states what the server did. Raw OpenSSL context is kept only
+            // for the inconclusive `Error` branch, where triage needs it:
+            // it embeds a build-specific `ssl/record/rec_layer_s3.c:NNN`
+            // path that shifts between OpenSSL releases, so it must never
+            // become the stable text on a routine `probe` verdict.
+            let reason = match &verdict {
+                RenegotiationVerdict::Error(_) => format!("{}: {}", se.category, se.context),
+                _ => rejection_reason(&se.category),
+            };
             RenegotiationObservation {
                 secure_renegotiation_advertised: None,
                 client_initiated_verdict: verdict,
-                reason: Some(format!("{}: {}", se.category, se.context)),
+                reason: Some(reason),
                 server_initiated_observed: ObservationBool::not_probed("client_probe_returned"),
                 server_initiated_probe_reason: Some("client_probe_returned".to_string()),
             }
@@ -338,7 +345,7 @@ fn probe_server_initiated_blocking(
             Ok(0) => {
                 return ServerInitiatedObservation {
                     observed: ObservationBool::probe(false),
-                    reason: Some("connection_closed_without_server_renegotiation".to_string()),
+                    reason: Some("server_did_not_renegotiate_before_close".to_string()),
                 };
             }
             Ok(_) => {
@@ -352,7 +359,7 @@ fn probe_server_initiated_blocking(
             Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
                 return ServerInitiatedObservation {
                     observed: ObservationBool::probe(false),
-                    reason: Some("passive_wait_timeout".to_string()),
+                    reason: Some("server_did_not_renegotiate_within_wait_window".to_string()),
                 };
             }
             Err(e) => {
@@ -409,6 +416,22 @@ fn classify_reneg_error(category: &str) -> RenegotiationVerdict {
     }
 }
 
+/// Outcome-voice reason for a definitive rejection.
+///
+/// `rejected` is the compliant, expected result here, so the reason names
+/// what the server did rather than what the probe failed to get. Matches
+/// the `server_<verb>` convention used by `server_did_not_select_any_alpn`
+/// and `server_does_not_honor_supported_groups`.
+fn rejection_reason(category: &str) -> String {
+    match category {
+        "tls_alert_no_renegotiation" => "server_sent_no_renegotiation_alert",
+        "tls_alert_handshake_failure" => "server_sent_handshake_failure_alert",
+        "connection_refused" => "server_closed_connection_on_renegotiation",
+        other => other,
+    }
+    .to_string()
+}
+
 fn error_observation(reason: String) -> RenegotiationObservation {
     RenegotiationObservation {
         secure_renegotiation_advertised: None,
@@ -463,6 +486,41 @@ mod tests {
         match v {
             RenegotiationVerdict::Error(cat) => assert_eq!(cat, "tls_alert_decode_error"),
             other => panic!("expected Error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejection_reason_states_what_the_server_did() {
+        assert_eq!(
+            rejection_reason("tls_alert_no_renegotiation"),
+            "server_sent_no_renegotiation_alert"
+        );
+        assert_eq!(
+            rejection_reason("tls_alert_handshake_failure"),
+            "server_sent_handshake_failure_alert"
+        );
+        assert_eq!(
+            rejection_reason("connection_refused"),
+            "server_closed_connection_on_renegotiation"
+        );
+    }
+
+    #[test]
+    fn rejection_reason_never_leaks_raw_openssl_context() {
+        // Regression guard: the reason on a definitive `probe` verdict must
+        // not carry OpenSSL's error text. It embeds a build-specific source
+        // path (`ssl/record/rec_layer_s3.c:918`) that moves between releases
+        // and reads like a scanner failure on an outcome that is in fact the
+        // compliant one.
+        for category in [
+            "tls_alert_no_renegotiation",
+            "tls_alert_handshake_failure",
+            "connection_refused",
+        ] {
+            let reason = rejection_reason(category);
+            assert!(!reason.contains("error:"), "leaked error code: {reason}");
+            assert!(!reason.contains(".c:"), "leaked source path: {reason}");
+            assert!(!reason.contains("SSL routines"), "leaked stack: {reason}");
         }
     }
 
